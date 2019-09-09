@@ -716,8 +716,8 @@ fn include(input: Span) -> IResult<Span, Include> {
         any_uri_literal,
         opt(map(tuple((space_comment1, inherit)), |(_, v)| v )),
         opt(map(
-            tuple((space_comment0, tag("{"), many0(include_content), tag("}"))),
-            |(_, _, inc, _)| inc,
+            tuple((space_comment0, tag("{"), space_comment0, separated_list(space_comment1, include_content), space_comment0, tag("}"))),
+            |(_, _, _, inc, _, _)| inc,
         )),
     ));
 
@@ -990,6 +990,30 @@ mod test {
                 NcName("a".to_string()),
                 NcName("b".to_string()),
             )),
+        )
+    }
+
+    #[test]
+    fn test_include() {
+        ck(
+            include,
+            "include \"foo.rnc\" { a = b  c=d }",
+            Include(
+                Literal(vec![LiteralSegment { body: "foo.rnc".to_string() }]),
+                None,
+                Some(vec![
+                    IncludeContent::Define(Define(
+                        Identifier("a".to_string()),
+                        AssignMethod::Assign,
+                        Pattern::Identifier(Identifier("b".to_string()))
+                    )),
+                    IncludeContent::Define(Define(
+                        Identifier("c".to_string()),
+                        AssignMethod::Assign,
+                        Pattern::Identifier(Identifier("d".to_string()))
+                    )),
+                ])
+            )
         )
     }
 }

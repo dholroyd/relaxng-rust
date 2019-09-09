@@ -432,7 +432,7 @@ fn grammar_pattern(input: Span) -> IResult<Span, GrammarPattern> {
         space_comment0,
         tag("{"),
         space_comment0,
-        many0(grammar_content),
+        separated_list(space_comment1, grammar_content),
         space_comment0,
         tag("}"),
     ));
@@ -464,7 +464,7 @@ fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
     let params = tuple((
         tag("{"),
         space_comment0,
-        many0(param),
+        separated_list(space_comment1, param),
         space_comment0,
         tag("}"),
     ));
@@ -698,7 +698,7 @@ fn div_grammar_content(input: Span) -> IResult<Span, Vec<GrammarContent>> {
         space_comment0,
         tag("{"),
         space_comment0,
-        many0(grammar_content),
+        separated_list(space_comment1, grammar_content),
         space_comment0,
         tag("}"),
     ));
@@ -765,7 +765,7 @@ fn div_include_content(input: Span) -> IResult<Span, Vec<IncludeContent>> {
         space_comment0,
         tag("{"),
         space_comment0,
-        many0(include_content),
+        separated_list(space_comment1, include_content),
         space_comment0,
         tag("}"),
     ));

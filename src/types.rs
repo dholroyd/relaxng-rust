@@ -188,7 +188,10 @@ pub enum NameClass {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Name(pub String);
+pub enum Name {
+    Identifier(IdentifierOrKeyword),
+    CName(CName)
+}
 #[derive(Debug, PartialEq)]
 pub struct NsName(pub NcName, pub Option<Box<NameClass>>);
 #[derive(Debug, PartialEq)]

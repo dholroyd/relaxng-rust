@@ -541,10 +541,8 @@ fn name_class(input: Span) -> IResult<Span, NameClass> {
 //            | CName
 fn name(input: Span) -> IResult<Span, Name> {
     alt((
-        map(recognize(identifier_or_keyword), |i| {
-            Name(i.fragment.to_string())
-        }),
-        map(recognize(cname), |i| Name(i.fragment.to_string())),
+        map(cname, Name::CName),
+        map(identifier_or_keyword, Name::Identifier),
     ))(input)
 }
 
@@ -979,6 +977,18 @@ mod test {
                 )),
                 None,
                 None,
+            )),
+        )
+    }
+
+    #[test]
+    fn test_it() {
+        ck(
+            name,
+            "a:b",
+            Name::CName(CName(
+                NcName("a".to_string()),
+                NcName("b".to_string()),
             )),
         )
     }

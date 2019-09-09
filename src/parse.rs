@@ -34,7 +34,7 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
     let (input, pattern_or_grammar) = alt((
         map(pattern, PatternOrGrammar::Pattern),
         map(
-            separated_list(space_comment0, grammar_content),
+            separated_list(space_comment1, grammar_content),
             PatternOrGrammar::Grammar,
         ),
     ))(input)?;
@@ -716,16 +716,14 @@ fn include(input: Span) -> IResult<Span, Include> {
         tag("include"),
         space_comment1,
         any_uri_literal,
-        space_comment1,
-        opt(inherit),
-        space_comment0,
+        opt(map(tuple((space_comment1, inherit)), |(_, v)| v )),
         opt(map(
-            tuple((tag("{"), many0(include_content), tag("}"))),
-            |(_, inc, _)| inc,
+            tuple((space_comment0, tag("{"), many0(include_content), tag("}"))),
+            |(_, _, inc, _)| inc,
         )),
     ));
 
-    let parse = map(parse, |(_, _, uri, _, inherit, _, include)| {
+    let parse = map(parse, |(_, _, uri, inherit, include)| {
         Include(uri, inherit, include)
     });
 

@@ -56,7 +56,7 @@ fn decl(input: Span) -> IResult<Span, Decl> {
     alt((
         map(decl_namespace, Decl::Namespace),
         map(decl_default_namespace, Decl::DefaultNamespace),
-        map(decl_datatypes, Decl::Detatypes),
+        map(decl_datatypes, Decl::Datatypes),
     ))(input)
 }
 fn decl_namespace(input: Span) -> IResult<Span, NamespaceDeclaration> {

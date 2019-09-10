@@ -8,7 +8,7 @@ pub struct Schema {
 pub enum Decl {
     Namespace(NamespaceDeclaration),
     DefaultNamespace(DefaultNamespaceDeclaration),
-    Detatypes(DatatypesDeclaration),
+    Datatypes(DatatypesDeclaration),
 }
 
 #[derive(Debug, PartialEq)]

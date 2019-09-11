@@ -243,7 +243,7 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
             tag("text"),
             tag("token"),
         )),
-        peek(not(identifier)),
+        peek(not(nc_name_char)),
     ));
 
     let parse = map(parse, |(k, _)| Keyword(k.fragment.to_string()));
@@ -1014,6 +1014,15 @@ mod test {
                     )),
                 ])
             )
+        )
+    }
+
+    #[test]
+    fn pattern_id_keyword_prefix() {
+        ck(
+            pattern,
+            "external-foo",
+            Pattern::Identifier(Identifier("external-foo".to_string())),
         )
     }
 }

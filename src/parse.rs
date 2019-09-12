@@ -462,15 +462,20 @@ fn datatype_value_pattern(input: Span) -> IResult<Span, DatatypeValuePattern> {
 // datatypeName ["{" param* "}"] [exceptPattern]
 fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
     let params = tuple((
+        space_comment0,
         tag("{"),
         space_comment0,
         separated_list(space_comment1, param),
         space_comment0,
         tag("}"),
     ));
-    let params = map(params, |(_, _, p, _, _)| p);
+    let params = map(params, |(_, _, _, p, _, _)| p);
 
-    let parse = tuple((datatype_name, opt(params), opt(except_pattern)));
+    let parse = tuple((
+        datatype_name,
+        opt(params),
+        opt(map(tuple((space_comment0, except_pattern)), |(_, e)| e )),
+    ));
     let parse = map(parse, |(name, params, except)| {
         DatatypeNamePattern(name, params, except.map(Box::new))
     });
@@ -1029,6 +1034,46 @@ mod test {
             pattern,
             "external-foo",
             Pattern::Identifier(Identifier("external-foo".to_string())),
+        )
+    }
+
+    #[test]
+    fn test_datatypename_pattern_params() {
+        ck(
+            pattern,
+            "ns:foo { pattern = \"bar\" }",
+            Pattern::DatatypeName(DatatypeNamePattern(
+                DatatypeName::Name(CName(NcName("ns".to_string()), NcName("foo".to_string()))),
+                Some(vec![
+                    Param(
+                        IdentifierOrKeyword::Identifier(Identifier("pattern".to_string())),
+                        Literal(vec![LiteralSegment { body: "bar".to_string() }]),
+                    ),
+                ]),
+                None,
+            ))
+        )
+    }
+
+    #[test]
+    fn test_datatypename_pattern() {
+        ck(
+            top_level,
+            "integer.datatype = xsd:integer",
+            Schema {
+                decls: vec![],
+                pattern_or_grammar: PatternOrGrammar::Grammar(vec![
+                    GrammarContent::Define(Define(
+                        Identifier("integer.datatype".to_string()),
+                        AssignMethod::Assign,
+                        Pattern::DatatypeName(DatatypeNamePattern(
+                            DatatypeName::Name(CName(NcName("xsd".to_string()), NcName("integer".to_string()))),
+                            None,
+                            None,
+                        )),
+                    ))
+                ])
+            }
         )
     }
 

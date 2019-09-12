@@ -798,8 +798,8 @@ mod test {
     {
         let (remaining, result) =
             f(LocatedSpan::new(input)).expect(&format!("failed to parse {:#?}", input));
-        assert_eq!(remaining.fragment, "");
         assert_eq!(result, expected);
+        assert_eq!(remaining.fragment, "");
     }
 
     #[test]

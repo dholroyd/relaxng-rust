@@ -947,8 +947,14 @@ mod test {
 
     #[test]
     fn alt_nc() {
-        let data = "a|b";
-        println!("{:#?}", name_class(LocatedSpan::new(data)));
+        ck(
+            name_class,
+            "a|b",
+            NameClass::Alt(AltName(
+                Box::new(NameClass::Name(Name::Identifier(IdentifierOrKeyword::Identifier(Identifier("a".to_string()))))),
+                Box::new(NameClass::Name(Name::Identifier(IdentifierOrKeyword::Identifier(Identifier("b".to_string()))))),
+            )),
+        )
     }
 
     #[test]

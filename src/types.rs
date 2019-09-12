@@ -163,6 +163,16 @@ pub enum NamespaceUriLiteral {
 
 #[derive(Debug, PartialEq)]
 pub struct Literal(pub Vec<LiteralSegment>);
+impl Literal {
+    pub fn as_string_value(&self) -> String {
+        // TODO any unescaping etc reqiored?
+        let mut val = String::new();
+        for s in self.0.iter() {
+            val.push_str(&s.body);
+        }
+        val
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub struct LiteralSegment {

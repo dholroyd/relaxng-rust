@@ -30,13 +30,13 @@ pub fn schema(input: Span) -> Result<Schema, nom::Err<(Span, nom::error::ErrorKi
 // topLevel	  ::=  	decl* (pattern | grammarContent*)
 fn top_level(input: Span) -> IResult<Span, Schema> {
     let (input, decls) = separated_list(space_comment1, decl)(input)?;
-    let (input, _) = space_comment1(input)?;
+    let (input, _) = space_comment0(input)?; // TODO: should be space_comment1, and only required if there are decls
     let (input, pattern_or_grammar) = alt((
-        map(pattern, PatternOrGrammar::Pattern),
         map(
             separated_list(space_comment1, grammar_content),
             PatternOrGrammar::Grammar,
         ),
+        map(pattern, PatternOrGrammar::Pattern),
     ))(input)?;
     IResult::Ok((
         input,
@@ -1023,6 +1023,32 @@ mod test {
             pattern,
             "external-foo",
             Pattern::Identifier(Identifier("external-foo".to_string())),
+        )
+    }
+
+    #[test]
+    fn test_grammar_content() {
+        // we need the parser to recognise this with the 'define' production, and not get confused
+        // into thinking it's a 'pattern' followed by useless trailing "= xsd:integer"
+        ck(
+            top_level,
+            "integer.datatype = xsd:integer",
+            Schema {
+                decls: vec![],
+                pattern_or_grammar: PatternOrGrammar::Grammar(
+                    vec![
+                        GrammarContent::Define(Define(
+                            Identifier("integer.datatype".to_string()),
+                            AssignMethod::Assign,
+                            Pattern::DatatypeName(DatatypeNamePattern(
+                                DatatypeName::Name(CName(NcName("xsd".to_string()), NcName("integer".to_string()))),
+                                None,
+                                None
+                            ))
+                        ))
+                    ]
+                ),
+            }
         )
     }
 }

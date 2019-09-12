@@ -1,10 +1,10 @@
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Schema {
     pub decls: Vec<Decl>,
     pub pattern_or_grammar: PatternOrGrammar,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Decl {
     Namespace(NamespaceDeclaration),
     DefaultNamespace(DefaultNamespaceDeclaration),
@@ -23,7 +23,7 @@ pub struct DefaultNamespaceDeclaration {
     pub uri: NamespaceUriLiteral,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct DatatypesDeclaration {
     pub prefix: String,
     pub uri: Literal,
@@ -97,7 +97,7 @@ pub enum DatatypeName {
 #[derive(Debug, PartialEq)]
 pub struct Param(pub IdentifierOrKeyword, pub Literal);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum PatternOrGrammar {
     Pattern(Pattern),
     Grammar(Vec<GrammarContent>),

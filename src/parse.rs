@@ -29,22 +29,17 @@ pub fn schema(input: Span) -> Result<Schema, nom::Err<(Span, nom::error::ErrorKi
 
 // topLevel	  ::=  	decl* (pattern | grammarContent*)
 fn top_level(input: Span) -> IResult<Span, Schema> {
-    let (input, decls) = separated_list(space_comment1, decl)(input)?;
-    let (input, _) = space_comment0(input)?; // TODO: should be space_comment1, and only required if there are decls
-    let (input, pattern_or_grammar) = alt((
-        map(
-            separated_list(space_comment1, grammar_content),
-            PatternOrGrammar::Grammar,
-        ),
-        map(pattern, PatternOrGrammar::Pattern),
-    ))(input)?;
-    IResult::Ok((
-        input,
-        Schema {
-            decls,
-            pattern_or_grammar,
-        },
-    ))
+    let parse = tuple((
+        separated_list(space_comment1, decl),
+        space_comment0, // TODO: should be space_comment1, and only required if there are decls
+        alt((
+            map(separated_list(space_comment1, grammar_content), PatternOrGrammar::Grammar),
+            map(pattern, PatternOrGrammar::Pattern),
+        )),
+    ));
+    let parse = map(parse, |(decls, _, pattern_or_grammar)| Schema { decls, pattern_or_grammar, });
+
+    parse(input)
 }
 
 /// ```plain

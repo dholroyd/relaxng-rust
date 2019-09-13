@@ -447,9 +447,13 @@ fn group_pattern(input: Span) -> IResult<Span, Pattern> {
 
 // [datatypeName] datatypeValue
 fn datatype_value_pattern(input: Span) -> IResult<Span, DatatypeValuePattern> {
-    let parse = tuple((opt(datatype_name), datatype_value));
+    let parse = tuple((
+        opt(datatype_name),
+        space_comment0,
+        datatype_value
+    ));
 
-    let parse = map(parse, |(name, value)| DatatypeValuePattern(name, value));
+    let parse = map(parse, |(name, _, value)| DatatypeValuePattern(name, value));
 
     parse(input)
 }
@@ -1095,6 +1099,18 @@ mod test {
                     ]
                 ),
             }
+        )
+    }
+
+    #[test]
+    fn datatype_value() {
+        ck(
+            pattern,
+            "string \"preserve\"",
+            Pattern::DatatypeValue(DatatypeValuePattern(
+                Some(DatatypeName::String),
+                Literal(vec![LiteralSegment { body: "preserve".to_string() }])
+            )),
         )
     }
 }

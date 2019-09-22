@@ -44,7 +44,6 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
     parse(input)
 }
 
-// plain
 // decl      ::=  	"namespace" identifierOrKeyword "=" namespaceURILiteral
 //                 | "default" "namespace" [identifierOrKeyword] "=" namespaceURILiteral
 //                 | "datatypes" identifierOrKeyword "=" literal
@@ -112,7 +111,6 @@ fn decl_datatypes(input: Span) -> IResult<Span, DatatypesDeclaration> {
     ))
 }
 
-// plain
 // identifierOrKeyword	  ::=  	identifier
 //                             | keyword
 fn identifier_or_keyword(input: Span) -> IResult<Span, IdentifierOrKeyword> {
@@ -122,7 +120,6 @@ fn identifier_or_keyword(input: Span) -> IResult<Span, IdentifierOrKeyword> {
     ))(input)
 }
 
-// plain
 // namespaceURILiteral	  ::=  	literal
 //                             | "inherit"
 fn namespace_uri_literal(input: Span) -> IResult<Span, NamespaceUriLiteral> {
@@ -132,13 +129,11 @@ fn namespace_uri_literal(input: Span) -> IResult<Span, NamespaceUriLiteral> {
     ))(input)
 }
 
-// plain
 // literal	  ::=  	literalSegment ("~" literalSegment)+
 fn literal(input: Span) -> IResult<Span, Literal> {
     separated_nonempty_list(tag("~"), literal_segment)(input).map(|(input, v)| (input, Literal(v)))
 }
 
-// plain
 // literalSegment	  ::=  	'"' (Char - ('"' | newline))* '"'
 //                       | "'" (Char - ("'" | newline))* "'"
 //                       | '"""' (['"'] ['"'] (Char - '"'))* '"""'
@@ -163,7 +158,6 @@ fn span(start: LocatedSpan<&str>, end: LocatedSpan<&str>) -> Range<usize> {
     Range { start: start.offset, end: end.offset }
 }
 
-// plain
 // identifier	  ::=  	(NCName - keyword)
 //                   | quotedIdentifier
 pub fn identifier(input: Span) -> IResult<Span, Identifier> {

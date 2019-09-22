@@ -42,11 +42,10 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
     parse(input)
 }
 
-/// ```plain
-/// decl      ::=  	"namespace" identifierOrKeyword "=" namespaceURILiteral
-///                 | "default" "namespace" [identifierOrKeyword] "=" namespaceURILiteral
-///                 | "datatypes" identifierOrKeyword "=" literal
-/// ```
+// plain
+// decl      ::=  	"namespace" identifierOrKeyword "=" namespaceURILiteral
+//                 | "default" "namespace" [identifierOrKeyword] "=" namespaceURILiteral
+//                 | "datatypes" identifierOrKeyword "=" literal
 fn decl(input: Span) -> IResult<Span, Decl> {
     alt((
         map(decl_namespace, Decl::Namespace),
@@ -111,10 +110,9 @@ fn decl_datatypes(input: Span) -> IResult<Span, DatatypesDeclaration> {
     ))
 }
 
-/// ```plain
-/// identifierOrKeyword	  ::=  	identifier
-///                             | keyword
-/// ```
+// plain
+// identifierOrKeyword	  ::=  	identifier
+//                             | keyword
 fn identifier_or_keyword(input: Span) -> IResult<Span, IdentifierOrKeyword> {
     alt((
         map(identifier, IdentifierOrKeyword::Identifier),
@@ -122,10 +120,9 @@ fn identifier_or_keyword(input: Span) -> IResult<Span, IdentifierOrKeyword> {
     ))(input)
 }
 
-/// ```plain
-/// namespaceURILiteral	  ::=  	literal
-///                             | "inherit"
-/// ```
+// plain
+// namespaceURILiteral	  ::=  	literal
+//                             | "inherit"
 fn namespace_uri_literal(input: Span) -> IResult<Span, NamespaceUriLiteral> {
     alt((
         map(tag("inherit"), |_| NamespaceUriLiteral::Inherit),
@@ -133,19 +130,17 @@ fn namespace_uri_literal(input: Span) -> IResult<Span, NamespaceUriLiteral> {
     ))(input)
 }
 
-/// ```plain
-/// literal	  ::=  	literalSegment ("~" literalSegment)+
-/// ```
+// plain
+// literal	  ::=  	literalSegment ("~" literalSegment)+
 fn literal(input: Span) -> IResult<Span, Literal> {
     separated_nonempty_list(tag("~"), literal_segment)(input).map(|(input, v)| (input, Literal(v)))
 }
 
-/// ```plain
-/// literalSegment	  ::=  	'"' (Char - ('"' | newline))* '"'
-///                       | "'" (Char - ("'" | newline))* "'"
-///                       | '"""' (['"'] ['"'] (Char - '"'))* '"""'
-///                       | "'''" (["'"] ["'"] (Char - "'"))* "'''"
-/// ```
+// plain
+// literalSegment	  ::=  	'"' (Char - ('"' | newline))* '"'
+//                       | "'" (Char - ("'" | newline))* "'"
+//                       | '"""' (['"'] ['"'] (Char - '"'))* '"""'
+//                       | "'''" (["'"] ["'"] (Char - "'"))* "'''"
 fn literal_segment(input: Span) -> IResult<Span, LiteralSegment> {
     let (input, body) = alt((
         delimited(tag("\"\"\""), take_until("\"\"\""), tag("\"\"\"")),
@@ -162,10 +157,9 @@ fn literal_segment(input: Span) -> IResult<Span, LiteralSegment> {
     ))
 }
 
-/// ```plain
-/// identifier	  ::=  	(NCName - keyword)
-///                   | quotedIdentifier
-/// ```
+// plain
+// identifier	  ::=  	(NCName - keyword)
+//                   | quotedIdentifier
 pub fn identifier(input: Span) -> IResult<Span, Identifier> {
     let res = alt((
         recognize(tuple((tag("\\"), keyword))),

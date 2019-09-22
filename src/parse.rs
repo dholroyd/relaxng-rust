@@ -12,8 +12,8 @@ use nom::{
     sequence::{delimited, tuple},
     AsChar, IResult, InputIter, Slice,
 };
-use nom_locate::LocatedSpan;
-use std::ops::{RangeBounds, RangeFrom};
+use nom_locate::{LocatedSpan, position};
+use std::ops::{RangeBounds, RangeFrom, Range};
 
 type Span<'a> = LocatedSpan<&'a str>;
 
@@ -159,6 +159,10 @@ fn literal_segment(input: Span) -> IResult<Span, LiteralSegment> {
     ))
 }
 
+fn span(start: LocatedSpan<&str>, end: LocatedSpan<&str>) -> Range<usize> {
+    Range { start: start.offset, end: end.offset }
+}
+
 // plain
 // identifier	  ::=  	(NCName - keyword)
 //                   | quotedIdentifier
@@ -168,16 +172,21 @@ pub fn identifier(input: Span) -> IResult<Span, Identifier> {
         recognize(tuple((not(peek(keyword)), nc_name))),
     ))(input);
 
-    res.map(|(input, v)| (input, Identifier(v.to_string())))
+    res.map(|(input, v)| (input, Identifier(span(v, input), v.to_string())))
 }
 
 fn nc_name(input: Span) -> IResult<Span, NcName> {
-    let parse = recognize(tuple((nc_name_start_char, many0(nc_name_char))));
+    let parse = tuple((
+        position,
+        recognize(tuple((nc_name_start_char, many0(nc_name_char)))),
+        position,
+    ));
 
-    let parse = map(parse, |v| NcName(v.fragment.to_string()));
+    let parse = map(parse, |(start, v, end)| NcName(span(start, end), v.fragment.to_string()));
 
     parse(input)
 }
+
 fn nc_name_start_char(input: Span) -> IResult<Span, char> {
     // per https://www.w3.org/TR/REC-xml/#NT-NameStartChar -- but without ':'
     alt((
@@ -652,19 +661,22 @@ fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
 // start	  ::=  	"start" assignMethod pattern
 fn start(input: Span) -> IResult<Span, Define> {
     let parse = tuple((
+        position,
         tag("start"),
         space_comment0,
         assign_method,
         space_comment0,
         pattern,
+        position,
     ));
 
     // we just produce another 'Define' named "start", rather than using a dedicated 'Start' type,
     // so as to avoid duplication of code handling 'start' definitions and other definitions
 
-    let parse = map(parse, |(_, _, assign_method, _, pattern)| {
+    let parse = map(parse, |(start, start_tag, _, assign_method, _, pattern, end)| {
         Define(
-            Identifier("start".to_string()),
+            span(start, end),
+            Identifier(span(start_tag, start_tag), "start".to_string()),
             assign_method,
             pattern,
         )
@@ -676,15 +688,17 @@ fn start(input: Span) -> IResult<Span, Define> {
 // define	  ::=  	identifier assignMethod pattern
 fn define(input: Span) -> IResult<Span, Define> {
     let parse = tuple((
+        position,
         identifier,
         space_comment0,
         assign_method,
         space_comment0,
         pattern,
+        position,
     ));
 
-    let parse = map(parse, |(identifier, _, assign_method, _, pattern)| {
-        Define(identifier, assign_method, pattern)
+    let parse = map(parse, |(start, identifier, _, assign_method, _, pattern, end)| {
+        Define(span(start, end), identifier, assign_method, pattern)
     });
 
     parse(input)
@@ -816,9 +830,10 @@ mod test {
             start,
             "start = pattern",
             Define(
-                Identifier("start".to_string()),
+                0..15,
+                Identifier(0..0, "start".to_string()),
                 AssignMethod::Assign,
-                Pattern::Identifier(Identifier("pattern".to_string())),
+                Pattern::Identifier(Identifier(8..15, "pattern".to_string())),
             ),
         )
     }
@@ -910,10 +925,10 @@ mod test {
             pattern,
             "a,b , c",
             Pattern::ListPair(
-                Box::new(Pattern::Identifier(Identifier("a".to_string()))),
+                Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string()))),
                 Box::new(Pattern::ListPair(
-                    Box::new(Pattern::Identifier(Identifier("b".to_string()))),
-                    Box::new(Pattern::Identifier(Identifier("c".to_string()))),
+                    Box::new(Pattern::Identifier(Identifier(2..3, "b".to_string()))),
+                    Box::new(Pattern::Identifier(Identifier(6..7, "c".to_string()))),
                 )),
             ),
         )
@@ -924,7 +939,7 @@ mod test {
         ck(
             pattern,
             "a?",
-            Pattern::Optional(Box::new(Pattern::Identifier(Identifier("a".to_string())))),
+            Pattern::Optional(Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string())))),
         )
     }
 
@@ -947,9 +962,9 @@ mod test {
             "a*, b",
             Pattern::ListPair(
                 Box::new(Pattern::ZeroOrMore(Box::new(Pattern::Identifier(
-                    Identifier("a".to_string()),
+                    Identifier(0..1, "a".to_string()),
                 )))),
-                Box::new(Pattern::Identifier(Identifier("b".to_string()))),
+                Box::new(Pattern::Identifier(Identifier(4..5, "b".to_string()))),
             ),
         )
     }
@@ -960,8 +975,8 @@ mod test {
             name_class,
             "a|b",
             NameClass::Alt(AltName(
-                Box::new(NameClass::Name(Name::Identifier(IdentifierOrKeyword::Identifier(Identifier("a".to_string()))))),
-                Box::new(NameClass::Name(Name::Identifier(IdentifierOrKeyword::Identifier(Identifier("b".to_string()))))),
+                Box::new(NameClass::Name(Name::Identifier(IdentifierOrKeyword::Identifier(Identifier(0..1, "a".to_string()))))),
+                Box::new(NameClass::Name(Name::Identifier(IdentifierOrKeyword::Identifier(Identifier(2..3, "b".to_string()))))),
             )),
         )
     }
@@ -976,7 +991,7 @@ mod test {
         ck(
             identifier_or_keyword,
             "parents",
-            IdentifierOrKeyword::Identifier(Identifier("parents".to_string())),
+            IdentifierOrKeyword::Identifier(Identifier(0..7, "parents".to_string())),
         );
     }
 
@@ -987,8 +1002,8 @@ mod test {
             "xsd:string",
             Pattern::DatatypeName(DatatypeNamePattern(
                 DatatypeName::Name(CName(
-                    NcName("xsd".to_string()),
-                    NcName("string".to_string()),
+                    NcName(0..3, "xsd".to_string()),
+                    NcName(4..10, "string".to_string()),
                 )),
                 None,
                 None,
@@ -1002,8 +1017,8 @@ mod test {
             name,
             "a:b",
             Name::CName(CName(
-                NcName("a".to_string()),
-                NcName("b".to_string()),
+                NcName(0..1, "a".to_string()),
+                NcName(2..3, "b".to_string()),
             )),
         )
     }
@@ -1018,14 +1033,16 @@ mod test {
                 None,
                 Some(vec![
                     IncludeContent::Define(Define(
-                        Identifier("a".to_string()),
+                        20..25,
+                        Identifier(20..21, "a".to_string()),
                         AssignMethod::Assign,
-                        Pattern::Identifier(Identifier("b".to_string()))
+                        Pattern::Identifier(Identifier(24..25, "b".to_string()))
                     )),
                     IncludeContent::Define(Define(
-                        Identifier("c".to_string()),
+                        27..30,
+                        Identifier(27..28, "c".to_string()),
                         AssignMethod::Assign,
-                        Pattern::Identifier(Identifier("d".to_string()))
+                        Pattern::Identifier(Identifier(29..30, "d".to_string()))
                     )),
                 ])
             )
@@ -1037,7 +1054,7 @@ mod test {
         ck(
             pattern,
             "external-foo",
-            Pattern::Identifier(Identifier("external-foo".to_string())),
+            Pattern::Identifier(Identifier(0..12, "external-foo".to_string())),
         )
     }
 
@@ -1047,10 +1064,10 @@ mod test {
             pattern,
             "ns:foo { pattern = \"bar\" }",
             Pattern::DatatypeName(DatatypeNamePattern(
-                DatatypeName::Name(CName(NcName("ns".to_string()), NcName("foo".to_string()))),
+                DatatypeName::Name(CName(NcName(0..2, "ns".to_string()), NcName(3..6, "foo".to_string()))),
                 Some(vec![
                     Param(
-                        IdentifierOrKeyword::Identifier(Identifier("pattern".to_string())),
+                        IdentifierOrKeyword::Identifier(Identifier(9..16, "pattern".to_string())),
                         Literal(vec![LiteralSegment { body: "bar".to_string() }]),
                     ),
                 ]),
@@ -1068,10 +1085,11 @@ mod test {
                 decls: vec![],
                 pattern_or_grammar: PatternOrGrammar::Grammar(vec![
                     GrammarContent::Define(Define(
-                        Identifier("integer.datatype".to_string()),
+                        0..30,
+                        Identifier(0..16, "integer.datatype".to_string()),
                         AssignMethod::Assign,
                         Pattern::DatatypeName(DatatypeNamePattern(
-                            DatatypeName::Name(CName(NcName("xsd".to_string()), NcName("integer".to_string()))),
+                            DatatypeName::Name(CName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
                             None,
                             None,
                         )),
@@ -1093,10 +1111,11 @@ mod test {
                 pattern_or_grammar: PatternOrGrammar::Grammar(
                     vec![
                         GrammarContent::Define(Define(
-                            Identifier("integer.datatype".to_string()),
+                            0..30,
+                            Identifier(0..16, "integer.datatype".to_string()),
                             AssignMethod::Assign,
                             Pattern::DatatypeName(DatatypeNamePattern(
-                                DatatypeName::Name(CName(NcName("xsd".to_string()), NcName("integer".to_string()))),
+                                DatatypeName::Name(CName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
                                 None,
                                 None
                             ))

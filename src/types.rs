@@ -1,3 +1,7 @@
+use std::ops::Range;
+
+type Span = Range<usize>;
+
 #[derive(Debug, PartialEq)]
 pub struct Schema {
     pub decls: Vec<Decl>,
@@ -118,7 +122,7 @@ pub enum AssignMethod {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Define(pub Identifier, pub AssignMethod, pub Pattern);
+pub struct Define(pub Span, pub Identifier, pub AssignMethod, pub Pattern);
 
 #[derive(Debug, PartialEq)]
 pub struct Include(
@@ -144,7 +148,7 @@ pub enum IdentifierOrKeyword {
 impl ToString for IdentifierOrKeyword {
     fn to_string(&self) -> String {
         match self {
-            IdentifierOrKeyword::Identifier(id) => id.0.clone(),
+            IdentifierOrKeyword::Identifier(id) => id.1.clone(),
             IdentifierOrKeyword::Keyword(k) => k.0.clone(),
         }
     }
@@ -175,13 +179,13 @@ pub struct LiteralSegment {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Identifier(pub String);
+pub struct Identifier(pub Span, pub String);
 
 #[derive(Debug, PartialEq)]
 pub struct Keyword(pub String);
 
 #[derive(Debug, PartialEq)]
-pub struct NcName(pub String);
+pub struct NcName(pub Span, pub String);
 
 #[derive(Debug, PartialEq)]
 pub enum NameClass {

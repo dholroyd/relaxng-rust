@@ -22,6 +22,8 @@ type Span<'a> = LocatedSpan<&'a str>;
 // TODO:
 //  - annotations
 //  - utf8 escape sequences
+//  - check rules are left-factored as required to avoid inefficiently rematching the same sub-rule
+//    in multiple alternatives
 
 pub fn schema(input: Span) -> Result<Schema, nom::Err<(Span, nom::error::ErrorKind)>> {
     all_consuming(tuple((space_comment0, top_level, space_comment0)))(input).map(|(_, (_, r, _))| r)

@@ -105,14 +105,10 @@ pub enum PatternOrGrammar {
 
 #[derive(Debug, PartialEq)]
 pub enum GrammarContent {
-    Start(Start),
     Define(Define),
     Div(Vec<GrammarContent>),
     Include(Include),
 }
-
-#[derive(Debug, PartialEq)]
-pub struct Start(pub AssignMethod, pub Pattern);
 
 #[derive(Debug, PartialEq)]
 pub enum AssignMethod {
@@ -137,7 +133,6 @@ pub struct Inherit(pub IdentifierOrKeyword);
 #[derive(Debug, PartialEq)]
 pub enum IncludeContent {
     Define(Define),
-    Start(Start),
     Div(Vec<IncludeContent>),
 }
 

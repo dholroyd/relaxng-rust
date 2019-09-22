@@ -640,7 +640,7 @@ where
 //                        | "include" anyURILiteral [inherit] ["{" includeContent* "}"]
 fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
     alt((
-        map(start, GrammarContent::Start),
+        map(start, GrammarContent::Define),
         map(define, GrammarContent::Define),
         map(div_grammar_content, GrammarContent::Div),
         map(include, GrammarContent::Include),
@@ -648,7 +648,7 @@ fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
 }
 
 // start	  ::=  	"start" assignMethod pattern
-fn start(input: Span) -> IResult<Span, Start> {
+fn start(input: Span) -> IResult<Span, Define> {
     let parse = tuple((
         tag("start"),
         space_comment0,
@@ -657,8 +657,15 @@ fn start(input: Span) -> IResult<Span, Start> {
         pattern,
     ));
 
+    // we just produce another 'Define' named "start", rather than using a dedicated 'Start' type,
+    // so as to avoid duplication of code handling 'start' definitions and other definitions
+
     let parse = map(parse, |(_, _, assign_method, _, pattern)| {
-        Start(assign_method, pattern)
+        Define(
+            Identifier("start".to_string()),
+            assign_method,
+            pattern,
+        )
     });
 
     parse(input)
@@ -752,7 +759,7 @@ fn inherit(input: Span) -> IResult<Span, Inherit> {
 fn include_content(input: Span) -> IResult<Span, IncludeContent> {
     alt((
         map(define, IncludeContent::Define),
-        map(start, IncludeContent::Start),
+        map(start, IncludeContent::Define),
         map(div_include_content, IncludeContent::Div),
     ))(input)
 }
@@ -806,7 +813,8 @@ mod test {
         ck(
             start,
             "start = pattern",
-            Start(
+            Define(
+                Identifier("start".to_string()),
                 AssignMethod::Assign,
                 Pattern::Identifier(Identifier("pattern".to_string())),
             ),

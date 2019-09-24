@@ -1,0 +1,25 @@
+[package]
+name = "relaxng-model"
+version = "0.1.0"
+authors = ["David Holroyd <dave@badgers-in-foil.co.uk>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+relaxng-compact-syntax = { path = "../relaxng-compact-syntax" }
+nom = "5.0"
+nom_locate = "1.0"
+codemap = "0.1"
+codemap-diagnostic = "0.1"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "bench"
+harness = false
+
+[profile.bench]
+# for profiling,
+debug = true

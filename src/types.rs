@@ -33,12 +33,14 @@ pub struct DatatypesDeclaration {
     pub uri: Literal,
 }
 
+// TODO: ensure all patterns have spans
 #[derive(Debug, PartialEq)]
 pub enum Pattern {
     Element(ElementPattern),
     Attribute(AttributePattern),
     List(ListPattern),
     Mixed(MixedPattern),
+    // TODO: maybe rename this variant 'Ref'
     Identifier(Identifier),
     Parent(Identifier),
     Empty,
@@ -47,6 +49,9 @@ pub enum Pattern {
     External(ExternalPattern),
     Grammar(GrammarPattern),
     Group(Box<Pattern>),
+    // TODO: don't simplify into 'pairs' at this level of representation; have these hold
+    //       Vec<Pattern>, and then simplify into pairs when transforming into relaxng-model form
+    // TODO: ListPart should really be GroupPair to follow spec terminology
     ListPair(Box<Pattern>, Box<Pattern>),
     InterleavePair(Box<Pattern>, Box<Pattern>),
     ChoicePair(Box<Pattern>, Box<Pattern>),
@@ -98,6 +103,7 @@ pub struct DatatypeNamePattern(
 
 #[derive(Debug, PartialEq)]
 pub enum DatatypeName {
+    // TODO: special cases for "string" and "token" maybe not worth the trouble
     String,
     Token,
     Name(CName),
@@ -110,6 +116,8 @@ pub struct Param(
     pub IdentifierOrKeyword,
     pub Literal
 );
+
+// TODO: remove this; Pattern can be a grammar anyway
 #[derive(Debug, PartialEq)]
 pub enum PatternOrGrammar {
     Pattern(Pattern),
@@ -149,6 +157,9 @@ pub enum IncludeContent {
     Div(Vec<IncludeContent>),
 }
 
+// TODO: the spec shows that a keywords may also be used in positon were identifiers are expected,
+//       but in hindsight it is not useful to maintain this destinction here in the data model;
+//       remove this enum and use Identifier alone
 #[derive(Debug, PartialEq)]
 pub enum IdentifierOrKeyword {
     Identifier(Identifier),

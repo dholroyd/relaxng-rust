@@ -537,7 +537,7 @@ fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
     alt((
         map(tag("string"), |_| DatatypeName::String),
         map(tag("token"), |_| DatatypeName::Token),
-        map(cname, DatatypeName::Name),
+        map(cname, DatatypeName::CName),
     ))(input)
 }
 
@@ -582,10 +582,10 @@ fn ns_name_nc(input: Span) -> IResult<Span, NsName> {
     ));
 
     let parse = map(parse, |(name, _, except)| {
-        NsName(
-            name,
-            except.map(|(_, _, _, name_class)| Box::new(name_class)),
-        )
+        NsName {
+            name: NamespaceOrPrefix::Prefix(name),
+            except: except.map(|(_, _, _, name_class)| Box::new(name_class))
+        }
     });
 
     parse(input)
@@ -634,10 +634,10 @@ fn paren_nc(input: Span) -> IResult<Span, ParenName> {
 }
 
 // NCName ":" NCName
-fn cname(input: Span) -> IResult<Span, CName> {
+fn cname(input: Span) -> IResult<Span, QName> {
     let parse = tuple((nc_name, tag(":"), nc_name));
 
-    let parse = map(parse, |(prefix, _, local_name)| CName(prefix, local_name));
+    let parse = map(parse, |(prefix, _, local_name)| QName(prefix, local_name));
 
     parse(input)
 }
@@ -1023,7 +1023,7 @@ mod test {
             pattern,
             "xsd:string",
             Pattern::DatatypeName(DatatypeNamePattern(
-                DatatypeName::Name(CName(
+                DatatypeName::CName(QName(
                     NcName(0..3, "xsd".to_string()),
                     NcName(4..10, "string".to_string()),
                 )),
@@ -1038,7 +1038,7 @@ mod test {
         ck(
             name,
             "a:b",
-            Name::CName(CName(
+            Name::CName(QName(
                 NcName(0..1, "a".to_string()),
                 NcName(2..3, "b".to_string()),
             )),
@@ -1089,7 +1089,7 @@ mod test {
             pattern,
             "ns:foo { pattern = \"bar\" }",
             Pattern::DatatypeName(DatatypeNamePattern(
-                DatatypeName::Name(CName(NcName(0..2, "ns".to_string()), NcName(3..6, "foo".to_string()))),
+                DatatypeName::CName(QName(NcName(0..2, "ns".to_string()), NcName(3..6, "foo".to_string()))),
                 Some(vec![
                     Param(
                         9..24,
@@ -1120,7 +1120,7 @@ mod test {
                             Identifier(0..16, "integer.datatype".to_string()),
                             AssignMethod::Assign,
                             Pattern::DatatypeName(DatatypeNamePattern(
-                                DatatypeName::Name(CName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
+                                DatatypeName::CName(QName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
                                 None,
                                 None,
                             )),
@@ -1148,7 +1148,7 @@ mod test {
                             Identifier(0..16, "integer.datatype".to_string()),
                             AssignMethod::Assign,
                             Pattern::DatatypeName(DatatypeNamePattern(
-                                DatatypeName::Name(CName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
+                                DatatypeName::CName(QName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
                                 None,
                                 None
                             ))

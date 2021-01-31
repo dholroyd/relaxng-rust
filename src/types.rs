@@ -91,8 +91,17 @@ pub struct MixedPattern(pub Box<Pattern>);
 #[derive(Debug, PartialEq)]
 pub struct ExternalPattern(pub Literal, pub Option<Inherit>);
 
+// DatatypeValuePattern & DatatypeNamePattern diverge in style between xml and compact syntaxes,
+// with compact syntax requiring the type name be qualified to identify the datatype-library, were
+// xml syntax instead requires an unqualified name and the (possibly inherited) datatypeLibrary
+// attribute
+
 #[derive(Debug, PartialEq)]
-pub struct DatatypeValuePattern(pub Option<DatatypeName>, pub Literal);
+pub struct DatatypeValuePattern(
+    // The default datatype if the schema doesn't specify one explicitly is "token"
+    pub Option<DatatypeName>,
+    pub Literal
+);
 
 #[derive(Debug, PartialEq)]
 pub struct DatatypeNamePattern(
@@ -106,11 +115,25 @@ pub enum DatatypeName {
     // TODO: special cases for "string" and "token" maybe not worth the trouble
     String,
     Token,
-    Name(CName),
+    // Per compact-syntax usage
+    CName(QName),
+    // Per xml-syntax usage
+    NamespacedName(NamespacedName),
 }
 
 #[derive(Debug, PartialEq)]
+pub struct NamespacedName {
+    pub namespace_uri: Literal,
+    pub localname: NcName,
+}
 
+impl NamespacedName {
+    pub(crate) fn span(&self) -> Span {
+        Span { start: self.namespace_uri.0.start, end: self.localname.0.end }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Param(
     pub Span,
     pub IdentifierOrKeyword,
@@ -165,6 +188,16 @@ pub enum IdentifierOrKeyword {
     Identifier(Identifier),
     Keyword(Keyword),
 }
+
+impl IdentifierOrKeyword {
+    pub fn span(&self) -> Span {
+        match self {
+            IdentifierOrKeyword::Identifier(i) => i.0.clone(),
+            IdentifierOrKeyword::Keyword(k) => k.0.clone(),
+        }
+    }
+}
+
 impl ToString for IdentifierOrKeyword {
     fn to_string(&self) -> String {
         match self {
@@ -219,10 +252,35 @@ pub enum NameClass {
 #[derive(Debug, PartialEq)]
 pub enum Name {
     Identifier(IdentifierOrKeyword),
-    CName(CName)
+    // Per compact-syntax usage
+    CName(QName),
+    // Per xml-syntax usage
+    NamespacedName(NamespacedName),
+}
+
+impl Name {
+    pub fn span(&self) -> Span {
+        match self {
+            Name::Identifier(i) => i.span(),
+            Name::CName(n) => n.span(),
+            Name::NamespacedName(n) => n.span(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum NamespaceOrPrefix {
+    // Per compact-syntax usage
+    Prefix(NcName),
+    // Per xml-syntax usage
+    NamespaceUri(Literal),
 }
 #[derive(Debug, PartialEq)]
-pub struct NsName(pub NcName, pub Option<Box<NameClass>>);
+pub struct NsName {
+    pub name: NamespaceOrPrefix,
+    pub except: Option<Box<NameClass>>,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct AnyName(pub Option<Box<NameClass>>);
 #[derive(Debug, PartialEq)]
@@ -231,4 +289,10 @@ pub struct AltName(pub Box<NameClass>, pub Box<NameClass>);
 pub struct ParenName(pub Box<NameClass>);
 
 #[derive(Debug, PartialEq)]
-pub struct CName(pub NcName, pub NcName);
+pub struct QName(pub NcName, pub NcName);
+
+impl QName {
+    pub fn span(&self) -> Span {
+        Span { start: (self.0).0.start, end: self.1.0.end }
+    }
+}

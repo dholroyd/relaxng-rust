@@ -136,6 +136,7 @@ impl NamespacedName {
 #[derive(Debug, PartialEq)]
 pub struct Param(
     pub Span,
+    pub Option<InitialAnnotation>,
     pub IdentifierOrKeyword,
     pub Literal
 );
@@ -152,6 +153,7 @@ pub enum GrammarContent {
     Define(Define),
     Div(Vec<GrammarContent>),
     Include(Include),
+    Annotation(AnnotationElement)
 }
 
 #[derive(Debug, PartialEq)]
@@ -178,6 +180,7 @@ pub struct Inherit(pub IdentifierOrKeyword);
 pub enum IncludeContent {
     Define(Define),
     Div(Vec<IncludeContent>),
+    Annotation(AnnotationElement),
 }
 
 // TODO: the spec shows that a keywords may also be used in positon were identifiers are expected,
@@ -299,4 +302,32 @@ impl QName {
     pub fn span(&self) -> Span {
         Span { start: (self.0).0.start, end: self.1.0.end }
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct InitialAnnotation {
+    pub span: Span,
+    pub attribute_annotations: Vec<AnnotationAttribute>,
+    pub element_annotations: Vec<AnnotationElement>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AnnotationAttribute {
+    pub span: Span,
+    pub name: Name,
+    pub value: Literal,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AnnotationElement {
+    pub span: Span,
+    pub name: Name,
+    pub annotation_attributes: Vec<AnnotationAttribute>,
+    pub annotation_elements_or_literals: Vec<AnnotationElementOrLiteral>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum AnnotationElementOrLiteral {
+    Element(AnnotationElement),
+    Literal(Literal),
 }

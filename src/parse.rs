@@ -14,6 +14,7 @@ use nom::{
 };
 use nom_locate::{LocatedSpan, position};
 use std::ops::{RangeBounds, RangeFrom, Range};
+use nom::sequence::preceded;
 use nom::combinator::cut;
 
 pub type Span<'a> = LocatedSpan<&'a str>;
@@ -280,7 +281,11 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
 //    | "grammar" "{" grammarContent* "}"
 //    | "(" pattern ")"
 fn pattern(input: Span) -> IResult<Span, Pattern> {
-    let (mut input, mut result) = alt((
+    let (input, annotation) = maybe_initial_annotation(input)?;
+    if annotation.is_some() {
+        println!("pattern annotation found but ignored! {:?}", annotation.unwrap());
+    }
+    let (input, mut result) = alt((
         map(element_pattern, Pattern::Element),
         map(attribute_pattern, Pattern::Attribute),
         map(list_pattern, Pattern::List),
@@ -299,6 +304,11 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
         map(grammar_pattern, Pattern::Grammar),
         map(group_pattern, |p| Pattern::Group(Box::new(p))),
     ))(input)?;
+
+    let (mut input, follow_annotations) = follow_annotation_list(input)?;
+    if !follow_annotations.is_empty() {
+        println!("pattern follow annotation found but ignored! {:?}", follow_annotations);
+    }
 
     loop {
         let (i, _) = space_comment0(input)?;
@@ -508,6 +518,7 @@ fn datatype_value(input: Span) -> IResult<Span, Literal> {
 fn param(input: Span) -> IResult<Span, Param> {
     let parse = tuple((
         position,
+        maybe_initial_annotation,
         space_comment0,
         identifier_or_keyword,
         space_comment0,
@@ -517,7 +528,7 @@ fn param(input: Span) -> IResult<Span, Param> {
         position,
     ));
 
-    let parse = map(parse, |(start, _, name, _, _, _, val, end)| Param(span(start, end), name, val));
+    let parse = map(parse, |(start, initial_annotation, _, name, _, _, _, val, end)| Param(span(start, end), initial_annotation, name, val));
 
     parse(input)
 }
@@ -543,6 +554,10 @@ fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
 }
 
 fn name_class(input: Span) -> IResult<Span, NameClass> {
+    let (input, annotation) = maybe_initial_annotation(input)?;
+    if annotation.is_some() {
+        println!("name-class annotation found but ignored!")
+    }
     let (input, left) = alt((
         map(ns_name_nc, NameClass::NsName),
         map(name, NameClass::Name),
@@ -550,6 +565,11 @@ fn name_class(input: Span) -> IResult<Span, NameClass> {
         //map(alt_nc, |r| NameClass::Alt(r)),
         map(paren_nc, NameClass::Paren),
     ))(input)?;
+
+    let (input, follow_annotations) = follow_annotation_list(input)?;
+    if !follow_annotations.is_empty() {
+        println!("name-class follow annotation found but ignored! {:?}", annotation.unwrap());
+    }
 
     if let Ok((input, right)) = alt_nc(input) {
         return Ok((
@@ -670,6 +690,7 @@ fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
         map(define, GrammarContent::Define),
         map(div_grammar_content, GrammarContent::Div),
         map(include, GrammarContent::Include),
+        map(annotation_element, GrammarContent::Annotation),
     ))(input)
 }
 
@@ -788,7 +809,12 @@ fn inherit(input: Span) -> IResult<Span, Inherit> {
 //                    | start
 //                    | "div" "{" includeContent* "}"
 fn include_content(input: Span) -> IResult<Span, IncludeContent> {
+    let (input, annotation) = maybe_initial_annotation(input)?;
+    if annotation.is_some() {
+        println!("include-content annotation found but ignored!")
+    }
     alt((
+        map(annotation_element, IncludeContent::Annotation),
         map(define, IncludeContent::Define),
         map(start, IncludeContent::Define),
         map(div_include_content, IncludeContent::Div),
@@ -820,6 +846,96 @@ fn space_comment1(input: Span) -> IResult<Span, Span> {
 }
 fn comment(input: Span) -> IResult<Span, Span> {
     recognize(tuple((tag("#"), not_line_ending)))(input)
+}
+
+fn maybe_initial_annotation(input: Span) -> IResult<Span, Option<InitialAnnotation>> {
+    opt(
+        map(tuple((
+            initial_annotation,
+            space_comment0,
+        )), |(anno, _)| anno )
+    )(input)
+}
+
+fn initial_annotation(input: Span) -> IResult<Span, InitialAnnotation> {
+    let parse = tuple((
+        tag("["),
+        space_comment0,
+        separated_list(space_comment1, annotation_attribute),
+        space_comment0,
+        separated_list(space_comment1, annotation_element),
+        space_comment0,
+        tag("]"),
+    )) ;
+
+    let parse = map(parse, |(start, _, attribute_annotations, _, element_annotations, _, end)| InitialAnnotation{
+        span: span(start, end),
+        attribute_annotations,
+        element_annotations,
+    });
+
+    parse(input)
+}
+
+fn follow_annotation_list(input: Span) -> IResult<Span, Vec<AnnotationElement>> {
+    separated_list(space_comment0, follow_annotation)(input)
+}
+
+fn follow_annotation(input: Span) -> IResult<Span, AnnotationElement> {
+    preceded(
+        tuple((space_comment0, tag(">>"), space_comment0)),
+        annotation_element
+    )(input)
+}
+
+fn annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute> {
+    let parse = tuple((
+        name,
+        space_comment0,
+        tag("="),
+        space_comment0,
+        literal,
+    ));
+
+    let parse = map(parse, |(name, _, _, _, value)| AnnotationAttribute {
+        span: Range { start: name.span().start, end: value.0.end },
+        name,
+        value,
+    });
+
+    parse(input)
+}
+
+fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
+    let parse = tuple((
+        name,
+        space_comment0,
+        tag("["),
+        space_comment0,
+        separated_list(space_comment1, annotation_attribute),
+        space_comment0,
+        separated_list(space_comment1, annotation_element_or_literal),
+        space_comment0,
+        tag("]"),
+    ));
+
+    let parse = map(parse, |(name, _, _, _, annotation_attributes, _, annotation_elements_or_literals, _, end)| AnnotationElement {
+        span: Range { start: name.span().start, end: end.offset+end.fragment.len() },
+        name,
+        annotation_attributes,
+        annotation_elements_or_literals,
+    });
+
+    parse(input)
+}
+
+fn annotation_element_or_literal(input: Span) -> IResult<Span, AnnotationElementOrLiteral> {
+    let parse = alt((
+        map(annotation_element, AnnotationElementOrLiteral::Element),
+        map(literal, AnnotationElementOrLiteral::Literal),
+    ));
+
+    parse(input)
 }
 
 #[cfg(test)]
@@ -1094,6 +1210,7 @@ mod test {
                 Some(vec![
                     Param(
                         9..24,
+                        None,
                         IdentifierOrKeyword::Identifier(Identifier(9..16, "pattern".to_string())),
                         Literal(
                             19..24,
@@ -1172,6 +1289,40 @@ mod test {
                     vec![LiteralSegment { body: "preserve".to_string() }]
                 )
             )),
+        )
+    }
+
+    #[test]
+    fn initial_anno() {
+        ck(
+            maybe_initial_annotation,
+            "[ xml:lang=\"en\" ]",
+            Some(InitialAnnotation {
+                span: 0..16,
+                attribute_annotations: vec![
+                    AnnotationAttribute {
+                        span: 2..15,
+                        name: Name::CName(QName(NcName(2..5, "xml".to_string()), NcName(6..10, "lang".to_string()))),
+                        value: Literal(
+                            11..15,
+                            vec![LiteralSegment { body: "en".to_string() }]
+                        ),
+                    }
+                ],
+                element_annotations: vec![]
+            })
+        )
+    }
+
+    #[test]
+    fn top_level_pattern() {
+        ck(
+            top_level,
+            "grammar { }",
+            Schema {
+                decls: vec![],
+                pattern_or_grammar: PatternOrGrammar::Pattern(Pattern::Grammar(GrammarPattern { span: 0..11, content: vec![] }))
+            }
         )
     }
 }

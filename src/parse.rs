@@ -35,7 +35,8 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
         separated_list(space_comment1, decl),
         space_comment0, // TODO: should be space_comment1, and only required if there are decls
         alt((
-            map(separated_nonempty_list(space_comment1, grammar_content), |content| PatternOrGrammar::Grammar(GrammarPattern { content })),
+            // TODO: proper span for GrammarPattern
+            map(separated_nonempty_list(space_comment1, grammar_content), |content| PatternOrGrammar::Grammar(GrammarPattern { span: 0..0, content })),
             map(pattern, PatternOrGrammar::Pattern),
         )),
     ));
@@ -131,11 +132,15 @@ fn namespace_uri_literal(input: Span) -> IResult<Span, NamespaceUriLiteral> {
 
 // literal	  ::=  	literalSegment ("~" literalSegment)+
 fn literal(input: Span) -> IResult<Span, Literal> {
-    let parser = separated_nonempty_list(
-        tuple((space_comment0, tag("~"), space_comment0)),
-        literal_segment
-    );
-    let parser = map(parser, |v| Literal(v));
+    let parser = tuple((
+        position,
+        separated_nonempty_list(
+            tuple((space_comment0, tag("~"), space_comment0)),
+            literal_segment
+        ),
+        position,
+    ));
+    let parser = map(parser, |(start, v, end)| Literal(span(start, end), v));
 
     parser(input)
 }
@@ -243,10 +248,11 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
             tag("text"),
             tag("token"),
         )),
+        position,
         peek(not(nc_name_char)),
     ));
 
-    let parse = map(parse, |(k, _)| Keyword(k.fragment.to_string()));
+    let parse = map(parse, |(k, end, _)| Keyword(span(k, end), k.fragment.to_string()));
 
     parse(input)
 }
@@ -347,10 +353,12 @@ fn element_pattern(input: Span) -> IResult<Span, ElementPattern> {
         pattern,
         space_comment0,
         tag("}"),
+        position,
     ));
 
-    map(parse, |(_, _, name_class, _, _, _, pattern, _, _)| {
+    map(parse, |(start, _, name_class, _, _, _, pattern, _, _, end)| {
         ElementPattern {
+            span: span(start, end),
             name_class,
             pattern: Box::new(pattern),
         }
@@ -369,10 +377,12 @@ fn attribute_pattern(input: Span) -> IResult<Span, AttributePattern> {
         pattern,
         space_comment0,
         tag("}"),
+        position,
     ));
 
-    map(parse, |(_, _, name_class, _, _, _, pattern, _, _)| {
+    map(parse, |(start, _, name_class, _, _, _, pattern, _, _, end)| {
         AttributePattern {
+            span: span(start, end),
             name_class,
             pattern: Box::new(pattern),
         }
@@ -435,9 +445,10 @@ fn grammar_pattern(input: Span) -> IResult<Span, GrammarPattern> {
         separated_list(space_comment1, grammar_content),
         space_comment0,
         tag("}"),
+        position,
     ));
 
-    let parse = map(parse, |(_, _, _, _, content, _, _)| GrammarPattern { content });
+    let parse = map(parse, |(start, _, _, _, content, _, _, end)| GrammarPattern { span: span(start, end), content });
 
     parse(input)
 }
@@ -495,14 +506,17 @@ fn datatype_value(input: Span) -> IResult<Span, Literal> {
 // param	  ::=  	identifierOrKeyword "=" literal
 fn param(input: Span) -> IResult<Span, Param> {
     let parse = tuple((
+        position,
+        space_comment0,
         identifier_or_keyword,
         space_comment0,
         tag("="),
         space_comment0,
         literal,
+        position,
     ));
 
-    let parse = map(parse, |(name, _, _, _, val)| Param(name, val));
+    let parse = map(parse, |(start, _, name, _, _, _, val, end)| Param(span(start, end), name, val));
 
     parse(input)
 }
@@ -898,9 +912,12 @@ mod test {
             "namespace rng = \"http://relaxng.org/ns/structure/1.0\"",
             NamespaceDeclaration {
                 prefix: "rng".to_string(),
-                uri: NamespaceUriLiteral::Uri(Literal(vec![LiteralSegment {
-                    body: "http://relaxng.org/ns/structure/1.0".to_string(),
-                }])),
+                uri: NamespaceUriLiteral::Uri(Literal(
+                    16..53,
+                    vec![LiteralSegment {
+                        body: "http://relaxng.org/ns/structure/1.0".to_string(),
+                    }
+                ])),
             },
         );
     }
@@ -912,9 +929,13 @@ mod test {
             "default namespace rng = \"http://relaxng.org/ns/structure/1.0\"",
             DefaultNamespaceDeclaration {
                 prefix: Some("rng".to_string()),
-                uri: NamespaceUriLiteral::Uri(Literal(vec![LiteralSegment {
-                    body: "http://relaxng.org/ns/structure/1.0".to_string(),
-                }])),
+                uri: NamespaceUriLiteral::Uri(
+                    Literal(
+                        24..61,
+                        vec![LiteralSegment {
+                            body: "http://relaxng.org/ns/structure/1.0".to_string(),
+                        }]
+                    )),
             },
         );
     }
@@ -949,6 +970,7 @@ mod test {
             attribute_pattern,
             "attribute * { text }",
             AttributePattern {
+                span: 0..20,
                 name_class: NameClass::AnyName(AnyName(None)),
                 pattern: Box::new(Pattern::Text),
             },
@@ -986,7 +1008,7 @@ mod test {
         ck(
             identifier_or_keyword,
             "parent",
-            IdentifierOrKeyword::Keyword(Keyword("parent".to_string())),
+            IdentifierOrKeyword::Keyword(Keyword(0..6, "parent".to_string())),
         );
         ck(
             identifier_or_keyword,
@@ -1029,7 +1051,10 @@ mod test {
             include,
             "include \"foo.rnc\" { a = b  c=d }",
             Include(
-                Literal(vec![LiteralSegment { body: "foo.rnc".to_string() }]),
+                Literal(
+                    8..17,
+                    vec![LiteralSegment { body: "foo.rnc".to_string() }]
+                ),
                 None,
                 Some(vec![
                     IncludeContent::Define(Define(
@@ -1067,8 +1092,12 @@ mod test {
                 DatatypeName::Name(CName(NcName(0..2, "ns".to_string()), NcName(3..6, "foo".to_string()))),
                 Some(vec![
                     Param(
+                        9..24,
                         IdentifierOrKeyword::Identifier(Identifier(9..16, "pattern".to_string())),
-                        Literal(vec![LiteralSegment { body: "bar".to_string() }]),
+                        Literal(
+                            19..24,
+                            vec![LiteralSegment { body: "bar".to_string() }]
+                        ),
                     ),
                 ]),
                 None,
@@ -1084,6 +1113,7 @@ mod test {
             Schema {
                 decls: vec![],
                 pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
+                    span: 0..0,
                     content: vec![
                         GrammarContent::Define(Define(
                             0..30,
@@ -1111,6 +1141,7 @@ mod test {
             Schema {
                 decls: vec![],
                 pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
+                    span: 0..0,
                     content: vec![
                         GrammarContent::Define(Define(
                             0..30,
@@ -1135,7 +1166,10 @@ mod test {
             "string \"preserve\"",
             Pattern::DatatypeValue(DatatypeValuePattern(
                 Some(DatatypeName::String),
-                Literal(vec![LiteralSegment { body: "preserve".to_string() }])
+                Literal(
+                    7..17,
+                    vec![LiteralSegment { body: "preserve".to_string() }]
+                )
             )),
         )
     }

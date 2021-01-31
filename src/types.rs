@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-type Span = Range<usize>;
+pub type Span = Range<usize>;
 
 #[derive(Debug, PartialEq)]
 pub struct Schema {
@@ -59,17 +59,20 @@ pub enum Pattern {
 
 #[derive(Debug, PartialEq)]
 pub struct ElementPattern {
+    pub span: Span,
     pub name_class: NameClass,
     pub pattern: Box<Pattern>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct GrammarPattern {
+    pub span: Span,
     pub content: Vec<GrammarContent>,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct AttributePattern {
+    pub span: Span,
     pub name_class: NameClass,
     pub pattern: Box<Pattern>,
 }
@@ -101,8 +104,12 @@ pub enum DatatypeName {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Param(pub IdentifierOrKeyword, pub Literal);
 
+pub struct Param(
+    pub Span,
+    pub IdentifierOrKeyword,
+    pub Literal
+);
 #[derive(Debug, PartialEq)]
 pub enum PatternOrGrammar {
     Pattern(Pattern),
@@ -151,7 +158,7 @@ impl ToString for IdentifierOrKeyword {
     fn to_string(&self) -> String {
         match self {
             IdentifierOrKeyword::Identifier(id) => id.1.clone(),
-            IdentifierOrKeyword::Keyword(k) => k.0.clone(),
+            IdentifierOrKeyword::Keyword(k) => k.1.clone(),
         }
     }
 }
@@ -163,12 +170,12 @@ pub enum NamespaceUriLiteral {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Literal(pub Vec<LiteralSegment>);
+pub struct Literal(pub Span, pub Vec<LiteralSegment>);
 impl Literal {
     pub fn as_string_value(&self) -> String {
         // TODO any unescaping etc reqiored?
         let mut val = String::new();
-        for s in self.0.iter() {
+        for s in self.1.iter() {
             val.push_str(&s.body);
         }
         val
@@ -184,7 +191,7 @@ pub struct LiteralSegment {
 pub struct Identifier(pub Span, pub String);
 
 #[derive(Debug, PartialEq)]
-pub struct Keyword(pub String);
+pub struct Keyword(pub Span, pub String);
 
 #[derive(Debug, PartialEq)]
 pub struct NcName(pub Span, pub String);

@@ -237,7 +237,7 @@ pub struct LiteralSegment {
     pub body: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Identifier(pub Span, pub String);
 
 #[derive(Debug, PartialEq)]

@@ -15,7 +15,7 @@ use nom::{
 use nom_locate::{LocatedSpan, position};
 use std::ops::{RangeBounds, RangeFrom, Range};
 
-type Span<'a> = LocatedSpan<&'a str>;
+pub type Span<'a> = LocatedSpan<&'a str>;
 
 // per https://www.oasis-open.org/committees/relax-ng/compact-20021121.html
 
@@ -180,7 +180,7 @@ pub fn identifier(input: Span) -> IResult<Span, Identifier> {
     res.map(|(input, v)| (input, Identifier(span(v, input), v.to_string())))
 }
 
-fn nc_name(input: Span) -> IResult<Span, NcName> {
+pub fn nc_name(input: Span) -> IResult<Span, NcName> {
     let parse = tuple((
         position,
         recognize(tuple((nc_name_start_char, many0(nc_name_char)))),

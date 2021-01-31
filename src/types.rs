@@ -284,6 +284,7 @@ pub struct NsName {
 #[derive(Debug, PartialEq)]
 pub struct AnyName(pub Option<Box<NameClass>>);
 #[derive(Debug, PartialEq)]
+// TODO: ChoiceName would better match terminology used elsewhere
 pub struct AltName(pub Box<NameClass>, pub Box<NameClass>);
 #[derive(Debug, PartialEq)]
 pub struct ParenName(pub Box<NameClass>);

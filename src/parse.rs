@@ -35,7 +35,7 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
         separated_list(space_comment1, decl),
         space_comment0, // TODO: should be space_comment1, and only required if there are decls
         alt((
-            map(separated_list(space_comment1, grammar_content), PatternOrGrammar::Grammar),
+            map(separated_nonempty_list(space_comment1, grammar_content), |content| PatternOrGrammar::Grammar(GrammarPattern { content })),
             map(pattern, PatternOrGrammar::Pattern),
         )),
     ));
@@ -437,7 +437,7 @@ fn grammar_pattern(input: Span) -> IResult<Span, GrammarPattern> {
         tag("}"),
     ));
 
-    let parse = map(parse, |(_, _, _, _, content, _, _)| GrammarPattern(content));
+    let parse = map(parse, |(_, _, _, _, content, _, _)| GrammarPattern { content });
 
     parse(input)
 }
@@ -1083,18 +1083,20 @@ mod test {
             "integer.datatype = xsd:integer",
             Schema {
                 decls: vec![],
-                pattern_or_grammar: PatternOrGrammar::Grammar(vec![
-                    GrammarContent::Define(Define(
-                        0..30,
-                        Identifier(0..16, "integer.datatype".to_string()),
-                        AssignMethod::Assign,
-                        Pattern::DatatypeName(DatatypeNamePattern(
-                            DatatypeName::Name(CName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
-                            None,
-                            None,
-                        )),
-                    ))
-                ])
+                pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
+                    content: vec![
+                        GrammarContent::Define(Define(
+                            0..30,
+                            Identifier(0..16, "integer.datatype".to_string()),
+                            AssignMethod::Assign,
+                            Pattern::DatatypeName(DatatypeNamePattern(
+                                DatatypeName::Name(CName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
+                                None,
+                                None,
+                            )),
+                        ))
+                    ]
+                })
             }
         )
     }
@@ -1108,8 +1110,8 @@ mod test {
             "integer.datatype = xsd:integer",
             Schema {
                 decls: vec![],
-                pattern_or_grammar: PatternOrGrammar::Grammar(
-                    vec![
+                pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
+                    content: vec![
                         GrammarContent::Define(Define(
                             0..30,
                             Identifier(0..16, "integer.datatype".to_string()),
@@ -1121,7 +1123,7 @@ mod test {
                             ))
                         ))
                     ]
-                ),
+                }),
             }
         )
     }

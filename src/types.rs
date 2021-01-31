@@ -64,7 +64,9 @@ pub struct ElementPattern {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct GrammarPattern(pub Vec<GrammarContent>);
+pub struct GrammarPattern {
+    pub content: Vec<GrammarContent>,
+}
 
 #[derive(Debug, PartialEq)]
 pub struct AttributePattern {
@@ -104,7 +106,7 @@ pub struct Param(pub IdentifierOrKeyword, pub Literal);
 #[derive(Debug, PartialEq)]
 pub enum PatternOrGrammar {
     Pattern(Pattern),
-    Grammar(Vec<GrammarContent>),
+    Grammar(GrammarPattern),
 }
 
 #[derive(Debug, PartialEq)]

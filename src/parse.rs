@@ -187,7 +187,7 @@ fn nc_name_start_char(input: Span) -> IResult<Span, char> {
         char_in('A'..='Z'),
         char('_'),
         char_in('a'..='z'),
-        char_in('\u{C0}'..'\u{D6}'),
+        char_in('\u{C0}'..='\u{D6}'),
         char_in('\u{D8}'..='\u{F6}'),
         char_in('\u{F8}'..='\u{2FF}'),
         char_in('\u{370}'..='\u{37D}'),

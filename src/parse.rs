@@ -14,6 +14,7 @@ use nom::{
 };
 use nom_locate::{LocatedSpan, position};
 use std::ops::{RangeBounds, RangeFrom, Range};
+use nom::combinator::cut;
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
@@ -350,9 +351,9 @@ fn element_pattern(input: Span) -> IResult<Span, ElementPattern> {
         space_comment0,
         tag("{"),
         space_comment0,
-        pattern,
+        cut(pattern),
         space_comment0,
-        tag("}"),
+        cut(tag("}")),
         position,
     ));
 
@@ -374,9 +375,9 @@ fn attribute_pattern(input: Span) -> IResult<Span, AttributePattern> {
         space_comment0,
         tag("{"),
         space_comment0,
-        pattern,
+        cut(pattern),
         space_comment0,
-        tag("}"),
+        cut(tag("}")),
         position,
     ));
 
@@ -394,9 +395,9 @@ fn list_pattern(input: Span) -> IResult<Span, ListPattern> {
         space_comment0,
         tag("{"),
         space_comment0,
-        pattern,
+        cut(pattern),
         space_comment0,
-        tag("}"),
+        cut(tag("}")),
     ));
 
     map(parse, |(_, _, _, _, pattern, _, _)| {
@@ -409,9 +410,9 @@ fn mixed_pattern(input: Span) -> IResult<Span, MixedPattern> {
         space_comment0,
         tag("{"),
         space_comment0,
-        pattern,
+        cut(pattern),
         space_comment0,
-        tag("}"),
+        cut(tag("}")),
     ));
 
     map(parse, |(_, _, _, _, pattern, _, _)| {
@@ -444,7 +445,7 @@ fn grammar_pattern(input: Span) -> IResult<Span, GrammarPattern> {
         space_comment0,
         separated_list(space_comment1, grammar_content),
         space_comment0,
-        tag("}"),
+        cut(tag("}")),
         position,
     ));
 
@@ -482,7 +483,7 @@ fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
         space_comment0,
         separated_list(space_comment1, param),
         space_comment0,
-        tag("}"),
+        cut(tag("}")),
     ));
     let params = map(params, |(_, _, _, p, _, _)| p);
 
@@ -680,7 +681,7 @@ fn start(input: Span) -> IResult<Span, Define> {
         space_comment0,
         assign_method,
         space_comment0,
-        pattern,
+        cut(pattern),
         position,
     ));
 
@@ -707,7 +708,7 @@ fn define(input: Span) -> IResult<Span, Define> {
         space_comment0,
         assign_method,
         space_comment0,
-        pattern,
+        cut(pattern),
         position,
     ));
 
@@ -735,7 +736,7 @@ fn div_grammar_content(input: Span) -> IResult<Span, Vec<GrammarContent>> {
         space_comment0,
         separated_list(space_comment1, grammar_content),
         space_comment0,
-        tag("}"),
+        cut(tag("}")),
     ));
 
     let parse = map(parse, |(_, _, _, _, content, _, _)| content);
@@ -751,7 +752,7 @@ fn include(input: Span) -> IResult<Span, Include> {
         any_uri_literal,
         opt(map(tuple((space_comment1, inherit)), |(_, v)| v )),
         opt(map(
-            tuple((space_comment0, tag("{"), space_comment0, separated_list(space_comment1, include_content), space_comment0, tag("}"))),
+            tuple((space_comment0, tag("{"), space_comment0, separated_list(space_comment1, include_content), space_comment0, cut(tag("}")))),
             |(_, _, _, inc, _, _)| inc,
         )),
     ));
@@ -803,7 +804,7 @@ fn div_include_content(input: Span) -> IResult<Span, Vec<IncludeContent>> {
         space_comment0,
         separated_list(space_comment1, include_content),
         space_comment0,
-        tag("}"),
+        cut(tag("}")),
     ));
 
     let parse = map(parse, |(_, _, _, _, content, _, _)| content);

@@ -131,7 +131,13 @@ fn namespace_uri_literal(input: Span) -> IResult<Span, NamespaceUriLiteral> {
 
 // literal	  ::=  	literalSegment ("~" literalSegment)+
 fn literal(input: Span) -> IResult<Span, Literal> {
-    separated_nonempty_list(tag("~"), literal_segment)(input).map(|(input, v)| (input, Literal(v)))
+    let parser = separated_nonempty_list(
+        tuple((space_comment0, tag("~"), space_comment0)),
+        literal_segment
+    );
+    let parser = map(parser, |v| Literal(v));
+
+    parser(input)
 }
 
 // literalSegment	  ::=  	'"' (Char - ('"' | newline))* '"'

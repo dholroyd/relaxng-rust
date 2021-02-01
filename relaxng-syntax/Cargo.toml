@@ -1,5 +1,5 @@
 [package]
-name = "relaxng-compact-syntax"
+name = "relaxng-syntax"
 version = "0.1.0"
 authors = ["David Holroyd <dave@badgers-in-foil.co.uk>"]
 edition = "2018"
@@ -9,3 +9,9 @@ edition = "2018"
 [dependencies]
 nom = "5.0"
 nom_locate = "1.0"
+roxmltree = "0.14.0"
+url = "2.2.0"
+rfc2396 = "1.0.5"
+
+[dev-dependencies]
+assert_matches = "1.4.0"

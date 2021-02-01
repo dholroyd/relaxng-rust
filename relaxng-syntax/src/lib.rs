@@ -1,5 +1,6 @@
 pub mod parse;
 pub mod types;
+pub mod xml;
 
 #[cfg(test)]
 mod tests {

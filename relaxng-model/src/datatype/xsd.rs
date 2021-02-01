@@ -1,7 +1,7 @@
-use relaxng_compact_syntax::types;
+use relaxng_syntax::types;
 use std::fmt;
 use crate::Context;
-use relaxng_compact_syntax::types::DatatypeName;
+use relaxng_syntax::types::DatatypeName;
 use lazy_static::lazy_static;
 use crate::datatype::relax::normalize_whitespace;
 use std::str::FromStr;
@@ -139,7 +139,7 @@ impl super::Datatype for XsdDatatypes {
 }
 
 fn is_valid_ncname(text: &str) -> bool {
-    match relaxng_compact_syntax::parse::nc_name(relaxng_compact_syntax::parse::Span::new(text)) {
+    match relaxng_syntax::parse::nc_name(relaxng_syntax::parse::Span::new(text)) {
         Ok((rest, _name)) => {
             rest.fragment.is_empty()
         }
@@ -893,7 +893,7 @@ impl TryFromVal for QNameVal {
 mod test {
     use super::*;
     use assert_matches::assert_matches;
-    use relaxng_compact_syntax::types;
+    use relaxng_syntax::types;
     use codemap::CodeMap;
 
     #[test]

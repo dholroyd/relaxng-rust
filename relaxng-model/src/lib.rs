@@ -1,11 +1,11 @@
 use std::fs::File;
 use std::io;
 use std::io::Read;
-use relaxng_compact_syntax::{parse, types};
+use relaxng_syntax::{parse, types};
 use nom;
 use nom_locate::LocatedSpan;
 use std::collections::{HashMap, HashSet};
-use relaxng_compact_syntax::types::{Schema, NamespaceUriLiteral, DatatypeName, QName, NcName, NamespacedName, Name};
+use relaxng_syntax::types::{Schema, NamespaceUriLiteral, DatatypeName, QName, NcName, NamespacedName, Name};
 use std::rc::Rc;
 use std::path::{PathBuf, Path};
 use crate::model::Pattern;
@@ -13,7 +13,6 @@ use std::ops::Range;
 use std::cell::RefCell;
 use codemap::CodeMap;
 use std::sync::Arc;
-use relaxng_xml_syntax::Error;
 use crate::datatype::{DatatypeCompiler, Errors};
 use crate::datatype::xsd::{XsdDatatypeError, FacetError};
 
@@ -46,13 +45,13 @@ impl Syntax {
     fn parse(&self, file: &Arc<codemap::File>) -> Result<Schema, RelaxError> {
         match self {
             Syntax::Xml => {
-                relaxng_xml_syntax::parse(file.source())
+                relaxng_syntax::xml::parse(file.source())
                     .map_err(|e| {
                         let span = match &e {
-                            Error::Expected(span, _) => file.span.subspan(span.start as _, span.end as _),
-                            Error::Unexpected(span, _) => file.span.subspan(span.start as _, span.end as _),
-                            Error::Xml(span, _) => file.span.subspan(span.start as _, span.end as _),
-                            Error::Todo(_) => file.span.subspan(0, 0),
+                            relaxng_syntax::xml::Error::Expected(span, _) => file.span.subspan(span.start as _, span.end as _),
+                            relaxng_syntax::xml::Error::Unexpected(span, _) => file.span.subspan(span.start as _, span.end as _),
+                            relaxng_syntax::xml::Error::Xml(span, _) => file.span.subspan(span.start as _, span.end as _),
+                            relaxng_syntax::xml::Error::Todo(_) => file.span.subspan(0, 0),
                         };
                         RelaxError::XmlParse(span, e)
                     })
@@ -78,7 +77,7 @@ pub enum RelaxError {
     IncludeError(codemap::Span, Box<RelaxError>),
     // TODO: remove nom type from public API
     Parse(codemap::Span, nom::error::ErrorKind),
-    XmlParse(codemap::Span, relaxng_xml_syntax::Error),
+    XmlParse(codemap::Span, relaxng_syntax::xml::Error),
     DuplicateDefinition { name: String, duplicate: codemap::Span, original: codemap::Span },
     IncompatibleCombination { file: PathBuf, combine: Span, original: Span },
     UndefinedNamespacePrefix { span: codemap::Span, prefix: String },
@@ -709,7 +708,7 @@ impl<FS: Files> Compiler<FS> {
             },
             RelaxError::XmlParse(span, e) => {
                 match e {
-                    Error::Expected(_, msg) => {
+                    relaxng_syntax::xml::Error::Expected(_, msg) => {
                         let label = codemap_diagnostic::SpanLabel {
                             span: span.clone(),
                             style: codemap_diagnostic::SpanStyle::Primary,
@@ -722,7 +721,7 @@ impl<FS: Files> Compiler<FS> {
                             spans: vec![label]
                         }
                     }
-                    Error::Unexpected(_, msg) => {
+                    relaxng_syntax::xml::Error::Unexpected(_, msg) => {
                         let label = codemap_diagnostic::SpanLabel {
                             span: span.clone(),
                             style: codemap_diagnostic::SpanStyle::Primary,
@@ -735,7 +734,7 @@ impl<FS: Files> Compiler<FS> {
                             spans: vec![label]
                         }
                     }
-                    Error::Xml(_, msg) => {
+                    relaxng_syntax::xml::Error::Xml(_, msg) => {
                         let label = codemap_diagnostic::SpanLabel {
                             span: span.clone(),
                             style: codemap_diagnostic::SpanStyle::Primary,
@@ -1667,25 +1666,5 @@ mod tests {
                 })
             })
         })
-    }
-    #[test]
-    fn it_works() {
-        let tests = [
-            //"../relaxng-compact-syntax/resources/examples/fo/main.rnc",
-            // html5 requires support for the "http://whattf.org/datatype-draft" datatype lib
-            //"../relaxng-compact-syntax/resources/examples/nu-validator/html5/html5.rnc",
-            //"../../dash-mpd/DASH-MPD.rnc",
-            //"../relaxng-compact-syntax/resources/examples/nu-validator/.drivers/xhtml5-svg-mathml.rnc",
-            "../relaxng-compact-syntax/resources/examples/fo/main.rnc"
-        ];
-        for n in &tests {
-            let mut compiler = Compiler::default();
-            let input = Path::new(n);
-            //let input = Path::new();
-            if let Err(e) = compiler.compile(input) {
-                compiler.dump_diagnostic(&e);
-                panic!("Compiling example schema failed: {:?}", e);
-            }
-        }
     }
 }

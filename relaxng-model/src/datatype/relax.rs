@@ -1,9 +1,9 @@
 //! The RELAX NG built-in datatype library
 
 //use relaxng_model::model::{DatatypeName, Param, Span};
-use relaxng_compact_syntax::types::{DatatypeName, Param, QName, NcName};
+use relaxng_syntax::types::{DatatypeName, Param, QName, NcName};
 use crate::Context;
-use relaxng_compact_syntax::types::NamespacedName;
+use relaxng_syntax::types::NamespacedName;
 
 // TODO: return Cow
 pub fn normalize_whitespace(val: &str) -> String {

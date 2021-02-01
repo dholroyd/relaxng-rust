@@ -1,5 +1,5 @@
-use relaxng_compact_syntax::types;
-use relaxng_compact_syntax::types::{DatatypeName, NamespacedName};
+use relaxng_syntax::types;
+use relaxng_syntax::types::{DatatypeName, NamespacedName};
 use crate::Context;
 
 pub mod xsd;

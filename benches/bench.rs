@@ -9,8 +9,7 @@ fn relaxng_compile(c: &mut Criterion) {
             b.iter(|| {
                 let tests = [
                     "../relaxng-compact-syntax/resources/examples/fo/main.rnc",
-                    "../relaxng-compact-syntax/resources/examples/nu-validator/html5/html5.rnc",
-                    "../dash-mpd/DASH-MPD.rnc",
+                    "../../dash-mpd/DASH-MPD.rnc",
                 ];
                 for n in &tests {
                     let mut compiler = Compiler::default();

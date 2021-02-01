@@ -1,12 +1,29 @@
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::ops::Range;
+use std::fmt;
+
+pub type Span = Range<usize>;
 
 #[derive(Debug)]
 pub enum DefineRule {
     // the name has been defined with '=' operator, and might have also been defined with '&=' or '|='
-    AssignCombine(Option<CombineRule>, Pattern),
+    AssignCombine(codemap::Span, Option<CombineRule>, Pattern),
     // the name has been defined with either '&=' or '|=', but has not yet been seen with '='
-    CombineOnly(CombineRule, Pattern),
+    CombineOnly(codemap::Span, CombineRule, Pattern),
+}
+impl DefineRule {
+    pub fn pattern(&self) -> &Pattern {
+        match self {
+            DefineRule::AssignCombine(_, _, p) | DefineRule::CombineOnly(_, _, p) => p,
+        }
+    }
+
+    pub fn span(&self) -> &codemap::Span {
+        match self {
+            DefineRule::AssignCombine(s, _, _) | DefineRule::CombineOnly(s, _, _) => s,
+        }
+    }
 }
 #[derive(Debug)]
 pub enum CombineRule {
@@ -18,8 +35,8 @@ pub enum CombineRule {
 pub enum Pattern {
     Choice(Vec<Pattern>),
     Interleave(Vec<Pattern>),
-    // AKA 'group' -- patterns that must appear in the given order
-    Sequence(Vec<Pattern>),
+    /// An ordered sequence of patterns
+    Group(Vec<Pattern>),
     Mixed(Box<Pattern>),
     Empty,
     Text,
@@ -29,15 +46,29 @@ pub enum Pattern {
     OneOrMore(Box<Pattern>),
     Attribute(NameClass, Box<Pattern>),
     Element(NameClass, Box<Pattern>),
-    Ref(Rc<RefCell<Option<DefineRule>>>),
-    DatatypeValue(Option<DatatypeName>, String),
-    DatatypeName { name: DatatypeName, params: Vec<Param>, except: Option<Box<Pattern>> },
+    Ref(codemap::Span, String, PatRef),
+    DatatypeValue { datatype: crate::datatype::DatatypeValues },
+    DatatypeName { datatype: crate::datatype::Datatypes, except: Option<Box<Pattern>> },
     List(Box<Pattern>),
+}
+
+// Factored out from Pattern primarily to avoid infinite recursion in Debug impl
+#[derive(Clone)]
+pub struct PatRef(pub Rc<RefCell<Option<DefineRule>>>);
+impl fmt::Debug for PatRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        let mut d = f.debug_tuple("PatRef");
+        if self.0.borrow().is_some() {
+            d.field(&"Some(...)")
+        } else {
+            d.field(&"None")
+        }.finish()
+    }
 }
 
 // TODO: will users want to know the prefix which was specified in the source file, prior to
 //       resolution into the uri?
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum NameClass {
     Named {
         namespace_uri: String,
@@ -81,18 +112,9 @@ impl NameClass {
     }
 }
 
-#[derive(Debug)]
-pub enum DatatypeName {
-    String,
-    Token,
-    Name {
-        namespace_uri: String,
-        name: String,
-    },
-}
-
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct Param {
+    pub span: Span,
     pub name: String,
     pub value: String,
 }

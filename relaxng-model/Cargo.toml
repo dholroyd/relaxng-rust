@@ -17,6 +17,7 @@ num-bigint = "0.2.6"
 bigdecimal = "0.2.0"
 lazy_static = "1.4.0"
 chrono = "0.4.19"
+uriparse = "0.6.3"
 
 [dev-dependencies]
 criterion = "0.3"

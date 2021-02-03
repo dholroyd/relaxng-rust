@@ -5,6 +5,7 @@ use relaxng_syntax::types::DatatypeName;
 use lazy_static::lazy_static;
 use crate::datatype::relax::normalize_whitespace;
 use std::str::FromStr;
+use std::convert::TryFrom;
 
 pub const NAMESPACE_URI: &str = "http://www.w3.org/2001/XMLSchema-datatypes";
 
@@ -28,6 +29,7 @@ impl super::Datatype for XsdDatatypeValues {
 lazy_static! {
     static ref LANG_RE: regex::Regex = regex::Regex::new(r"^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$").unwrap();
     static ref DATETIME_RE: regex::Regex = regex::Regex::new(r"^-?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z(?:(?:\+|-)\d{2}:\d{2}))?$").unwrap();
+    static ref DURATION_RE: regex::Regex = regex::Regex::new(r"^P(([0-9]+([.,][0-9]*)?Y)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?D)?T?([0-9]+([.,][0-9]*)?H)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?S)?)|\d{4}-?(0[1-9]|11|12)-?(?:[0-2]\d|30|31)T((?:[0-1][0-9]|[2][0-3]):?(?:[0-5][0-9]):?(?:[0-5][0-9]|60)|2400|24:00)$").unwrap();
 }
 
 
@@ -37,8 +39,8 @@ pub enum XsdDatatypes {
     NormalizedString(StringFacets),
     String(StringFacets),
     Integer(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
-    UnsignedInt(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
-    UnsignedLong(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
+    UnsignedInt(MinMaxFacet<num_bigint::BigUint>, Option<PatternFacet>),
+    UnsignedLong(MinMaxFacet<num_bigint::BigUint>, Option<PatternFacet>),
     Decimal {
         min_max: MinMaxFacet<bigdecimal::BigDecimal>,
         pattern: Option<PatternFacet>,
@@ -81,7 +83,7 @@ impl super::Datatype for XsdDatatypes {
                     false
                 }
             },
-            XsdDatatypes::Decimal { min_max: min_max, pattern: pat, fraction_digits, total_digits } => {
+            XsdDatatypes::Decimal { min_max, pattern: pat, fraction_digits, total_digits } => {
                 bigdecimal::BigDecimal::from_str(value)
                     .map(|v| min_max.is_valid(&v) ).unwrap_or(false)
                 && pat.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
@@ -99,7 +101,8 @@ impl super::Datatype for XsdDatatypes {
                 unimplemented!()
             },
             XsdDatatypes::Duration(patt) => {
-                unimplemented!()
+                DURATION_RE.is_match(value)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Date(patt) => {
                 chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
@@ -112,8 +115,9 @@ impl super::Datatype for XsdDatatypes {
             XsdDatatypes::Double(patt) => {
                 value.parse::<f64>().is_ok() && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::AnyURI(_) => {
-                unimplemented!()
+            XsdDatatypes::AnyURI(patt) => {
+                uriparse::URIReference::try_from(value).is_ok()
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Language(patt) => {
                 LANG_RE.is_match(value) && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
@@ -122,11 +126,15 @@ impl super::Datatype for XsdDatatypes {
                 ( value == "true" || value == "false" || value == "1" || value == "0" )
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::UnsignedInt(_, _) => {
-                unimplemented!()
+            XsdDatatypes::UnsignedInt(min_max, patt) => {
+                num_bigint::BigUint::from_str(value)
+                    .map(|v| min_max.is_valid(&v) ).unwrap_or(false)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::UnsignedLong(_, _) => {
-                unimplemented!()
+            XsdDatatypes::UnsignedLong(min_max, patt) => {
+                num_bigint::BigUint::from_str(value)
+                    .map(|v| min_max.is_valid(&v) ).unwrap_or(false)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Id(patt) => {
                 patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
@@ -750,10 +758,10 @@ impl Compiler {
 
         for param in params {
             match &param.2.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::bigint(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::bigint(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::bigint(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::bigint(ctx, param)?)?,
+                "minInclusive" => min_max.min_inclusive(Self::biguint(ctx, param)?)?,
+                "minExclusive" => min_max.min_exclusive(Self::biguint(ctx, param)?)?,
+                "maxInclusive" => min_max.max_inclusive(Self::biguint(ctx, param)?)?,
+                "maxExclusive" => min_max.max_exclusive(Self::biguint(ctx, param)?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => return Err(FacetError::InvalidFacet(ctx.convert_span(&param.0), param.2.to_string()))
             }
@@ -771,10 +779,10 @@ impl Compiler {
 
         for param in params {
             match &param.2.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::bigint(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::bigint(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::bigint(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::bigint(ctx, param)?)?,
+                "minInclusive" => min_max.min_inclusive(Self::biguint(ctx, param)?)?,
+                "minExclusive" => min_max.min_exclusive(Self::biguint(ctx, param)?)?,
+                "maxInclusive" => min_max.max_inclusive(Self::biguint(ctx, param)?)?,
+                "maxExclusive" => min_max.max_exclusive(Self::biguint(ctx, param)?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => return Err(FacetError::InvalidFacet(ctx.convert_span(&param.0), param.2.to_string()))
             }
@@ -841,6 +849,11 @@ impl Compiler {
     }
 
     fn bigint(ctx: &Context, param: &types::Param) -> Result<num_bigint::BigInt, FacetError> {
+        param.3.as_string_value().parse()
+            .map_err(|e: num_bigint::ParseBigIntError| FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string()))
+    }
+
+    fn biguint(ctx: &Context, param: &types::Param) -> Result<num_bigint::BigUint, FacetError> {
         param.3.as_string_value().parse()
             .map_err(|e: num_bigint::ParseBigIntError| FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string()))
     }

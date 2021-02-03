@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+    "relaxng-syntax",
+    "relaxng-model",
+    "relaxng-validator",
+    "relaxng-tool",
+]

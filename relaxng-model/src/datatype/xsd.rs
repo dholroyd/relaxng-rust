@@ -26,8 +26,8 @@ impl super::Datatype for XsdDatatypeValues {
 }
 
 lazy_static! {
-    static ref LANG_RE: regex::Regex = regex::Regex::new("[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*").unwrap();
-    static ref DATETIME_RE: regex::Regex = regex::Regex::new("-?\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:Z(?:(?:\\+|-)\\d{2}:\\d{2}))?").unwrap();
+    static ref LANG_RE: regex::Regex = regex::Regex::new(r"^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$").unwrap();
+    static ref DATETIME_RE: regex::Regex = regex::Regex::new(r"^-?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z(?:(?:\+|-)\d{2}:\d{2}))?$").unwrap();
 }
 
 

@@ -1,0 +1,29 @@
+[package]
+name = "relaxng-validator"
+version = "0.1.0"
+authors = ["David Holroyd <dave@badgers-in-foil.co.uk>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+relaxng-model = { path = "../relaxng-model" }
+relaxng-syntax = { path = "../relaxng-syntax" }
+xmlparser = "0.13.3"
+xml-rs = "0.8.3"
+codemap = "0.1.3"
+codemap-diagnostic = "0.1.1"
+fnv = "1.0.7"
+
+[dev-dependencies]
+assert_matches = "1.3.0"
+roxmltree = "0.14.0"
+codemap = "0.1"
+codemap-diagnostic = "0.1"
+
+[[test]]
+harness = false
+name = "spectest"
+
+[profile.release]
+debug = true

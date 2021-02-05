@@ -100,7 +100,7 @@ pub struct ExternalPattern(pub Literal, pub Option<Inherit>);
 pub struct DatatypeValuePattern(
     // The default datatype if the schema doesn't specify one explicitly is "token"
     pub Option<DatatypeName>,
-    pub Literal
+    pub Literal,
 );
 
 #[derive(Debug, PartialEq)]
@@ -129,7 +129,10 @@ pub struct NamespacedName {
 
 impl NamespacedName {
     pub(crate) fn span(&self) -> Span {
-        Span { start: self.namespace_uri.0.start, end: self.localname.0.end }
+        Span {
+            start: self.namespace_uri.0.start,
+            end: self.localname.0.end,
+        }
     }
 }
 
@@ -138,7 +141,7 @@ pub struct Param(
     pub Span,
     pub Option<InitialAnnotation>,
     pub IdentifierOrKeyword,
-    pub Literal
+    pub Literal,
 );
 
 // TODO: remove this; Pattern can be a grammar anyway
@@ -153,7 +156,7 @@ pub enum GrammarContent {
     Define(Define),
     Div(Vec<GrammarContent>),
     Include(Include),
-    Annotation(AnnotationElement)
+    Annotation(AnnotationElement),
 }
 
 #[derive(Debug, PartialEq)]
@@ -300,7 +303,10 @@ pub struct QName(pub NcName, pub NcName);
 
 impl QName {
     pub fn span(&self) -> Span {
-        Span { start: (self.0).0.start, end: self.1.0.end }
+        Span {
+            start: (self.0).0.start,
+            end: self.1 .0.end,
+        }
     }
 }
 

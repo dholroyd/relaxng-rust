@@ -1,25 +1,22 @@
-use std::path::PathBuf;
-use structopt::StructOpt;
+use relaxng_model::model::DefineRule;
+use relaxng_model::{Compiler, RelaxError};
+use relaxng_validator::Validator;
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::Read;
+use std::path::PathBuf;
 use std::process::exit;
-use relaxng_validator::Validator;
-use relaxng_model::{Compiler, RelaxError};
-use std::cell::RefCell;
 use std::rc::Rc;
-use relaxng_model::model::DefineRule;
+use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
 enum Cli {
-    Validate {
-        schema: PathBuf,
-        xml: Vec<PathBuf>
-    }
+    Validate { schema: PathBuf, xml: Vec<PathBuf> },
 }
 
 fn main() {
     match Cli::from_args() {
-        Cli::Validate { schema, xml } => validate(schema, xml)
+        Cli::Validate { schema, xml } => validate(schema, xml),
     }
 }
 
@@ -43,14 +40,17 @@ fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
         eprintln!("Validating {:?}", xml);
         loop {
             match v.next() {
-                Some(Ok(())) => {},
+                Some(Ok(())) => {}
                 Some(Err(err)) => {
                     let (map, d) = v.diagnostic(xml.to_string_lossy().to_string(), doc, &err);
-                    let mut emitter = codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Auto, Some(&map));
+                    let mut emitter = codemap_diagnostic::Emitter::stderr(
+                        codemap_diagnostic::ColorConfig::Auto,
+                        Some(&map),
+                    );
                     emitter.emit(&[d]);
                     println!("Explanation: {}", v.explain());
                     exit(2);
-                },
+                }
                 None => break,
             }
         }

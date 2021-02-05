@@ -1,7 +1,7 @@
-use std::rc::Rc;
 use std::cell::RefCell;
-use std::ops::Range;
 use std::fmt;
+use std::ops::Range;
+use std::rc::Rc;
 
 pub type Span = Range<usize>;
 
@@ -28,7 +28,7 @@ impl DefineRule {
 #[derive(Debug)]
 pub enum CombineRule {
     Choice,
-    Interleave
+    Interleave,
 }
 
 #[derive(Debug)]
@@ -47,8 +47,13 @@ pub enum Pattern {
     Attribute(NameClass, Box<Pattern>),
     Element(NameClass, Box<Pattern>),
     Ref(codemap::Span, String, PatRef),
-    DatatypeValue { datatype: crate::datatype::DatatypeValues },
-    DatatypeName { datatype: crate::datatype::Datatypes, except: Option<Box<Pattern>> },
+    DatatypeValue {
+        datatype: crate::datatype::DatatypeValues,
+    },
+    DatatypeName {
+        datatype: crate::datatype::Datatypes,
+        except: Option<Box<Pattern>>,
+    },
     List(Box<Pattern>),
 }
 
@@ -62,7 +67,8 @@ impl fmt::Debug for PatRef {
             d.field(&"Some(...)")
         } else {
             d.field(&"None")
-        }.finish()
+        }
+        .finish()
     }
 }
 
@@ -76,10 +82,10 @@ pub enum NameClass {
     },
     NsName {
         namespace_uri: String,
-        except: Option<Box<NameClass>>
+        except: Option<Box<NameClass>>,
     },
     AnyName {
-        except: Option<Box<NameClass>>
+        except: Option<Box<NameClass>>,
     },
     Alt {
         a: Box<NameClass>,
@@ -96,12 +102,12 @@ impl NameClass {
     pub fn ns_name(namespace_uri: String, except: Option<NameClass>) -> NameClass {
         NameClass::NsName {
             namespace_uri,
-            except: except.map(Box::new)
+            except: except.map(Box::new),
         }
     }
     pub fn any_name(except: Option<NameClass>) -> NameClass {
         NameClass::AnyName {
-            except: except.map(Box::new)
+            except: except.map(Box::new),
         }
     }
     pub fn alt(a: NameClass, b: NameClass) -> NameClass {

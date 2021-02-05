@@ -1,9 +1,9 @@
+use crate::Context;
 use relaxng_syntax::types;
 use relaxng_syntax::types::{DatatypeName, NamespacedName};
-use crate::Context;
 
-pub mod xsd;
 pub mod relax;
+pub mod xsd;
 
 pub trait Namespaces {
     fn resolve(&self, prefix: &str) -> Option<&str>;
@@ -21,8 +21,18 @@ pub(crate) trait DatatypeCompiler {
     type Error;
 
     // TODO: accept type that provides a Span for value, rather than just &str
-    fn datatype_value(&self, ctx: &Context, name: &types::DatatypeName, value: &str) -> Result<Self::DTValue, Self::Error>;
-    fn datatype_name(&self, ctx: &Context, name: &types::DatatypeName, params: &[types::Param]) -> Result<Self::DT, Self::Error>;
+    fn datatype_value(
+        &self,
+        ctx: &Context,
+        name: &types::DatatypeName,
+        value: &str,
+    ) -> Result<Self::DTValue, Self::Error>;
+    fn datatype_name(
+        &self,
+        ctx: &Context,
+        name: &types::DatatypeName,
+        params: &[types::Param],
+    ) -> Result<Self::DT, Self::Error>;
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -53,7 +63,7 @@ impl Datatype for Datatypes {
 }
 #[derive(Debug)]
 pub enum Errors {
-    UnsupportedDatatypeLibrary{
+    UnsupportedDatatypeLibrary {
         span: codemap::Span,
         namespace: String,
     },
@@ -72,78 +82,107 @@ impl DatatypeCompiler for Compiler {
     type DTValue = DatatypeValues;
     type Error = Errors;
 
-    fn datatype_value(&self, ctx: &Context, datatype_name: &types::DatatypeName, value: &str) -> Result<Self::DTValue, Self::Error> {
+    fn datatype_value(
+        &self,
+        ctx: &Context,
+        datatype_name: &types::DatatypeName,
+        value: &str,
+    ) -> Result<Self::DTValue, Self::Error> {
         match datatype_name {
-            types::DatatypeName::String | types::DatatypeName::Token => {
-                self.relax.datatype_value(ctx, datatype_name, value)
-                    .map(DatatypeValues::Relax)
-                    .map_err(|e| Errors::Relax(e) )
-            },
-            types::DatatypeName::CName(types::QName(ref namespace_uri, _)) => {
-                self.dt_value(ctx, datatype_name, value, &namespace_uri.0, &namespace_uri.1)
-            },
-            DatatypeName::NamespacedName(NamespacedName { ref namespace_uri, .. }) => {
+            types::DatatypeName::String | types::DatatypeName::Token => self
+                .relax
+                .datatype_value(ctx, datatype_name, value)
+                .map(DatatypeValues::Relax)
+                .map_err(|e| Errors::Relax(e)),
+            types::DatatypeName::CName(types::QName(ref namespace_uri, _)) => self.dt_value(
+                ctx,
+                datatype_name,
+                value,
+                &namespace_uri.0,
+                &namespace_uri.1,
+            ),
+            DatatypeName::NamespacedName(NamespacedName {
+                ref namespace_uri, ..
+            }) => {
                 let ns = &namespace_uri.as_string_value()[..];
                 self.dt_value(ctx, datatype_name, value, &namespace_uri.0, ns)
-            },
+            }
         }
     }
 
-    fn datatype_name(&self, ctx: &Context, datatype_name: &types::DatatypeName, params: &[types::Param]) -> Result<Self::DT, Self::Error> {
+    fn datatype_name(
+        &self,
+        ctx: &Context,
+        datatype_name: &types::DatatypeName,
+        params: &[types::Param],
+    ) -> Result<Self::DT, Self::Error> {
         match datatype_name {
-            types::DatatypeName::String | types::DatatypeName::Token => {
-                self.relax.datatype_name(ctx, datatype_name, params)
-                    .map(Datatypes::Relax)
-                    .map_err(|e| Errors::Relax(e) )
-            },
+            types::DatatypeName::String | types::DatatypeName::Token => self
+                .relax
+                .datatype_name(ctx, datatype_name, params)
+                .map(Datatypes::Relax)
+                .map_err(|e| Errors::Relax(e)),
             DatatypeName::CName(types::QName(types::NcName(span, namespace_uri), _)) => {
                 self.dt_name(ctx, datatype_name, params, &span, namespace_uri)
-            },
+            }
             DatatypeName::NamespacedName(NamespacedName { namespace_uri, .. }) => {
                 let ns = &namespace_uri.as_string_value()[..];
                 self.dt_name(ctx, datatype_name, params, &namespace_uri.0, ns)
-            },
+            }
         }
     }
 }
 
-
 impl Compiler {
-    fn dt_name(&self, ctx: &Context, datatype_name: &DatatypeName, params: &[types::Param], ns_span: &types::Span, ns: &str) -> Result<Datatypes, Errors> {
+    fn dt_name(
+        &self,
+        ctx: &Context,
+        datatype_name: &DatatypeName,
+        params: &[types::Param],
+        ns_span: &types::Span,
+        ns: &str,
+    ) -> Result<Datatypes, Errors> {
         match ns {
-            "" => {
-                self.relax.datatype_name(ctx, datatype_name, params)
-                    .map(Datatypes::Relax)
-                    .map_err(|e| Errors::Relax(e))
-            }
-            xsd::NAMESPACE_URI => {
-                self.xsd.datatype_name(ctx, datatype_name, params)
-                    .map(Datatypes::Xsd)
-                    .map_err(Errors::Xsd)
-            },
+            "" => self
+                .relax
+                .datatype_name(ctx, datatype_name, params)
+                .map(Datatypes::Relax)
+                .map_err(|e| Errors::Relax(e)),
+            xsd::NAMESPACE_URI => self
+                .xsd
+                .datatype_name(ctx, datatype_name, params)
+                .map(Datatypes::Xsd)
+                .map_err(Errors::Xsd),
             _ => Err(Errors::UnsupportedDatatypeLibrary {
                 span: ctx.convert_span(ns_span),
                 namespace: ns.to_string(),
-            })
+            }),
         }
     }
 
-    fn dt_value(&self, ctx: &Context, datatype_name: &DatatypeName, value: &str, ns_span: &types::Span, ns: &str) -> Result<DatatypeValues, Errors> {
+    fn dt_value(
+        &self,
+        ctx: &Context,
+        datatype_name: &DatatypeName,
+        value: &str,
+        ns_span: &types::Span,
+        ns: &str,
+    ) -> Result<DatatypeValues, Errors> {
         match ns {
-            "" => {
-                self.relax.datatype_value(ctx, datatype_name, value)
-                    .map(DatatypeValues::Relax)
-                    .map_err(|e| Errors::Relax(e))
-            }
-            xsd::NAMESPACE_URI => {
-                self.xsd.datatype_value(ctx, datatype_name, value)
-                    .map(DatatypeValues::Xsd)
-                    .map_err(Errors::Xsd)
-            },
+            "" => self
+                .relax
+                .datatype_value(ctx, datatype_name, value)
+                .map(DatatypeValues::Relax)
+                .map_err(|e| Errors::Relax(e)),
+            xsd::NAMESPACE_URI => self
+                .xsd
+                .datatype_value(ctx, datatype_name, value)
+                .map(DatatypeValues::Xsd)
+                .map_err(Errors::Xsd),
             _ => Err(Errors::UnsupportedDatatypeLibrary {
                 span: ctx.convert_span(ns_span),
                 namespace: ns.to_string(),
-            })
+            }),
         }
     }
 }

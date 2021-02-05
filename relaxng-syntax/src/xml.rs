@@ -1,5 +1,5 @@
-use roxmltree::{Node, Attribute};
 use crate::types::*;
+use roxmltree::{Attribute, Node};
 use std::ops::Range;
 
 #[derive(Debug)]
@@ -14,22 +14,21 @@ pub enum Error {
 }
 
 pub fn parse(text: &str) -> Result<Schema> {
-    let doc = roxmltree::Document::parse(text)
-        .map_err(|e| {
-            // Gah!  The interface we want to expose is in terms of byte-offset + len pairs, but
-            // the errors from roxmltree give us
-            let (off, len) = text
-                .lines()
-                .take(e.pos().row as _)
-                .fold((0, 0), |(acc, _), line| (acc + line.len(), line.len()) );
+    let doc = roxmltree::Document::parse(text).map_err(|e| {
+        // Gah!  The interface we want to expose is in terms of byte-offset + len pairs, but
+        // the errors from roxmltree give us
+        let (off, len) = text
+            .lines()
+            .take(e.pos().row as _)
+            .fold((0, 0), |(acc, _), line| (acc + line.len(), line.len()));
 
-            let start = off+e.pos().col as usize;
-            let end = len-e.pos().col as usize;
-            Error::Xml(start..end, e.to_string())
-        })?;
+        let start = off + e.pos().col as usize;
+        let end = len - e.pos().col as usize;
+        Error::Xml(start..end, e.to_string())
+    })?;
     Ok(Schema {
         decls: vec![],
-        pattern_or_grammar: pattern_or_grammar(doc.root_element())?
+        pattern_or_grammar: pattern_or_grammar(doc.root_element())?,
     })
 }
 
@@ -42,11 +41,11 @@ fn pattern_or_grammar(root: Node) -> Result<PatternOrGrammar> {
                 Ok(PatternOrGrammar::Pattern(pattern(root)?))
             }
         }
-        _ => {
-            Err(Error::Expected(root.range(), "Expected root element with http://relaxng.org/ns/structure/1.0 namespace"))
-        }
+        _ => Err(Error::Expected(
+            root.range(),
+            "Expected root element with http://relaxng.org/ns/structure/1.0 namespace",
+        )),
     }
-
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -57,25 +56,25 @@ fn pattern(node: Node) -> Result<Pattern> {
     if node.is_element() && node.tag_name().namespace() == Some(NS) {
         check_standard_attrs(node)?;
         match node.tag_name().name() {
-            "element" => element(node).map( Pattern::Element ),
-            "attribute" => attribute(node).map( Pattern::Attribute ),
+            "element" => element(node).map(Pattern::Element),
+            "attribute" => attribute(node).map(Pattern::Attribute),
             "group" => group(node),
             "interleave" => interleave(node),
             "choice" => choice(node),
             "optional" => optional(node),
             "zeroOrMore" => zero_or_more(node),
             "oneOrMore" => one_or_more(node),
-            "list" => list(node).map( Pattern::List ),
-            "mixed" => mixed(node).map( Pattern::Mixed ),
-            "ref" => ref_patt(node).map( Pattern::Identifier ),
-            "parentRef" => parent_ref(node).map( Pattern::Parent ),
+            "list" => list(node).map(Pattern::List),
+            "mixed" => mixed(node).map(Pattern::Mixed),
+            "ref" => ref_patt(node).map(Pattern::Identifier),
+            "parentRef" => parent_ref(node).map(Pattern::Parent),
             "empty" => empty(node),
             "text" => text(node),
-            "value" => value(node).map( Pattern::DatatypeValue ),
-            "data" => data(node).map( Pattern::DatatypeName ),
+            "value" => value(node).map(Pattern::DatatypeValue),
+            "data" => data(node).map(Pattern::DatatypeName),
             "notAllowed" => not_allowed(node),
-            "externalRef" => external_ref(node).map( Pattern::External ),
-            "grammar" => grammar(node).map( Pattern::Grammar ),
+            "externalRef" => external_ref(node).map(Pattern::External),
+            "grammar" => grammar(node).map(Pattern::Grammar),
             _ => Err(Error::Expected(node.range(), "pattern")),
         }
     } else {
@@ -91,19 +90,26 @@ fn check_standard_attrs(node: Node) -> Result<()> {
         } else {
             // TODO: move these checks into relaxng-model crate
             if !rfc2396::validate(val) {
-                Err(Error::Unexpected(dt_lib.value_range(), "Datatype library URI is invalid"))
+                Err(Error::Unexpected(
+                    dt_lib.value_range(),
+                    "Datatype library URI is invalid",
+                ))
             } else {
                 match url::Url::parse(val) {
                     Ok(url) => {
                         if url.fragment().is_some() {
-                            Err(Error::Unexpected(dt_lib.value_range(), "Datatype library URI must not include a fragment identifier"))
+                            Err(Error::Unexpected(
+                                dt_lib.value_range(),
+                                "Datatype library URI must not include a fragment identifier",
+                            ))
                         } else {
                             Ok(())
                         }
-                    },
-                    Err(_) => {
-                        Err(Error::Unexpected(dt_lib.value_range(), "Invalid datatype library URI"))
-                    },
+                    }
+                    Err(_) => Err(Error::Unexpected(
+                        dt_lib.value_range(),
+                        "Invalid datatype library URI",
+                    )),
                 }
             }
         }
@@ -143,22 +149,28 @@ fn element(node: Node) -> Result<ElementPattern> {
         let pattern = single_pattern_or_group(pat_el)?;
         (name_class, pattern)
     } else {
-        let name_el = first_rng_child(node).ok_or(Error::Expected(node.range(), "name and pattern children"))?;
+        let name_el = first_rng_child(node)
+            .ok_or(Error::Expected(node.range(), "name and pattern children"))?;
         let name_class = name_class(name_el, InExcept::OutsideExcept)?;
-        let pat_el = next_rng_sibling(name_el).ok_or(Error::Expected(node.range(), "pattern child"))?;
+        let pat_el =
+            next_rng_sibling(name_el).ok_or(Error::Expected(node.range(), "pattern child"))?;
         let pattern = single_pattern_or_group(pat_el)?;
         (name_class, pattern)
     };
     Ok(ElementPattern {
-        span: node.range().start+1..node.range().start+8,
+        span: node.range().start + 1..node.range().start + 8,
         name_class,
-        pattern: Box::new(pattern)
+        pattern: Box::new(pattern),
     })
 }
 
 fn no_attrs_except(node: Node, names: &[&str]) -> std::result::Result<(), Error> {
-    if let Some(a) = node.attributes().iter().find(|a| is_rng_att(a) && !names.contains(&a.name()) ) {
-        return Err(Error::Unexpected(a.range(), "Unexpected attribute"))
+    if let Some(a) = node
+        .attributes()
+        .iter()
+        .find(|a| is_rng_att(a) && !names.contains(&a.name()))
+    {
+        return Err(Error::Unexpected(a.range(), "Unexpected attribute"));
     }
     Ok(())
 }
@@ -170,21 +182,32 @@ enum InExcept {
 }
 
 fn name_class(node: Node, in_except: InExcept) -> Result<NameClass> {
-    if node.is_element() && node.tag_name().namespace() == Some("http://relaxng.org/ns/structure/1.0") {
+    if node.is_element()
+        && node.tag_name().namespace() == Some("http://relaxng.org/ns/structure/1.0")
+    {
         match node.tag_name().name() {
             "name" => qname_el(node).map(NameClass::Name),
             "anyName" => {
                 if in_except == InExcept::InsideExcept {
-                    return Err(Error::Unexpected(node.range(), "<anyName> not allowed in <except>"))
+                    return Err(Error::Unexpected(
+                        node.range(),
+                        "<anyName> not allowed in <except>",
+                    ));
                 }
                 any_name(node).map(NameClass::AnyName)
-            },
+            }
             "nsName" => ns_name(node).map(NameClass::NsName),
             "choice" => name_class_choice(node, in_except),
-            _ => Err(Error::Expected(node.range(), "Either <name> <anyName> <nsName> or <choice>")),
+            _ => Err(Error::Expected(
+                node.range(),
+                "Either <name> <anyName> <nsName> or <choice>",
+            )),
         }
     } else {
-        Err(Error::Expected(node.range(), "Either <name> <anyName> <nsName> or <choice>"))
+        Err(Error::Expected(
+            node.range(),
+            "Either <name> <anyName> <nsName> or <choice>",
+        ))
     }
 }
 
@@ -192,20 +215,24 @@ fn any_name(node: Node) -> Result<AnyName> {
     let except = if let Some(ex) = first_rng_child(node) {
         if is_el(ex, "except") {
             if let Some(next) = next_rng_sibling(ex) {
-                return Err(Error::Unexpected(next.range(), "No other elements allowed here"))
+                return Err(Error::Unexpected(
+                    next.range(),
+                    "No other elements allowed here",
+                ));
             }
             Some(except_nameclass(ex)?)
         } else {
-            return Err(Error::Unexpected(ex.range(), "Only <except> allowed here"))
+            return Err(Error::Unexpected(ex.range(), "Only <except> allowed here"));
         }
     } else {
         None
     };
-    Ok(AnyName(except.map(|e| Box::new(e) )))
+    Ok(AnyName(except.map(|e| Box::new(e))))
 }
 
 fn except_nameclass(node: Node) -> Result<NameClass> {
-    let mut child = first_rng_child(node).ok_or(Error::Expected(node.range(), "Expected name-class child"))?;
+    let mut child =
+        first_rng_child(node).ok_or(Error::Expected(node.range(), "Expected name-class child"))?;
     let mut pat = name_class(child, InExcept::InsideExcept)?;
     while let Some(node) = next_rng_sibling(child) {
         let this = name_class(node, InExcept::InsideExcept)?;
@@ -214,7 +241,6 @@ fn except_nameclass(node: Node) -> Result<NameClass> {
     }
     Ok(pat)
     // TODO: check that no child is <anyName>
-
 }
 
 fn ns_name(node: Node) -> Result<NsName> {
@@ -222,11 +248,14 @@ fn ns_name(node: Node) -> Result<NsName> {
     let except = if let Some(ex) = first_rng_child(node) {
         if is_el(ex, "except") {
             if let Some(next) = next_rng_sibling(ex) {
-                return Err(Error::Unexpected(next.range(), "No other elements allowed here"))
+                return Err(Error::Unexpected(
+                    next.range(),
+                    "No other elements allowed here",
+                ));
             }
             Some(except_nameclass(ex)?)
         } else {
-            return Err(Error::Unexpected(ex.range(), "Only <except> allowed here"))
+            return Err(Error::Unexpected(ex.range(), "Only <except> allowed here"));
         }
     } else {
         None
@@ -235,7 +264,7 @@ fn ns_name(node: Node) -> Result<NsName> {
         // TODO: the NsName type was defined to match compact-syntax and doesn't really work with
         //       xml syntax; we need a representation that works for xml-syntax too
         name: NamespaceOrPrefix::NamespaceUri(ns.unwrap_or(Literal::new(0..0, String::new()))),
-        except: except.map(|e| Box::new(e) )
+        except: except.map(|e| Box::new(e)),
     })
 }
 
@@ -307,47 +336,50 @@ fn attribute(node: Node) -> Result<AttributePattern> {
     let ns = get_ns_att(node);
     let (name_class, rest) = if let Some(name) = node.attribute_node("name") {
         if name.value() == "xmlns" && (ns == None || ns.unwrap().value() == "") {
-            return Err(Error::Unexpected(name.value_range(), "Schemas may not define the xmlns attribute"));
+            return Err(Error::Unexpected(
+                name.value_range(),
+                "Schemas may not define the xmlns attribute",
+            ));
         }
         if ns.is_some() && ns.unwrap().value() == "http://www.w3.org/2000/xmlns" {
             // TODO: additionally supply the range where the ns was declared
-            return Err(Error::Unexpected(name.range(), "Attributes may not use the http://www.w3.org/2000/xmlns namespace"));
+            return Err(Error::Unexpected(
+                name.range(),
+                "Attributes may not use the http://www.w3.org/2000/xmlns namespace",
+            ));
         }
         (
             NameClass::Name(qname_att(node, name)?),
             first_rng_child(node),
         )
     } else {
-        let name_el = first_rng_child(node).ok_or(Error::Expected(node.range(), "name and pattern children"))?;
+        let name_el = first_rng_child(node)
+            .ok_or(Error::Expected(node.range(), "name and pattern children"))?;
         let name_class = name_class(name_el, InExcept::OutsideExcept)?;
-        (
-            name_class,
-            next_rng_sibling(name_el),
-        )
+        (name_class, next_rng_sibling(name_el))
     };
     let (pattern, rest) = if let Some(child) = rest {
-        (
-            pattern(child)?,
-            next_rng_sibling(child),
-        )
+        (pattern(child)?, next_rng_sibling(child))
     } else {
-        (
-            Pattern::Text,
-            None,
-        )
+        (Pattern::Text, None)
     };
     if let Some(rest) = rest {
-        return Err(Error::Unexpected(rest.range(), "Unexpected additional child element of <attribute>"))
+        return Err(Error::Unexpected(
+            rest.range(),
+            "Unexpected additional child element of <attribute>",
+        ));
     }
     Ok(AttributePattern {
-        span: node.range().start+1..node.range().start+10,
+        span: node.range().start + 1..node.range().start + 10,
         name_class,
-        pattern: Box::new(pattern)
+        pattern: Box::new(pattern),
     })
 }
 
 fn group(node: Node) -> Result<Pattern> {
-    let patt = single_pattern_or_group(first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?)?;
+    let patt = single_pattern_or_group(
+        first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
+    )?;
     Ok(Pattern::Group(Box::new(patt)))
 }
 fn interleave(node: Node) -> Result<Pattern> {
@@ -373,27 +405,37 @@ fn choice(node: Node) -> Result<Pattern> {
 }
 
 fn optional(node: Node) -> Result<Pattern> {
-    let patt = single_pattern_or_group(first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?)?;
+    let patt = single_pattern_or_group(
+        first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
+    )?;
     Ok(Pattern::Optional(Box::new(patt)))
 }
 
 fn zero_or_more(node: Node) -> Result<Pattern> {
-    let patt = single_pattern_or_group(first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?)?;
+    let patt = single_pattern_or_group(
+        first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
+    )?;
     Ok(Pattern::ZeroOrMore(Box::new(patt)))
 }
 
 fn one_or_more(node: Node) -> Result<Pattern> {
-    let patt = single_pattern_or_group(first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?)?;
+    let patt = single_pattern_or_group(
+        first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
+    )?;
     Ok(Pattern::OneOrMore(Box::new(patt)))
 }
 
 fn list(node: Node) -> Result<ListPattern> {
-    let patt = single_pattern_or_group(first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?)?;
+    let patt = single_pattern_or_group(
+        first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
+    )?;
     Ok(ListPattern(Box::new(patt)))
 }
 
 fn mixed(node: Node) -> Result<MixedPattern> {
-    let patt = single_pattern_or_group(first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?)?;
+    let patt = single_pattern_or_group(
+        first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
+    )?;
     Ok(MixedPattern(Box::new(patt)))
 }
 
@@ -431,21 +473,33 @@ fn value(node: Node) -> Result<DatatypeValuePattern> {
     no_element_children(node)?;
     // TODO: have a better representation for 'unspecified' (default) datatype namespace that
     // doesn't need a bogus 0..0 span,
-    let datatype_ns = get_datatype_lib(node)
-        .unwrap_or(Literal::new(0..0, "".to_string()));
+    let datatype_ns = get_datatype_lib(node).unwrap_or(Literal::new(0..0, "".to_string()));
     let type_name = node
         .attribute_node("type")
-        .map( |attr| ncname(attr.value_range(), attr.value()) ).transpose()?;
+        .map(|attr| ncname(attr.value_range(), attr.value()))
+        .transpose()?;
     let val = if let Some(child) = node.first_child() {
-        let seg = LiteralSegment { body: child.text().ok_or(Error::Expected(node.range(), "Text content"))?.to_string() };
+        let seg = LiteralSegment {
+            body: child
+                .text()
+                .ok_or(Error::Expected(node.range(), "Text content"))?
+                .to_string(),
+        };
         Literal(child.range(), vec![seg])
     } else {
         // treat the value as ""
-        let seg = LiteralSegment { body: "".to_string() };
+        let seg = LiteralSegment {
+            body: "".to_string(),
+        };
         Literal(node.range(), vec![seg])
     };
     Ok(DatatypeValuePattern(
-        type_name.map( |name| DatatypeName::NamespacedName(NamespacedName { namespace_uri: datatype_ns, localname: name })),
+        type_name.map(|name| {
+            DatatypeName::NamespacedName(NamespacedName {
+                namespace_uri: datatype_ns,
+                localname: name,
+            })
+        }),
         val,
     ))
 }
@@ -453,21 +507,27 @@ fn value(node: Node) -> Result<DatatypeValuePattern> {
 fn data(node: Node) -> Result<DatatypeNamePattern> {
     // TODO: have a better representation for 'unspecified' (default) datatype namespace that
     // doesn't need a bogus 0..0 span,
-    let datatype_ns = get_datatype_lib(node)
-        .unwrap_or(Literal::new(0..0, "".to_string()));
+    let datatype_ns = get_datatype_lib(node).unwrap_or(Literal::new(0..0, "".to_string()));
     let type_attr = node
         .attribute_node("type")
         .ok_or(Error::Expected(node.range(), "type attribute"))?;
     let type_name = match type_attr.value().trim() {
         // TODO: check datatypeLibrary namespace!
-        "token"  => DatatypeName::Token,
+        "token" => DatatypeName::Token,
         val => {
             let name = ncname(type_attr.value_range(), val)?;
-            DatatypeName::NamespacedName(NamespacedName { namespace_uri: datatype_ns, localname: name })
+            DatatypeName::NamespacedName(NamespacedName {
+                namespace_uri: datatype_ns,
+                localname: name,
+            })
         }
     };
-    if let Some(a) = node.attributes().iter().find(|a| is_rng_att(a) && a.name() != "type" && a.name() != "datatypeLibrary" ) {
-        return Err(Error::Unexpected(a.range(), "Unexpected attribute"))
+    if let Some(a) = node
+        .attributes()
+        .iter()
+        .find(|a| is_rng_att(a) && a.name() != "type" && a.name() != "datatypeLibrary")
+    {
+        return Err(Error::Unexpected(a.range(), "Unexpected attribute"));
     }
 
     let (params, rest) = if let Some(child) = first_rng_child(node) {
@@ -477,10 +537,10 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
     };
     let (except, rest) = if let Some(node) = rest {
         if !is_el(node, "except") {
-            return Err(Error::Unexpected(node.range(), "Unexpected element"))
+            return Err(Error::Unexpected(node.range(), "Unexpected element"));
         }
-        let except_patt = first_rng_child(node)
-            .ok_or(Error::Expected(node.range(), "child pattern element"))?;
+        let except_patt =
+            first_rng_child(node).ok_or(Error::Expected(node.range(), "child pattern element"))?;
         (
             Some(single_pattern_or_choice(except_patt)?),
             next_rng_sibling(node),
@@ -489,12 +549,12 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
         (None, rest)
     };
     if let Some(rest) = rest {
-        return Err(Error::Unexpected(rest.range(), "Unexpected element"))
+        return Err(Error::Unexpected(rest.range(), "Unexpected element"));
     }
     Ok(DatatypeNamePattern(
         type_name,
         Some(params),
-        except.map( Box::new ),
+        except.map(Box::new),
     ))
 }
 
@@ -508,8 +568,9 @@ fn single_pattern_or_choice(mut node: Node) -> Result<Pattern> {
     Ok(pat)
 }
 
-
-fn params<'a, 'input: 'a>(node: Node<'a, 'input>) -> Result<(Vec<Param>, Option<Node<'a, 'input>>)> {
+fn params<'a, 'input: 'a>(
+    node: Node<'a, 'input>,
+) -> Result<(Vec<Param>, Option<Node<'a, 'input>>)> {
     let mut result = vec![];
     let mut next = Some(node);
     while let Some(node) = next {
@@ -529,11 +590,23 @@ fn param(node: Node) -> Result<Param> {
         .ok_or(Error::Expected(node.range(), "name attribute"))?;
     let name = attr_ncname(name)?;
 
-    let child = node.first_child().ok_or(Error::Expected(node.range(), "Text content"))?;
-    let seg = LiteralSegment{ body: child.text().ok_or(Error::Expected(node.range(), "Text content"))?.to_string() };
-    let val = Literal(child.range(), vec![ seg ]);
+    let child = node
+        .first_child()
+        .ok_or(Error::Expected(node.range(), "Text content"))?;
+    let seg = LiteralSegment {
+        body: child
+            .text()
+            .ok_or(Error::Expected(node.range(), "Text content"))?
+            .to_string(),
+    };
+    let val = Literal(child.range(), vec![seg]);
 
-    Ok(Param(node.range(), None, IdentifierOrKeyword::Identifier(name), val))
+    Ok(Param(
+        node.range(),
+        None,
+        IdentifierOrKeyword::Identifier(name),
+        val,
+    ))
 }
 
 fn not_allowed(node: Node) -> Result<Pattern> {
@@ -549,13 +622,12 @@ fn external_ref(node: Node) -> Result<ExternalPattern> {
 
     // TODO: ExternalPattern's requirement for a 'literal' here is inconvenient, and its API should
     //       be altered to make using it here simpler
-    let seg = LiteralSegment{ body: href.value().to_string() };
-    let val = Literal(href.value_range(), vec![ seg ]);
+    let seg = LiteralSegment {
+        body: href.value().to_string(),
+    };
+    let val = Literal(href.value_range(), vec![seg]);
 
-    Ok(ExternalPattern(
-        val,
-        None,
-    ))
+    Ok(ExternalPattern(val, None))
 }
 
 fn grammar(node: Node) -> Result<GrammarPattern> {
@@ -566,20 +638,31 @@ fn grammar(node: Node) -> Result<GrammarPattern> {
         next = next_rng_sibling(child);
     }
 
-    Ok(GrammarPattern { span: node.range(), content })
+    Ok(GrammarPattern {
+        span: node.range(),
+        content,
+    })
 }
 
 fn grammar_content(node: Node) -> Result<GrammarContent> {
-    if node.is_element() && node.tag_name().namespace() == Some("http://relaxng.org/ns/structure/1.0") {
+    if node.is_element()
+        && node.tag_name().namespace() == Some("http://relaxng.org/ns/structure/1.0")
+    {
         match node.tag_name().name() {
-            "start" => start(node).map( GrammarContent::Define ),
-            "define" => define(node).map( GrammarContent::Define ),
+            "start" => start(node).map(GrammarContent::Define),
+            "define" => define(node).map(GrammarContent::Define),
             "div" => div_grammar_content(node),
-            "include" => include(node).map( GrammarContent::Include ),
-            _ => Err(Error::Expected(node.range(), "Expected <start> <define> <div> or <include> element"))
+            "include" => include(node).map(GrammarContent::Include),
+            _ => Err(Error::Expected(
+                node.range(),
+                "Expected <start> <define> <div> or <include> element",
+            )),
         }
     } else {
-        Err(Error::Expected(node.range(), "Expected <start> <define> <div> or <include> element"))
+        Err(Error::Expected(
+            node.range(),
+            "Expected <start> <define> <div> or <include> element",
+        ))
     }
 }
 
@@ -588,25 +671,35 @@ fn start(node: Node) -> Result<Define> {
         match combine.value().trim() {
             "choice" => AssignMethod::Choice,
             "interleave" => AssignMethod::Interleave,
-            _ => return Err(Error::Expected(combine.value_range(), "Expected either \"choice\" or \"interleave\""))
+            _ => {
+                return Err(Error::Expected(
+                    combine.value_range(),
+                    "Expected either \"choice\" or \"interleave\"",
+                ))
+            }
         }
     } else {
         AssignMethod::Assign
     };
-    if let Some(a) = node.attributes().iter().find(|a| is_rng_att(a) && a.name() != "combine") {
-        return Err(Error::Unexpected(a.range(), "Unexpected attribute"))
+    if let Some(a) = node
+        .attributes()
+        .iter()
+        .find(|a| is_rng_att(a) && a.name() != "combine")
+    {
+        return Err(Error::Unexpected(a.range(), "Unexpected attribute"));
     }
     // we just produce another 'Define' named "start", rather than using a dedicated 'Start' type,
     // so as to avoid duplication of code handling 'start' definitions and other definitions
     // TODO: revisit this design later
 
-    let start_span = node.range().start+1..node.range().start+6;
+    let start_span = node.range().start + 1..node.range().start + 6;
     let name = Identifier(start_span, "start".to_string());
 
-    let child = first_rng_child(node).ok_or(Error::Expected(node.range(), "Child pattern element"))?;
+    let child =
+        first_rng_child(node).ok_or(Error::Expected(node.range(), "Child pattern element"))?;
     let patt = pattern(child)?;
     if let Some(rest) = next_rng_sibling(child) {
-        return Err(Error::Unexpected(rest.range(), "Unexpected element"))
+        return Err(Error::Unexpected(rest.range(), "Unexpected element"));
     }
     Ok(Define(node.range(), name, combine, patt))
 }
@@ -616,7 +709,12 @@ fn define(node: Node) -> Result<Define> {
         match combine.value().trim() {
             "choice" => AssignMethod::Choice,
             "interleave" => AssignMethod::Interleave,
-            _ => return Err(Error::Expected(combine.value_range(), "Expected either \"choice\" or \"interleave\""))
+            _ => {
+                return Err(Error::Expected(
+                    combine.value_range(),
+                    "Expected either \"choice\" or \"interleave\"",
+                ))
+            }
         }
     } else {
         AssignMethod::Assign
@@ -627,7 +725,9 @@ fn define(node: Node) -> Result<Define> {
         .ok_or(Error::Expected(node.range(), "name attribute"))?;
     let name = attr_ncname(name)?;
 
-    let patt = single_pattern_or_group(first_rng_child(node).ok_or(Error::Expected(node.range(), "Child pattern element"))?)?;
+    let patt = single_pattern_or_group(
+        first_rng_child(node).ok_or(Error::Expected(node.range(), "Child pattern element"))?,
+    )?;
     Ok(Define(node.range(), name, combine, patt))
 }
 
@@ -656,8 +756,10 @@ fn include(node: Node) -> Result<Include> {
         .attribute_node("href")
         .ok_or(Error::Expected(node.range(), "href attribute"))?;
 
-    let seg = LiteralSegment{ body: href.value().to_string() };
-    let val = Literal(href.value_range(), vec![ seg ]);
+    let seg = LiteralSegment {
+        body: href.value().to_string(),
+    };
+    let val = Literal(href.value_range(), vec![seg]);
 
     let mut next = first_rng_child(node);
     let mut content = vec![];
@@ -666,23 +768,27 @@ fn include(node: Node) -> Result<Include> {
         next = next_rng_sibling(child);
     }
 
-    Ok(Include(
-        val,
-        None,
-        Some(content),
-    ))
+    Ok(Include(val, None, Some(content)))
 }
 
 fn include_content(node: Node) -> Result<IncludeContent> {
-    if node.is_element() && node.tag_name().namespace() == Some("http://relaxng.org/ns/structure/1.0") {
+    if node.is_element()
+        && node.tag_name().namespace() == Some("http://relaxng.org/ns/structure/1.0")
+    {
         match node.tag_name().name() {
-            "start" => start(node).map( IncludeContent::Define ),
-            "define" => define(node).map( IncludeContent::Define ),
+            "start" => start(node).map(IncludeContent::Define),
+            "define" => define(node).map(IncludeContent::Define),
             "div" => div_include_content(node),
-            _ => Err(Error::Expected(node.range(), "Expected <start> <define> or <div> element"))
+            _ => Err(Error::Expected(
+                node.range(),
+                "Expected <start> <define> or <div> element",
+            )),
         }
     } else {
-        Err(Error::Expected(node.range(), "Expected <start> <define> or <div> element"))
+        Err(Error::Expected(
+            node.range(),
+            "Expected <start> <define> or <div> element",
+        ))
     }
 }
 
@@ -703,17 +809,22 @@ fn qname_att(node: Node, name: &Attribute) -> Result<Name> {
         let start = name.value_range().start;
         let end = name.value_range().end;
         let prefix = &val[0..pos];
-        let prefix_span = start..(start+pos);
+        let prefix_span = start..(start + pos);
         let namespace = lookup_namespace_def(node, Some(prefix.trim()))
             .ok_or_else(|| Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix"))?;
-        let localname = ncname(start+pos+1..end, &val[pos+1..])?;
+        let localname = ncname(start + pos + 1..end, &val[pos + 1..])?;
         let ns = Literal::new(prefix_span, namespace.to_string());
-        Ok(Name::NamespacedName(NamespacedName { namespace_uri: ns, localname }))
+        Ok(Name::NamespacedName(NamespacedName {
+            namespace_uri: ns,
+            localname,
+        }))
     } else {
-        let ns = get_ns(node)
-            .unwrap_or(Literal::new(0..0, String::new()));  // TODO allow None or something rather than inventing an 'empty' NcName
+        let ns = get_ns(node).unwrap_or(Literal::new(0..0, String::new())); // TODO allow None or something rather than inventing an 'empty' NcName
         let localname = ncname(name.value_range(), val)?;
-        Ok(Name::NamespacedName(NamespacedName { namespace_uri: ns, localname }))
+        Ok(Name::NamespacedName(NamespacedName {
+            namespace_uri: ns,
+            localname,
+        }))
     }
 }
 
@@ -727,10 +838,12 @@ fn qname_el(name: Node) -> Result<Name> {
             let localname = ncname(start + pos + 1..end, val[pos + 1..].trim())?;
             Ok(Name::CName(QName(prefix, localname)))
         } else {
-            let ns = get_ns(name)
-                .unwrap_or(Literal::new(0..0, "".to_string()));  // TODO allow None or something rather than inventing an 'empty' NcName
+            let ns = get_ns(name).unwrap_or(Literal::new(0..0, "".to_string())); // TODO allow None or something rather than inventing an 'empty' NcName
             let localname = ncname(name.first_child().unwrap().range(), val)?;
-            Ok(Name::NamespacedName(NamespacedName { namespace_uri: ns, localname }))
+            Ok(Name::NamespacedName(NamespacedName {
+                namespace_uri: ns,
+                localname,
+            }))
         }
     } else {
         Err(Error::Expected(name.range(), "Text contents"))
@@ -745,27 +858,37 @@ fn ncname(range: Range<usize>, val: &str) -> Result<NcName> {
     for (i, c) in val.char_indices() {
         if i == 0 {
             if !is_nc_name_start_char(c) {
-                return Err(Error::Unexpected(range.start..range.start + 1, "Unexpected character for NcName"));
+                return Err(Error::Unexpected(
+                    range.start..range.start + 1,
+                    "Unexpected character for NcName",
+                ));
             }
         } else {
             if !is_nc_name_char(c) {
                 println!("NcName Urk! {:?}", val);
-                return Err(Error::Unexpected(range.start+i..range.start+i+1, "Unexpected character for NcName"));
+                return Err(Error::Unexpected(
+                    range.start + i..range.start + i + 1,
+                    "Unexpected character for NcName",
+                ));
             }
         }
     }
     Ok(NcName(range, val.to_string()))
-
 }
 
-fn lookup_namespace_def<'a, 'input: 'a>(node: Node<'a, 'input>, prefix: Option<&str>) -> Option<&'a str> {
+fn lookup_namespace_def<'a, 'input: 'a>(
+    node: Node<'a, 'input>,
+    prefix: Option<&str>,
+) -> Option<&'a str> {
     if prefix == Some("xml") {
         Some("http://www.w3.org/XML/1998/namespace")
     } else {
-        node.namespaces().iter().find(|ns| ns.name() == prefix).map(|n| n.uri())
+        node.namespaces()
+            .iter()
+            .find(|ns| ns.name() == prefix)
+            .map(|n| n.uri())
     }
 }
-
 
 fn ident(range: Range<usize>, val: &str) -> Result<Identifier> {
     let val = val.trim();
@@ -775,11 +898,17 @@ fn ident(range: Range<usize>, val: &str) -> Result<Identifier> {
     for (i, c) in val.char_indices() {
         if i == 0 {
             if !is_nc_name_start_char(c) {
-                return Err(Error::Unexpected(range.start..range.start + 1, "Unexpected character within identifier"));
+                return Err(Error::Unexpected(
+                    range.start..range.start + 1,
+                    "Unexpected character within identifier",
+                ));
             }
         } else {
             if !is_nc_name_char(c) {
-                return Err(Error::Unexpected(range.start+i..range.start+i+1, "Unexpected character within identifier"));
+                return Err(Error::Unexpected(
+                    range.start + i..range.start + i + 1,
+                    "Unexpected character within identifier",
+                ));
             }
         }
     }
@@ -788,22 +917,21 @@ fn ident(range: Range<usize>, val: &str) -> Result<Identifier> {
 
 fn is_nc_name_start_char(c: char) -> bool {
     match c {
-        'A'..='Z' |
-        '_' |
-        'a'..='z' |
-        '\u{C0}'..='\u{D6}' |
-        '\u{D8}'..='\u{F6}' |
-        '\u{F8}'..='\u{2FF}' |
-        '\u{370}'..='\u{37D}' |
-        '\u{37F}'..='\u{1FFF}' |
-        '\u{200C}'..='\u{200D}' |
-        '\u{2070}'..='\u{218F}' |
-        '\u{2C00}'..='\u{2FEF}' |
-        '\u{3001}'..='\u{D7FF}' |
-        '\u{F900}'..='\u{FDCF}' |
-        '\u{FDF0}'..='\u{FFFD}' |
-        '\u{10000}'..='\u{EFFFF}'
-            => true,
+        'A'..='Z'
+        | '_'
+        | 'a'..='z'
+        | '\u{C0}'..='\u{D6}'
+        | '\u{D8}'..='\u{F6}'
+        | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}'
+        | '\u{37F}'..='\u{1FFF}'
+        | '\u{200C}'..='\u{200D}'
+        | '\u{2070}'..='\u{218F}'
+        | '\u{2C00}'..='\u{2FEF}'
+        | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}'
+        | '\u{FDF0}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{EFFFF}' => true,
         _ => false,
     }
 }
@@ -812,18 +940,16 @@ fn is_nc_name_char(c: char) -> bool {
         return true;
     } else {
         match c {
-            '-' |
-            '.' |
-            '0'..='9' |
-            '\u{B7}' |
-            '\u{0300}'..='\u{036F}' |
-            '\u{203F}'..='\u{2040}'
-                => true,
+            '-'
+            | '.'
+            | '0'..='9'
+            | '\u{B7}'
+            | '\u{0300}'..='\u{036F}'
+            | '\u{203F}'..='\u{2040}' => true,
             _ => false,
         }
     }
 }
-
 
 fn is_el(node: Node, name: &'static str) -> bool {
     node.is_element() && node.tag_name().name() == name && is_rng_node(node)
@@ -833,7 +959,7 @@ fn is_rng_node(node: Node) -> bool {
     is_rng(node.tag_name().namespace())
 }
 
-fn is_rng_att(a: &Attribute) -> bool{
+fn is_rng_att(a: &Attribute) -> bool {
     // if an attribute has no namespace prefix, then it is not formally in the default namesapce
     // of the document (as an element with no namespace prefix would be).  Here we assume that we
     // only ever call this function on an attribute that was on an element within the relaxng
@@ -847,7 +973,7 @@ fn is_rng(ns: Option<&str>) -> bool {
 }
 
 fn no_attrs(node: Node) -> Result<()> {
-    if let Some(att) = node.attributes().iter().find(|a| is_rng_att(a) ) {
+    if let Some(att) = node.attributes().iter().find(|a| is_rng_att(a)) {
         Err(Error::Unexpected(att.range(), "Unexpected attribute"))
     } else {
         Ok(())
@@ -870,7 +996,6 @@ fn no_element_children(node: Node) -> Result<()> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use crate::types::*;
@@ -878,8 +1003,11 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let doc = roxmltree::Document::parse("<?xml version = '1.0' encoding = 'utf-8' ?>
- <element xmlns=\"http://relaxng.org/ns/structure/1.0\" name=\"library\"><text/></element>").expect("Parsing XML");
+        let doc = roxmltree::Document::parse(
+            "<?xml version = '1.0' encoding = 'utf-8' ?>
+ <element xmlns=\"http://relaxng.org/ns/structure/1.0\" name=\"library\"><text/></element>",
+        )
+        .expect("Parsing XML");
         let result = super::pattern(doc.root_element()).unwrap();
         if let Pattern::Element(el) = result {
             assert_matches!(

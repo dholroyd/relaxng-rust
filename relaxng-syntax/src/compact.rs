@@ -1,4 +1,6 @@
 use crate::types::*;
+use nom::combinator::cut;
+use nom::sequence::preceded;
 use nom::{
     branch::alt,
     bytes::complete::{is_not, tag, take_until},
@@ -12,10 +14,8 @@ use nom::{
     sequence::{delimited, tuple},
     AsChar, IResult, InputIter, Slice,
 };
-use nom_locate::{LocatedSpan, position};
-use std::ops::{RangeBounds, RangeFrom, Range};
-use nom::sequence::preceded;
-use nom::combinator::cut;
+use nom_locate::{position, LocatedSpan};
+use std::ops::{Range, RangeBounds, RangeFrom};
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
@@ -38,11 +38,22 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
         space_comment0, // TODO: should be space_comment1, and only required if there are decls
         alt((
             // TODO: proper span for GrammarPattern
-            map(separated_nonempty_list(space_comment1, grammar_content), |content| PatternOrGrammar::Grammar(GrammarPattern { span: 0..0, content })),
+            map(
+                separated_nonempty_list(space_comment1, grammar_content),
+                |content| {
+                    PatternOrGrammar::Grammar(GrammarPattern {
+                        span: 0..0,
+                        content,
+                    })
+                },
+            ),
             map(pattern, PatternOrGrammar::Pattern),
         )),
     ));
-    let parse = map(parse, |(decls, _, pattern_or_grammar)| Schema { decls, pattern_or_grammar, });
+    let parse = map(parse, |(decls, _, pattern_or_grammar)| Schema {
+        decls,
+        pattern_or_grammar,
+    });
 
     parse(input)
 }
@@ -138,7 +149,7 @@ fn literal(input: Span) -> IResult<Span, Literal> {
         position,
         separated_nonempty_list(
             tuple((space_comment0, tag("~"), space_comment0)),
-            literal_segment
+            literal_segment,
         ),
         position,
     ));
@@ -168,7 +179,10 @@ fn literal_segment(input: Span) -> IResult<Span, LiteralSegment> {
 }
 
 fn span(start: LocatedSpan<&str>, end: LocatedSpan<&str>) -> Range<usize> {
-    Range { start: start.offset, end: end.offset }
+    Range {
+        start: start.offset,
+        end: end.offset,
+    }
 }
 
 // identifier	  ::=  	(NCName - keyword)
@@ -189,7 +203,9 @@ pub fn nc_name(input: Span) -> IResult<Span, NcName> {
         position,
     ));
 
-    let parse = map(parse, |(start, v, end)| NcName(span(start, end), v.fragment.to_string()));
+    let parse = map(parse, |(start, v, end)| {
+        NcName(span(start, end), v.fragment.to_string())
+    });
 
     parse(input)
 }
@@ -254,7 +270,9 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
         peek(not(nc_name_char)),
     ));
 
-    let parse = map(parse, |(k, end, _)| Keyword(span(k, end), k.fragment.to_string()));
+    let parse = map(parse, |(k, end, _)| {
+        Keyword(span(k, end), k.fragment.to_string())
+    });
 
     parse(input)
 }
@@ -283,7 +301,10 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
 fn pattern(input: Span) -> IResult<Span, Pattern> {
     let (input, annotation) = maybe_initial_annotation(input)?;
     if annotation.is_some() {
-        println!("pattern annotation found but ignored! {:?}", annotation.unwrap());
+        println!(
+            "pattern annotation found but ignored! {:?}",
+            annotation.unwrap()
+        );
     }
     let (input, mut result) = alt((
         map(element_pattern, Pattern::Element),
@@ -307,7 +328,10 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
 
     let (mut input, follow_annotations) = follow_annotation_list(input)?;
     if !follow_annotations.is_empty() {
-        println!("pattern follow annotation found but ignored! {:?}", follow_annotations);
+        println!(
+            "pattern follow annotation found but ignored! {:?}",
+            follow_annotations
+        );
     }
 
     loop {
@@ -367,13 +391,14 @@ fn element_pattern(input: Span) -> IResult<Span, ElementPattern> {
         position,
     ));
 
-    map(parse, |(start, _, name_class, _, _, _, pattern, _, _, end)| {
-        ElementPattern {
+    map(
+        parse,
+        |(start, _, name_class, _, _, _, pattern, _, _, end)| ElementPattern {
             span: span(start, end),
             name_class,
             pattern: Box::new(pattern),
-        }
-    })(input)
+        },
+    )(input)
 }
 
 // "attribute" nameClass "{" pattern "}"
@@ -391,13 +416,14 @@ fn attribute_pattern(input: Span) -> IResult<Span, AttributePattern> {
         position,
     ));
 
-    map(parse, |(start, _, name_class, _, _, _, pattern, _, _, end)| {
-        AttributePattern {
+    map(
+        parse,
+        |(start, _, name_class, _, _, _, pattern, _, _, end)| AttributePattern {
             span: span(start, end),
             name_class,
             pattern: Box::new(pattern),
-        }
-    })(input)
+        },
+    )(input)
 }
 fn list_pattern(input: Span) -> IResult<Span, ListPattern> {
     let parse = tuple((
@@ -459,7 +485,12 @@ fn grammar_pattern(input: Span) -> IResult<Span, GrammarPattern> {
         position,
     ));
 
-    let parse = map(parse, |(start, _, _, _, content, _, _, end)| GrammarPattern { span: span(start, end), content });
+    let parse = map(parse, |(start, _, _, _, content, _, _, end)| {
+        GrammarPattern {
+            span: span(start, end),
+            content,
+        }
+    });
 
     parse(input)
 }
@@ -474,11 +505,7 @@ fn group_pattern(input: Span) -> IResult<Span, Pattern> {
 
 // [datatypeName] datatypeValue
 fn datatype_value_pattern(input: Span) -> IResult<Span, DatatypeValuePattern> {
-    let parse = tuple((
-        opt(datatype_name),
-        space_comment0,
-        datatype_value
-    ));
+    let parse = tuple((opt(datatype_name), space_comment0, datatype_value));
 
     let parse = map(parse, |(name, _, value)| DatatypeValuePattern(name, value));
 
@@ -500,7 +527,7 @@ fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
     let parse = tuple((
         datatype_name,
         opt(params),
-        opt(map(tuple((space_comment0, except_pattern)), |(_, e)| e )),
+        opt(map(tuple((space_comment0, except_pattern)), |(_, e)| e)),
     ));
     let parse = map(parse, |(name, params, except)| {
         DatatypeNamePattern(name, params, except.map(Box::new))
@@ -528,7 +555,12 @@ fn param(input: Span) -> IResult<Span, Param> {
         position,
     ));
 
-    let parse = map(parse, |(start, initial_annotation, _, name, _, _, _, val, end)| Param(span(start, end), initial_annotation, name, val));
+    let parse = map(
+        parse,
+        |(start, initial_annotation, _, name, _, _, _, val, end)| {
+            Param(span(start, end), initial_annotation, name, val)
+        },
+    );
 
     parse(input)
 }
@@ -568,7 +600,10 @@ fn name_class(input: Span) -> IResult<Span, NameClass> {
 
     let (input, follow_annotations) = follow_annotation_list(input)?;
     if !follow_annotations.is_empty() {
-        println!("name-class follow annotation found but ignored! {:?}", annotation.unwrap());
+        println!(
+            "name-class follow annotation found but ignored! {:?}",
+            annotation.unwrap()
+        );
     }
 
     if let Ok((input, right)) = alt_nc(input) {
@@ -602,11 +637,9 @@ fn ns_name_nc(input: Span) -> IResult<Span, NsName> {
         ))),
     ));
 
-    let parse = map(parse, |(name, _, except)| {
-        NsName {
-            name: NamespaceOrPrefix::Prefix(name),
-            except: except.map(|(_, _, _, name_class)| Box::new(name_class))
-        }
+    let parse = map(parse, |(name, _, except)| NsName {
+        name: NamespaceOrPrefix::Prefix(name),
+        except: except.map(|(_, _, _, name_class)| Box::new(name_class)),
     });
 
     parse(input)
@@ -709,14 +742,17 @@ fn start(input: Span) -> IResult<Span, Define> {
     // we just produce another 'Define' named "start", rather than using a dedicated 'Start' type,
     // so as to avoid duplication of code handling 'start' definitions and other definitions
 
-    let parse = map(parse, |(start, start_tag, _, assign_method, _, pattern, end)| {
-        Define(
-            span(start, end),
-            Identifier(span(start_tag, start_tag), "start".to_string()),
-            assign_method,
-            pattern,
-        )
-    });
+    let parse = map(
+        parse,
+        |(start, start_tag, _, assign_method, _, pattern, end)| {
+            Define(
+                span(start, end),
+                Identifier(span(start_tag, start_tag), "start".to_string()),
+                assign_method,
+                pattern,
+            )
+        },
+    );
 
     parse(input)
 }
@@ -733,9 +769,12 @@ fn define(input: Span) -> IResult<Span, Define> {
         position,
     ));
 
-    let parse = map(parse, |(start, identifier, _, assign_method, _, pattern, end)| {
-        Define(span(start, end), identifier, assign_method, pattern)
-    });
+    let parse = map(
+        parse,
+        |(start, identifier, _, assign_method, _, pattern, end)| {
+            Define(span(start, end), identifier, assign_method, pattern)
+        },
+    );
 
     parse(input)
 }
@@ -771,9 +810,16 @@ fn include(input: Span) -> IResult<Span, Include> {
         tag("include"),
         space_comment1,
         any_uri_literal,
-        opt(map(tuple((space_comment1, inherit)), |(_, v)| v )),
+        opt(map(tuple((space_comment1, inherit)), |(_, v)| v)),
         opt(map(
-            tuple((space_comment0, tag("{"), space_comment0, separated_list(space_comment1, include_content), space_comment0, cut(tag("}")))),
+            tuple((
+                space_comment0,
+                tag("{"),
+                space_comment0,
+                separated_list(space_comment1, include_content),
+                space_comment0,
+                cut(tag("}")),
+            )),
             |(_, _, _, inc, _, _)| inc,
         )),
     ));
@@ -849,12 +895,10 @@ fn comment(input: Span) -> IResult<Span, Span> {
 }
 
 fn maybe_initial_annotation(input: Span) -> IResult<Span, Option<InitialAnnotation>> {
-    opt(
-        map(tuple((
-            initial_annotation,
-            space_comment0,
-        )), |(anno, _)| anno )
-    )(input)
+    opt(map(
+        tuple((initial_annotation, space_comment0)),
+        |(anno, _)| anno,
+    ))(input)
 }
 
 fn initial_annotation(input: Span) -> IResult<Span, InitialAnnotation> {
@@ -866,13 +910,16 @@ fn initial_annotation(input: Span) -> IResult<Span, InitialAnnotation> {
         separated_list(space_comment1, annotation_element),
         space_comment0,
         tag("]"),
-    )) ;
+    ));
 
-    let parse = map(parse, |(start, _, attribute_annotations, _, element_annotations, _, end)| InitialAnnotation{
-        span: span(start, end),
-        attribute_annotations,
-        element_annotations,
-    });
+    let parse = map(
+        parse,
+        |(start, _, attribute_annotations, _, element_annotations, _, end)| InitialAnnotation {
+            span: span(start, end),
+            attribute_annotations,
+            element_annotations,
+        },
+    );
 
     parse(input)
 }
@@ -884,21 +931,18 @@ fn follow_annotation_list(input: Span) -> IResult<Span, Vec<AnnotationElement>> 
 fn follow_annotation(input: Span) -> IResult<Span, AnnotationElement> {
     preceded(
         tuple((space_comment0, tag(">>"), space_comment0)),
-        annotation_element
+        annotation_element,
     )(input)
 }
 
 fn annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute> {
-    let parse = tuple((
-        name,
-        space_comment0,
-        tag("="),
-        space_comment0,
-        literal,
-    ));
+    let parse = tuple((name, space_comment0, tag("="), space_comment0, literal));
 
     let parse = map(parse, |(name, _, _, _, value)| AnnotationAttribute {
-        span: Range { start: name.span().start, end: value.0.end },
+        span: Range {
+            start: name.span().start,
+            end: value.0.end,
+        },
         name,
         value,
     });
@@ -919,12 +963,20 @@ fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
         tag("]"),
     ));
 
-    let parse = map(parse, |(name, _, _, _, annotation_attributes, _, annotation_elements_or_literals, _, end)| AnnotationElement {
-        span: Range { start: name.span().start, end: end.offset+end.fragment.len() },
-        name,
-        annotation_attributes,
-        annotation_elements_or_literals,
-    });
+    let parse = map(
+        parse,
+        |(name, _, _, _, annotation_attributes, _, annotation_elements_or_literals, _, end)| {
+            AnnotationElement {
+                span: Range {
+                    start: name.span().start,
+                    end: end.offset + end.fragment.len(),
+                },
+                name,
+                annotation_attributes,
+                annotation_elements_or_literals,
+            }
+        },
+    );
 
     parse(input)
 }
@@ -1033,8 +1085,8 @@ mod test {
                     16..53,
                     vec![LiteralSegment {
                         body: "http://relaxng.org/ns/structure/1.0".to_string(),
-                    }
-                ])),
+                    }],
+                )),
             },
         );
     }
@@ -1046,13 +1098,12 @@ mod test {
             "default namespace rng = \"http://relaxng.org/ns/structure/1.0\"",
             DefaultNamespaceDeclaration {
                 prefix: Some("rng".to_string()),
-                uri: NamespaceUriLiteral::Uri(
-                    Literal(
-                        24..61,
-                        vec![LiteralSegment {
-                            body: "http://relaxng.org/ns/structure/1.0".to_string(),
-                        }]
-                    )),
+                uri: NamespaceUriLiteral::Uri(Literal(
+                    24..61,
+                    vec![LiteralSegment {
+                        body: "http://relaxng.org/ns/structure/1.0".to_string(),
+                    }],
+                )),
             },
         );
     }
@@ -1077,7 +1128,10 @@ mod test {
         ck(
             pattern,
             "a?",
-            Pattern::Optional(Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string())))),
+            Pattern::Optional(Box::new(Pattern::Identifier(Identifier(
+                0..1,
+                "a".to_string(),
+            )))),
         )
     }
 
@@ -1114,8 +1168,12 @@ mod test {
             name_class,
             "a|b",
             NameClass::Alt(AltName(
-                Box::new(NameClass::Name(Name::Identifier(IdentifierOrKeyword::Identifier(Identifier(0..1, "a".to_string()))))),
-                Box::new(NameClass::Name(Name::Identifier(IdentifierOrKeyword::Identifier(Identifier(2..3, "b".to_string()))))),
+                Box::new(NameClass::Name(Name::Identifier(
+                    IdentifierOrKeyword::Identifier(Identifier(0..1, "a".to_string())),
+                ))),
+                Box::new(NameClass::Name(Name::Identifier(
+                    IdentifierOrKeyword::Identifier(Identifier(2..3, "b".to_string())),
+                ))),
             )),
         )
     }
@@ -1170,7 +1228,9 @@ mod test {
             Include(
                 Literal(
                     8..17,
-                    vec![LiteralSegment { body: "foo.rnc".to_string() }]
+                    vec![LiteralSegment {
+                        body: "foo.rnc".to_string(),
+                    }],
                 ),
                 None,
                 Some(vec![
@@ -1178,16 +1238,16 @@ mod test {
                         20..25,
                         Identifier(20..21, "a".to_string()),
                         AssignMethod::Assign,
-                        Pattern::Identifier(Identifier(24..25, "b".to_string()))
+                        Pattern::Identifier(Identifier(24..25, "b".to_string())),
                     )),
                     IncludeContent::Define(Define(
                         27..30,
                         Identifier(27..28, "c".to_string()),
                         AssignMethod::Assign,
-                        Pattern::Identifier(Identifier(29..30, "d".to_string()))
+                        Pattern::Identifier(Identifier(29..30, "d".to_string())),
                     )),
-                ])
-            )
+                ]),
+            ),
         )
     }
 
@@ -1206,20 +1266,23 @@ mod test {
             pattern,
             "ns:foo { pattern = \"bar\" }",
             Pattern::DatatypeName(DatatypeNamePattern(
-                DatatypeName::CName(QName(NcName(0..2, "ns".to_string()), NcName(3..6, "foo".to_string()))),
-                Some(vec![
-                    Param(
-                        9..24,
-                        None,
-                        IdentifierOrKeyword::Identifier(Identifier(9..16, "pattern".to_string())),
-                        Literal(
-                            19..24,
-                            vec![LiteralSegment { body: "bar".to_string() }]
-                        ),
+                DatatypeName::CName(QName(
+                    NcName(0..2, "ns".to_string()),
+                    NcName(3..6, "foo".to_string()),
+                )),
+                Some(vec![Param(
+                    9..24,
+                    None,
+                    IdentifierOrKeyword::Identifier(Identifier(9..16, "pattern".to_string())),
+                    Literal(
+                        19..24,
+                        vec![LiteralSegment {
+                            body: "bar".to_string(),
+                        }],
                     ),
-                ]),
+                )]),
                 None,
-            ))
+            )),
         )
     }
 
@@ -1232,20 +1295,21 @@ mod test {
                 decls: vec![],
                 pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
                     span: 0..0,
-                    content: vec![
-                        GrammarContent::Define(Define(
-                            0..30,
-                            Identifier(0..16, "integer.datatype".to_string()),
-                            AssignMethod::Assign,
-                            Pattern::DatatypeName(DatatypeNamePattern(
-                                DatatypeName::CName(QName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
-                                None,
-                                None,
+                    content: vec![GrammarContent::Define(Define(
+                        0..30,
+                        Identifier(0..16, "integer.datatype".to_string()),
+                        AssignMethod::Assign,
+                        Pattern::DatatypeName(DatatypeNamePattern(
+                            DatatypeName::CName(QName(
+                                NcName(19..22, "xsd".to_string()),
+                                NcName(23..30, "integer".to_string()),
                             )),
-                        ))
-                    ]
-                })
-            }
+                            None,
+                            None,
+                        )),
+                    ))],
+                }),
+            },
         )
     }
 
@@ -1260,20 +1324,21 @@ mod test {
                 decls: vec![],
                 pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
                     span: 0..0,
-                    content: vec![
-                        GrammarContent::Define(Define(
-                            0..30,
-                            Identifier(0..16, "integer.datatype".to_string()),
-                            AssignMethod::Assign,
-                            Pattern::DatatypeName(DatatypeNamePattern(
-                                DatatypeName::CName(QName(NcName(19..22, "xsd".to_string()), NcName(23..30, "integer".to_string()))),
-                                None,
-                                None
-                            ))
-                        ))
-                    ]
+                    content: vec![GrammarContent::Define(Define(
+                        0..30,
+                        Identifier(0..16, "integer.datatype".to_string()),
+                        AssignMethod::Assign,
+                        Pattern::DatatypeName(DatatypeNamePattern(
+                            DatatypeName::CName(QName(
+                                NcName(19..22, "xsd".to_string()),
+                                NcName(23..30, "integer".to_string()),
+                            )),
+                            None,
+                            None,
+                        )),
+                    ))],
                 }),
-            }
+            },
         )
     }
 
@@ -1286,8 +1351,10 @@ mod test {
                 Some(DatatypeName::String),
                 Literal(
                     7..17,
-                    vec![LiteralSegment { body: "preserve".to_string() }]
-                )
+                    vec![LiteralSegment {
+                        body: "preserve".to_string(),
+                    }],
+                ),
             )),
         )
     }
@@ -1299,18 +1366,21 @@ mod test {
             "[ xml:lang=\"en\" ]",
             Some(InitialAnnotation {
                 span: 0..16,
-                attribute_annotations: vec![
-                    AnnotationAttribute {
-                        span: 2..15,
-                        name: Name::CName(QName(NcName(2..5, "xml".to_string()), NcName(6..10, "lang".to_string()))),
-                        value: Literal(
-                            11..15,
-                            vec![LiteralSegment { body: "en".to_string() }]
-                        ),
-                    }
-                ],
-                element_annotations: vec![]
-            })
+                attribute_annotations: vec![AnnotationAttribute {
+                    span: 2..15,
+                    name: Name::CName(QName(
+                        NcName(2..5, "xml".to_string()),
+                        NcName(6..10, "lang".to_string()),
+                    )),
+                    value: Literal(
+                        11..15,
+                        vec![LiteralSegment {
+                            body: "en".to_string(),
+                        }],
+                    ),
+                }],
+                element_annotations: vec![],
+            }),
         )
     }
 
@@ -1321,8 +1391,11 @@ mod test {
             "grammar { }",
             Schema {
                 decls: vec![],
-                pattern_or_grammar: PatternOrGrammar::Pattern(Pattern::Grammar(GrammarPattern { span: 0..11, content: vec![] }))
-            }
+                pattern_or_grammar: PatternOrGrammar::Pattern(Pattern::Grammar(GrammarPattern {
+                    span: 0..11,
+                    content: vec![],
+                })),
+            },
         )
     }
 }

@@ -1,29 +1,34 @@
-use relaxng_model::{model, datatype};
-use std::rc::Rc;
+use relaxng_model::datatype::Datatype;
+use relaxng_model::model::NameClass;
+use relaxng_model::{datatype, model};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use relaxng_model::model::NameClass;
 use std::io;
-use relaxng_model::datatype::Datatype;
-use xmlparser::{Tokenizer, Token, StrSpan, ElementEnd, EntityDefinition};
+use std::rc::Rc;
+use xmlparser::{ElementEnd, EntityDefinition, StrSpan, Token, Tokenizer};
 
 #[derive(Debug)]
 pub enum ValidatorError<'a> {
     Xml(xmlparser::Error),
     NotAllowed(Token<'a>),
-    UndefinedNamespacePrefix { prefix: StrSpan<'a> },
-    UndefinedEntity { name: &'a str, span: std::ops::Range<usize> },
-    InvalidOrUnclosedEntity { span: std::ops::Range<usize> },
+    UndefinedNamespacePrefix {
+        prefix: StrSpan<'a>,
+    },
+    UndefinedEntity {
+        name: &'a str,
+        span: std::ops::Range<usize>,
+    },
+    InvalidOrUnclosedEntity {
+        span: std::ops::Range<usize>,
+    },
 }
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 struct PatId(u16);
 
-
 // TODO: separate representations?
 //       1) includes 'Placeholder, but doesn't include nullability flags or 'After'
 //       2) excludes 'Placeholder', and includes nullability flags and 'After'
-
 
 // TODO: instances of Pat are currently 208 bytes, and are cloned regularly; shrink this for
 //       better performance
@@ -44,7 +49,7 @@ enum Pat {
     DatatypeExcept(datatype::Datatypes, PatId),
     List(PatId),
     Placeholder(*const Option<relaxng_model::model::DefineRule>),
-    After(PatId, PatId)
+    After(PatId, PatId),
 }
 
 impl Pat {
@@ -121,7 +126,7 @@ impl Schema {
                     //println!("**redundant choice construction? r => nullable");
                 }
                 self.push(Pat::Choice(left, right, l.is_nullable() || r.is_nullable()))
-            },
+            }
         }
     }
     pub fn interleave(&self, left: PatId, right: PatId) -> PatId {
@@ -130,16 +135,20 @@ impl Schema {
             (_, Pat::NotAllowed) => self.not_allowed(),
             (Pat::Empty, _) => right,
             (_, Pat::Empty) => left,
-            (l, r) => self.push(Pat::Interleave(left, right, l.is_nullable() && r.is_nullable())),
+            (l, r) => self.push(Pat::Interleave(
+                left,
+                right,
+                l.is_nullable() && r.is_nullable(),
+            )),
         }
     }
     pub fn group(&self, left: PatId, right: PatId) -> PatId {
-        let r= match (self.patt(left), self.patt(right)) {
+        let r = match (self.patt(left), self.patt(right)) {
             (Pat::NotAllowed, _) => self.not_allowed(),
             (_, Pat::NotAllowed) => self.not_allowed(),
             (Pat::Empty, _) => right,
             (_, Pat::Empty) => left,
-            (l, r) => self.push(Pat::Group(left, right, l.is_nullable() && r.is_nullable()))
+            (l, r) => self.push(Pat::Group(left, right, l.is_nullable() && r.is_nullable())),
         };
         r
     }
@@ -147,7 +156,7 @@ impl Schema {
         match (self.patt(p1), self.patt(p1)) {
             (_, Pat::NotAllowed) => self.not_allowed(),
             (Pat::NotAllowed, _) => self.not_allowed(),
-            (_, _) => self.push(Pat::After(p1, p2))
+            (_, _) => self.push(Pat::After(p1, p2)),
         }
     }
 
@@ -188,7 +197,7 @@ impl Schema {
     }
     fn get_ref(&self, p: *const Option<relaxng_model::model::DefineRule>) -> Option<PatId> {
         let inner = self.inner.borrow_mut();
-        inner.refs.get(&p).map(|v| *v )
+        inner.refs.get(&p).map(|v| *v)
     }
     /*
     fn set_ref(&self, p: *const Option<relaxng_model::model::DefineRule>, id: PatId) {
@@ -196,7 +205,11 @@ impl Schema {
         inner.refs.insert(p, id);
     }
     */
-    fn ref_placeholder(&self, p: *const Option<relaxng_model::model::DefineRule>, name: &str) -> PatId {
+    fn ref_placeholder(
+        &self,
+        p: *const Option<relaxng_model::model::DefineRule>,
+        name: &str,
+    ) -> PatId {
         let pl = Pat::Placeholder(p);
         let id = self.push(pl);
         let mut inner = self.inner.borrow_mut();
@@ -210,7 +223,10 @@ impl Schema {
         }
         let target = self.patt(id);
         if let Pat::Placeholder(_) = target {
-            panic!("can't resolve placeholder {} with another placeholder {}", placeholder_id.0, id.0);
+            panic!(
+                "can't resolve placeholder {} with another placeholder {}",
+                placeholder_id.0, id.0
+            );
         }
         let mut inner = self.inner.borrow_mut();
         match &inner.patterns[placeholder_id.0 as usize] {
@@ -223,19 +239,28 @@ impl Schema {
         self.inner.borrow().patterns[id.0 as usize].clone()
     }
 
-    fn check_choice(&self, id: PatId, seen: &mut Vec<PatId>, seen_choices: &mut Vec<PatId>) -> bool {
+    fn check_choice(
+        &self,
+        id: PatId,
+        seen: &mut Vec<PatId>,
+        seen_choices: &mut Vec<PatId>,
+    ) -> bool {
         if seen_choices.contains(&id) {
-            println!("Choice contains duplicate pattern {:?} {:?}", id, self.patt(id));
+            println!(
+                "Choice contains duplicate pattern {:?} {:?}",
+                id,
+                self.patt(id)
+            );
         }
         seen.push(id);
         match self.patt(id) {
             Pat::Choice(l, r, _) => {
                 self.check_choice(l, seen, seen_choices);
                 self.check_choice(r, seen, seen_choices);
-            },
+            }
             Pat::Interleave(l, r, _) | Pat::Group(l, r, _) => {
                 self.check_choices(l, seen);
-                self.check_choices(r,seen);
+                self.check_choices(r, seen);
             }
             Pat::Empty => {}
             Pat::Text => {}
@@ -259,13 +284,16 @@ impl Schema {
             Pat::Choice(_, _, _) => {
                 let mut seen_choices = vec![];
                 self.check_choice(id, seen, &mut seen_choices);
-            },
+            }
             Pat::Interleave(l, r, _) | Pat::Group(l, r, _) => {
                 self.check_choices(l, seen);
                 self.check_choices(r, seen);
-            },
-            Pat::OneOrMore(p, _) | Pat::Attribute(_, p) | Pat::Element(_, p) | Pat::List(p) => self.check_choices(p, seen),
-            Pat::Empty | Pat::Text | Pat::NotAllowed | Pat::Datatype(_) | Pat::DatatypeValue(_) => {},
+            }
+            Pat::OneOrMore(p, _) | Pat::Attribute(_, p) | Pat::Element(_, p) | Pat::List(p) => {
+                self.check_choices(p, seen)
+            }
+            Pat::Empty | Pat::Text | Pat::NotAllowed | Pat::Datatype(_) | Pat::DatatypeValue(_) => {
+            }
             Pat::DatatypeExcept(_, p) => self.check_choices(p, seen),
             Pat::Placeholder(_) | Pat::After(_, _) => unreachable!(),
         }
@@ -280,130 +308,154 @@ impl Schema {
         let mut seen = HashSet::new();
         self.dumpy_dump(0, pat, w, &mut seen)
     }
-    pub fn dumpy_dump<W: io::Write>(&self, depth: usize, pat: PatId, w: &mut W, seen: &mut HashSet<PatId>) -> Result<(), io::Error> {
-        for _ in 0..depth { w.write(b"  ")?; }
+    pub fn dumpy_dump<W: io::Write>(
+        &self,
+        depth: usize,
+        pat: PatId,
+        w: &mut W,
+        seen: &mut HashSet<PatId>,
+    ) -> Result<(), io::Error> {
+        for _ in 0..depth {
+            w.write(b"  ")?;
+        }
         if seen.insert(pat) {
             match self.patt(pat) {
                 Pat::Choice(p1, p2, _) => {
                     writeln!(w, "Choice{}(", pat.0)?;
-                    self.dumpy_dump(depth+1, p1, w, seen)?;
-                    self.dumpy_dump(depth+1, p2, w, seen)?;
-                    for _ in 0..depth { w.write(b"  ")?; }
+                    self.dumpy_dump(depth + 1, p1, w, seen)?;
+                    self.dumpy_dump(depth + 1, p2, w, seen)?;
+                    for _ in 0..depth {
+                        w.write(b"  ")?;
+                    }
                     writeln!(w, ")")
-                },
+                }
                 Pat::Interleave(p1, p2, _) => {
                     writeln!(w, "Interleave{}(", pat.0)?;
-                    self.dumpy_dump(depth+1, p1, w, seen)?;
-                    self.dumpy_dump(depth+1, p2, w, seen)?;
-                    for _ in 0..depth { w.write(b"  ")?; }
+                    self.dumpy_dump(depth + 1, p1, w, seen)?;
+                    self.dumpy_dump(depth + 1, p2, w, seen)?;
+                    for _ in 0..depth {
+                        w.write(b"  ")?;
+                    }
                     writeln!(w, ")")
-                },
+                }
                 Pat::Group(p1, p2, _) => {
                     writeln!(w, "Group{}(", pat.0)?;
-                    self.dumpy_dump(depth+1, p1, w, seen)?;
-                    self.dumpy_dump(depth+1, p2, w, seen)?;
-                    for _ in 0..depth { w.write(b"  ")?; }
+                    self.dumpy_dump(depth + 1, p1, w, seen)?;
+                    self.dumpy_dump(depth + 1, p2, w, seen)?;
+                    for _ in 0..depth {
+                        w.write(b"  ")?;
+                    }
                     writeln!(w, ")")
-                },
+                }
                 Pat::OneOrMore(p, _) => {
                     writeln!(w, "OneOrMany{}(", pat.0)?;
-                    self.dumpy_dump(depth+1, p, w, seen)?;
-                    for _ in 0..depth { w.write(b"  ")?; }
+                    self.dumpy_dump(depth + 1, p, w, seen)?;
+                    for _ in 0..depth {
+                        w.write(b"  ")?;
+                    }
                     writeln!(w, ")")
-                },
+                }
                 Pat::Empty => {
                     writeln!(w, "Empty{}", pat.0)
-                },
+                }
                 Pat::Text => {
                     writeln!(w, "Text{}", pat.0)
-                },
+                }
                 Pat::NotAllowed => {
                     writeln!(w, "NotAllowed{}", pat.0)
-                },
+                }
                 Pat::Attribute(nc, p) => {
                     writeln!(w, "Att{}({:?}=", pat.0, nc)?;
-                    self.dumpy_dump(depth+1, p, w, seen)?;
-                    for _ in 0..depth { w.write(b"  ")?; }
+                    self.dumpy_dump(depth + 1, p, w, seen)?;
+                    for _ in 0..depth {
+                        w.write(b"  ")?;
+                    }
                     writeln!(w, ")")
-                },
+                }
                 Pat::Element(nc, p) => {
                     writeln!(w, "Elem{}({:?}=", pat.0, nc)?;
-                    self.dumpy_dump(depth+1, p, w, seen)?;
-                    for _ in 0..depth { w.write(b"  ")?; }
+                    self.dumpy_dump(depth + 1, p, w, seen)?;
+                    for _ in 0..depth {
+                        w.write(b"  ")?;
+                    }
                     writeln!(w, ")")
-                },
+                }
                 Pat::Datatype(dt) => {
                     writeln!(w, "{:?}{}", dt, pat.0)
-                },
+                }
                 Pat::DatatypeValue(dt) => {
                     writeln!(w, "{:?}{}", dt, pat.0)
-                },
+                }
                 Pat::DatatypeExcept(dt, p) => {
                     writeln!(w, "{:?}{}-", dt, pat.0)?;
-                    self.dumpy_dump(depth+1, p, w, seen)
-                },
+                    self.dumpy_dump(depth + 1, p, w, seen)
+                }
                 Pat::List(p) => {
                     writeln!(w, "List{}(", pat.0)?;
-                    self.dumpy_dump(depth+1, p, w, seen)?;
-                    for _ in 0..depth { w.write(b"  ")?; }
+                    self.dumpy_dump(depth + 1, p, w, seen)?;
+                    for _ in 0..depth {
+                        w.write(b"  ")?;
+                    }
                     writeln!(w, ")")
-                },
+                }
                 Pat::Placeholder(_) => {
                     writeln!(w, "Placeholder{}", pat.0)
-                },
+                }
                 Pat::After(p1, p2) => {
                     writeln!(w, "After{}(", pat.0)?;
-                    self.dumpy_dump(depth+1, p1, w, seen)?;
-                    self.dumpy_dump(depth+1, p2, w, seen)?;
-                    for _ in 0..depth { w.write(b"  ")?; }
+                    self.dumpy_dump(depth + 1, p1, w, seen)?;
+                    self.dumpy_dump(depth + 1, p2, w, seen)?;
+                    for _ in 0..depth {
+                        w.write(b"  ")?;
+                    }
                     writeln!(w, ")")
-                },
+                }
             }
         } else {
             match self.patt(pat) {
                 Pat::Choice(p1, p2, _) => {
                     writeln!(w, "Choice{}!", pat.0)
-                },
+                }
                 Pat::Interleave(p1, p2, _) => {
                     writeln!(w, "Interleave{}!", pat.0)
-                },
+                }
                 Pat::Group(p1, p2, _) => {
                     writeln!(w, "Group{}!", pat.0)
-                },
+                }
                 Pat::OneOrMore(p, _) => {
                     writeln!(w, "OneOrMany{}!", pat.0)
-                },
+                }
                 Pat::Empty => {
                     writeln!(w, "Empty{}!", pat.0)
-                },
+                }
                 Pat::Text => {
                     writeln!(w, "Text{}!", pat.0)
-                },
+                }
                 Pat::NotAllowed => {
                     writeln!(w, "NotAllowed{}!", pat.0)
-                },
+                }
                 Pat::Attribute(nc, p) => {
                     writeln!(w, "Att{}!", pat.0)
-                },
+                }
                 Pat::Element(nc, p) => {
                     writeln!(w, "Elem{}!", pat.0)
-                },
+                }
                 Pat::Datatype(dt) => {
                     writeln!(w, "{:?}{}!", dt, pat.0)
-                },
+                }
                 Pat::DatatypeValue(dt) => {
                     writeln!(w, "{:?}{}!", dt, pat.0)
-                },
+                }
                 Pat::DatatypeExcept(dt, p) => {
                     writeln!(w, "{:?}{}!", dt, pat.0)
-                },
+                }
                 Pat::List(p) => {
                     writeln!(w, "List{}!", pat.0)
-                },
+                }
                 Pat::Placeholder(_) => unreachable!(),
                 Pat::After(p1, p2) => {
                     writeln!(w, "After{}!", pat.0)
-                },
+                }
             }
         }
     }
@@ -418,14 +470,21 @@ fn is_ns_match(namespace_uri: &str, target_namespace: Option<&StrSpan>) -> bool 
 }
 fn contains(nc: &model::NameClass, target_name: QualifiedName) -> bool {
     match nc {
-        NameClass::Named { namespace_uri, name } => {
+        NameClass::Named {
+            namespace_uri,
+            name,
+        } => {
             if let Some(ref target_namespace) = target_name.namespace_uri {
-                target_namespace.as_str() == namespace_uri && target_name.local_name.as_str() == name
+                target_namespace.as_str() == namespace_uri
+                    && target_name.local_name.as_str() == name
             } else {
                 namespace_uri == "" && &target_name.local_name.as_str() == name
             }
-        },
-        NameClass::NsName { namespace_uri, except } => {
+        }
+        NameClass::NsName {
+            namespace_uri,
+            except,
+        } => {
             if is_ns_match(namespace_uri, target_name.namespace_uri.as_ref()) {
                 if let Some(except_nameclass) = except {
                     !contains(except_nameclass, target_name)
@@ -435,14 +494,12 @@ fn contains(nc: &model::NameClass, target_name: QualifiedName) -> bool {
             } else {
                 false
             }
-        },
+        }
         NameClass::AnyName { except } => match except {
             None => true,
             Some(nc) => !contains(nc, target_name),
         },
-        NameClass::Alt { a, b } => {
-            contains(a, target_name) || contains(b, target_name)
-        },
+        NameClass::Alt { a, b } => contains(a, target_name) || contains(b, target_name),
     }
 }
 
@@ -469,9 +526,15 @@ pub struct Validator<'a> {
 }
 
 impl<'a> Validator<'a> {
-    pub fn new(model: Rc<RefCell<Option<model::DefineRule>>>, tokenizer: Tokenizer<'a>) -> Validator<'a> {
+    pub fn new(
+        model: Rc<RefCell<Option<model::DefineRule>>>,
+        tokenizer: Tokenizer<'a>,
+    ) -> Validator<'a> {
         let mut schema = Schema::default();
-        let start = Self::compile(&mut schema, &Rc::as_ref(&model).borrow().as_ref().unwrap().pattern());
+        let start = Self::compile(
+            &mut schema,
+            &Rc::as_ref(&model).borrow().as_ref().unwrap().pattern(),
+        );
         let mut entity_definitions = HashMap::default();
         entity_definitions.insert("lt".to_string(), "<".to_string());
         entity_definitions.insert("gt".to_string(), ">".to_string());
@@ -496,7 +559,7 @@ impl<'a> Validator<'a> {
                     right = s.choice(Self::compile(s, left), right)
                 }
                 right
-            },
+            }
             model::Pattern::Interleave(v) => {
                 let mut iter = v.iter().rev();
                 let mut right = Self::compile(s, iter.next().unwrap());
@@ -504,7 +567,7 @@ impl<'a> Validator<'a> {
                     right = s.interleave(Self::compile(s, left), right)
                 }
                 right
-            },
+            }
             model::Pattern::Group(v) => {
                 let mut iter = v.iter().rev();
                 let mut right = Self::compile(s, iter.next().unwrap());
@@ -512,13 +575,15 @@ impl<'a> Validator<'a> {
                     right = s.group(Self::compile(s, left), right)
                 }
                 right
-            },
+            }
             model::Pattern::Mixed(p) => s.mixed(Self::compile(s, p)),
             model::Pattern::Empty => s.empty(),
             model::Pattern::Text => s.text(),
             model::Pattern::NotAllowed => s.not_allowed(),
             model::Pattern::Optional(p) => s.choice(Self::compile(s, p), s.empty()),
-            model::Pattern::ZeroOrMore(p) => s.choice(s.one_or_more(Self::compile(s, p)), s.empty()),
+            model::Pattern::ZeroOrMore(p) => {
+                s.choice(s.one_or_more(Self::compile(s, p)), s.empty())
+            }
             model::Pattern::OneOrMore(p) => s.one_or_more(Self::compile(s, p)),
             model::Pattern::Attribute(name, p) => s.attribute(name.clone(), Self::compile(s, p)),
             model::Pattern::Element(name, p) => s.element(name.clone(), Self::compile(s, p)),
@@ -533,24 +598,26 @@ impl<'a> Validator<'a> {
                         s.resolve_ref(placeholder_id, id, name);
                         placeholder_id
                     } else {
-                        panic!("Somehow definition for {:#?} is missing, used in {:?}", name, whence)
+                        panic!(
+                            "Somehow definition for {:#?} is missing, used in {:?}",
+                            name, whence
+                        )
                     }
                 }
-            },
+            }
             model::Pattern::DatatypeValue { datatype } => s.datatype_value(datatype.clone()),
-            model::Pattern::DatatypeName { datatype, except } => s.datatype_name(datatype.clone(), except.as_ref().map(|e| Self::compile(s, &e))),
+            model::Pattern::DatatypeName { datatype, except } => s.datatype_name(
+                datatype.clone(),
+                except.as_ref().map(|e| Self::compile(s, &e)),
+            ),
             model::Pattern::List(p) => s.list(Self::compile(s, p)),
         }
     }
 
     pub fn next(&mut self) -> Option<Result<(), ValidatorError<'a>>> {
         match self.tokenizer.next() {
-            Some(Ok(evt)) => {
-                Some(self.validate(evt))
-            },
-            Some(Err(err)) => {
-                Some(Err(ValidatorError::Xml(err)))
-            }
+            Some(Ok(evt)) => Some(self.validate(evt)),
+            Some(Err(err)) => Some(Err(ValidatorError::Xml(err))),
             None => None,
         }
     }
@@ -563,7 +630,9 @@ impl<'a> Validator<'a> {
                 fail = true;
             }
         }
-        if fail { panic!(); }
+        if fail {
+            panic!();
+        }
 
         let mut seen = vec![];
         self.schema.check_choices(self.current_step, &mut seen);
@@ -577,8 +646,12 @@ impl<'a> Validator<'a> {
             | Token::ProcessingInstruction { .. } => {
                 // does not change current_step state
                 return Ok(());
-            },
-            Token::ElementStart { prefix, local, span } => {
+            }
+            Token::ElementStart {
+                prefix,
+                local,
+                span,
+            } => {
                 self.stack.push(prefix, local, span);
                 // does not change current_step state
                 return Ok(());
@@ -599,14 +672,21 @@ impl<'a> Validator<'a> {
                     p => next_pat //Self::children_deriv(next_pat, &mut self.schema)
                 }
             */
-            Token::Attribute { prefix, local, value, span } => {
+            Token::Attribute {
+                prefix,
+                local,
+                value,
+                span,
+            } => {
                 self.stack.add_attr(prefix, local, value, span);
                 // does not change current_step state
                 return Ok(());
             }
             Token::ElementEnd { end, span } => {
                 match end {
-                    ElementEnd::Open => Self::close_element_start(&self.stack, &mut self.schema, evt, pat)?,
+                    ElementEnd::Open => {
+                        Self::close_element_start(&self.stack, &mut self.schema, evt, pat)?
+                    }
                     ElementEnd::Close(_, _) => {
                         let next_pat = if self.last_was_start_element {
                             // The last event was XmlEvent::StartElement with no child elements or child
@@ -625,9 +705,10 @@ impl<'a> Validator<'a> {
                             pat
                         };
                         Self::end_tag_deriv(next_pat, &mut self.schema)
-                    },
+                    }
                     ElementEnd::Empty => {
-                        let next_id = Self::close_element_start(&self.stack, &mut self.schema, evt, pat)?;
+                        let next_id =
+                            Self::close_element_start(&self.stack, &mut self.schema, evt, pat)?;
                         let pat = self.schema.patt(next_id);
                         let next_pat = if self.last_was_start_element {
                             // The last event was XmlEvent::StartElement with no child elements or child
@@ -648,7 +729,7 @@ impl<'a> Validator<'a> {
                         Self::end_tag_deriv(next_pat, &mut self.schema)
                     }
                 }
-            },
+            }
             Token::Cdata { text, span } => Self::text_deriv(pat, &mut self.schema, &text),
             Token::Text { text } => {
                 let mut buffer = String::new();
@@ -661,21 +742,24 @@ impl<'a> Validator<'a> {
                                     if let Some(txt) = self.entity_definitions.get(name) {
                                         txt
                                     } else {
-                                        return Err(ValidatorError::UndefinedEntity { name, span: pos..pos+name.len() })
+                                        return Err(ValidatorError::UndefinedEntity {
+                                            name,
+                                            span: pos..pos + name.len(),
+                                        });
                                     }
                                 }
                             };
                             if txt.len() == text.len() {
                                 // no need to copy data into the buffer, just process the whole input in one go
-                                break
+                                break;
                             } else {
                                 // the input contains entities, so we decode these and append to buffer
                                 buffer.push_str(txt);
                             }
-                        },
+                        }
                         Err(err) => {
                             return Err(err);
-                        },
+                        }
                     }
                 }
                 let data = if buffer.is_empty() {
@@ -689,24 +773,29 @@ impl<'a> Validator<'a> {
                     return Err(ValidatorError::NotAllowed(Token::Text { text }));
                 }
                 next_id
-            },
-            Token::EntityDeclaration { name, definition, span } => {
+            }
+            Token::EntityDeclaration {
+                name,
+                definition,
+                span,
+            } => {
                 match definition {
                     EntityDefinition::EntityValue(val) => {
-                        self.entity_definitions.insert(name.to_string(), val.to_string());
+                        self.entity_definitions
+                            .insert(name.to_string(), val.to_string());
                         // does not change current_step state
-                        return Ok(())
+                        return Ok(());
                     }
                     EntityDefinition::ExternalId(_) => {
                         // no support for resolving external ids
                         // does not change current_step state
-                        return Err(ValidatorError::NotAllowed(evt))
+                        return Err(ValidatorError::NotAllowed(evt));
                     }
                 }
-            },
+            }
             Token::Declaration { .. } | Token::DtdStart { .. } | Token::DtdEnd { .. } => {
                 // does not change current_step state
-                return Ok(())
+                return Ok(());
             }
         };
         if let Token::ElementStart { .. } = evt {
@@ -722,16 +811,23 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn close_element_start<'b: 'a>(stack: &ElementStack<'b>, schema: &mut Schema, evt: Token<'b>, pat: Pat) -> Result<PatId, ValidatorError<'b>> {
+    fn close_element_start<'b: 'a>(
+        stack: &ElementStack<'b>,
+        schema: &mut Schema,
+        evt: Token<'b>,
+        pat: Pat,
+    ) -> Result<PatId, ValidatorError<'b>> {
         let name = stack.current_element()?;
         let next_pat = Self::start_tag_open_deriv(pat, schema, name);
         // TODO: refactor early-returns
         let next_pat = match schema.patt(next_pat) {
-            Pat::NotAllowed => return Err(ValidatorError::NotAllowed(Token::ElementStart {
-                prefix: name.namespace_uri.unwrap_or_else(|| StrSpan::from("")),
-                local: name.local_name,
-                span: name.local_name,
-            })),
+            Pat::NotAllowed => {
+                return Err(ValidatorError::NotAllowed(Token::ElementStart {
+                    prefix: name.namespace_uri.unwrap_or_else(|| StrSpan::from("")),
+                    local: name.local_name,
+                    span: name.local_name,
+                }))
+            }
             p => {
                 let attributes: Vec<_> = stack.current_attributes()?;
                 let mut pat = next_pat;
@@ -741,13 +837,13 @@ impl<'a> Validator<'a> {
                     match schema.patt(pat) {
                         Pat::NotAllowed => {
                             return Err(ValidatorError::NotAllowed(Token::Attribute {
-                                prefix: att.name.namespace_uri.unwrap_or_else(|| StrSpan::from("") ),
+                                prefix: att.name.namespace_uri.unwrap_or_else(|| StrSpan::from("")),
                                 local: att.name.local_name,
                                 value: att.value,
                                 span: att.span,
                             }))
-                        },
-                        _ => {},
+                        }
+                        _ => {}
                     }
                 }
                 pat
@@ -755,11 +851,11 @@ impl<'a> Validator<'a> {
         };
         let next_pat = match schema.patt(next_pat) {
             Pat::NotAllowed => return Err(ValidatorError::NotAllowed(evt)),
-            p => Self::start_tag_close_deriv(next_pat, schema)
+            p => Self::start_tag_close_deriv(next_pat, schema),
         };
         Ok(match schema.patt(next_pat) {
             Pat::NotAllowed => return Err(ValidatorError::NotAllowed(evt)),
-            p => next_pat //Self::children_deriv(next_pat, &mut self.schema)
+            p => next_pat, //Self::children_deriv(next_pat, &mut self.schema)
         })
     }
 
@@ -772,7 +868,7 @@ impl<'a> Validator<'a> {
                 let a = Self::text_deriv(p1, schema, text);
                 let b = Self::text_deriv(p2, schema, text);
                 schema.choice(a, b)
-            },
+            }
             Pat::Interleave(p1, p2, _) => {
                 let pat1 = schema.patt(p1);
                 let pat2 = schema.patt(p2);
@@ -783,7 +879,7 @@ impl<'a> Validator<'a> {
                 let d2 = Self::text_deriv(pat2, schema, text);
                 let b = schema.interleave(p1, d2);
                 schema.choice(a, b)
-            },
+            }
             Pat::Group(p1, p2, _) => {
                 let pat1 = schema.patt(p1);
                 let nullable = pat1.is_nullable();
@@ -796,7 +892,7 @@ impl<'a> Validator<'a> {
                 } else {
                     p
                 }
-            },
+            }
             Pat::After(p1, p2) => {
                 let pat1 = schema.patt(p1);
                 let d = Self::text_deriv(pat1, schema, text);
@@ -806,24 +902,22 @@ impl<'a> Validator<'a> {
                 let pat = schema.patt(p);
                 let d = Self::text_deriv(pat, schema, text);
                 schema.group(d, schema.choice(schema.one_or_more(p), schema.empty()))
-            },
-            Pat::Text => {
-                schema.text()
-            },
+            }
+            Pat::Text => schema.text(),
             Pat::Datatype(dt) => {
                 if dt.is_valid(text) {
                     schema.empty()
                 } else {
                     schema.not_allowed()
                 }
-            },
+            }
             Pat::DatatypeValue(dt) => {
                 if dt.is_valid(text) {
                     schema.empty()
                 } else {
                     schema.not_allowed()
                 }
-            },
+            }
             Pat::DatatypeExcept(dt, except) => {
                 let pat = schema.patt(except);
                 let d = Self::text_deriv(pat, schema, text);
@@ -833,7 +927,7 @@ impl<'a> Validator<'a> {
                 } else {
                     schema.not_allowed()
                 }
-            },
+            }
             Pat::List(p) => {
                 let mut p = p;
                 for item in text.split_whitespace() {
@@ -844,7 +938,7 @@ impl<'a> Validator<'a> {
                     }
                 }
                 let last_patt = schema.patt(p);
-                if let Pat::Empty =  last_patt{
+                if let Pat::Empty = last_patt {
                     p
                 } else {
                     if last_patt.is_nullable() {
@@ -858,7 +952,7 @@ impl<'a> Validator<'a> {
                         schema.list(p)
                     }
                 }
-            },
+            }
             Pat::Empty => {
                 // from 'An algorithm for RELAX NG validation':
                 //   "In the case where the list of children consists of a single text node and the
@@ -875,7 +969,7 @@ impl<'a> Validator<'a> {
                 } else {
                     schema.not_allowed()
                 }
-            },
+            }
             Pat::NotAllowed | Pat::Attribute(_, _) => schema.not_allowed(),
             Pat::Element(_, _) => {
                 if xml::common::is_whitespace_str(text) {
@@ -896,48 +990,35 @@ impl<'a> Validator<'a> {
                 let d1 = Self::start_tag_open_deriv(left, schema, name);
                 let d2 = Self::start_tag_open_deriv(right, schema, name);
                 schema.choice(d1, d2)
-            },
+            }
             Pat::OneOrMore(pid, _) => {
                 let p = schema.patt(pid);
                 let deriv = Self::start_tag_open_deriv(p, schema, name);
-                Self::apply_after(
-                    schema.patt(deriv),
-                    schema,
-                    |pat, schema| {
-                        schema.group(
-                            pat,
-                            schema.choice(schema.one_or_more(pid), schema.empty())
-                        )
-                    }
-                )
-            },
+                Self::apply_after(schema.patt(deriv), schema, |pat, schema| {
+                    schema.group(pat, schema.choice(schema.one_or_more(pid), schema.empty()))
+                })
+            }
             Pat::Interleave(pid1, pid2, _) => {
                 let p1 = schema.patt(pid1);
                 let p2 = schema.patt(pid2);
                 let d1 = Self::start_tag_open_deriv(p1, schema, name);
-                let c1 = Self::apply_after(
-                    schema.patt(d1),
-                    schema,
-                    |pat, schema| schema.interleave(pat, pid2)
-                );
+                let c1 = Self::apply_after(schema.patt(d1), schema, |pat, schema| {
+                    schema.interleave(pat, pid2)
+                });
                 let d2 = Self::start_tag_open_deriv(p2, schema, name);
-                let c2 = Self::apply_after(
-                    schema.patt(d2),
-                    schema,
-                    |pat, schema| schema.interleave(pid1, pat)
-                );
+                let c2 = Self::apply_after(schema.patt(d2), schema, |pat, schema| {
+                    schema.interleave(pid1, pat)
+                });
                 schema.choice(c1, c2)
-            },
+            }
             Pat::Group(pid1, pid2, _) => {
                 let p1 = schema.patt(pid1);
                 let nullable = p1.is_nullable();
                 let p2 = schema.patt(pid2);
                 let d1 = Self::start_tag_open_deriv(p1, schema, name);
-                let x = Self::apply_after(
-                    schema.patt(d1),
-                    schema,
-                    |pat, schema| schema.group(pat, pid2)
-                );
+                let x = Self::apply_after(schema.patt(d1), schema, |pat, schema| {
+                    schema.group(pat, pid2)
+                });
                 if nullable {
                     let p2 = schema.patt(pid2);
                     let d2 = Self::start_tag_open_deriv(p2, schema, name);
@@ -945,7 +1026,7 @@ impl<'a> Validator<'a> {
                 } else {
                     x
                 }
-            },
+            }
             Pat::Element(ref nc, pat) => {
                 if contains(nc, name) {
                     let empty = schema.empty();
@@ -953,20 +1034,23 @@ impl<'a> Validator<'a> {
                 } else {
                     schema.not_allowed()
                 }
-            },
+            }
             Pat::After(pid1, pid2) => {
                 let p1 = schema.patt(pid1);
                 let d = Self::start_tag_open_deriv(p1, schema, name);
-                Self::apply_after(
-                    schema.patt(d),
-                    schema,
-                    |pat, schema| schema.after(pat, pid2)
-                )
+                Self::apply_after(schema.patt(d), schema, |pat, schema| {
+                    schema.after(pat, pid2)
+                })
             }
 
-            Pat::Empty | Pat::Text | Pat::NotAllowed | Pat::Attribute(_, _)
-            | Pat::Datatype(_) | Pat::DatatypeValue(_) | Pat::DatatypeExcept(_, _) | Pat::List(_)
-            => schema.not_allowed(),
+            Pat::Empty
+            | Pat::Text
+            | Pat::NotAllowed
+            | Pat::Attribute(_, _)
+            | Pat::Datatype(_)
+            | Pat::DatatypeValue(_)
+            | Pat::DatatypeExcept(_, _)
+            | Pat::List(_) => schema.not_allowed(),
             Pat::Placeholder(name) => unreachable!("Placeholder {:?}", name),
         };
         v
@@ -975,8 +1059,8 @@ impl<'a> Validator<'a> {
     // in the spec, the applyAfter() 'f' argument comes before the pattern, in rust it's more
     // convenient if the 'f' argument is last in the list
     fn apply_after<F>(pat: Pat, schema: &mut Schema, f: F) -> PatId
-        where
-            F: Fn(PatId, &mut Schema) -> PatId + Clone
+    where
+        F: Fn(PatId, &mut Schema) -> PatId + Clone,
     {
         match pat {
             Pat::After(p1, p2) => {
@@ -995,7 +1079,12 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn att_deriv(memo: &mut HashMap<PatId, PatId>, pat: PatId, schema: &mut Schema, att: Attr) -> PatId {
+    fn att_deriv(
+        memo: &mut HashMap<PatId, PatId>,
+        pat: PatId,
+        schema: &mut Schema,
+        att: Attr,
+    ) -> PatId {
         if let Some(result) = memo.get(&pat) {
             return *result;
         }
@@ -1006,31 +1095,31 @@ impl<'a> Validator<'a> {
             Pat::After(p1, p2) => {
                 let d = Self::att_deriv(memo, p1, schema, att);
                 schema.after(d, p2)
-            },
+            }
             Pat::Choice(p1, p2, _) => {
                 let c1 = Self::att_deriv(memo, p1, schema, att);
                 let c2 = Self::att_deriv(memo, p2, schema, att);
                 schema.choice(c1, c2)
-            },
+            }
             Pat::Group(p1, p2, _) => {
                 let d1 = Self::att_deriv(memo, p1, schema, att);
                 let s1 = schema.group(d1, p2);
                 let d2 = Self::att_deriv(memo, p2, schema, att);
                 let s2 = schema.group(p1, d2);
                 schema.choice(s1, s2)
-            },
+            }
             Pat::Interleave(p1, p2, _) => {
                 let d1 = Self::att_deriv(memo, p1, schema, att);
                 let i1 = schema.interleave(d1, p2);
                 let d2 = Self::att_deriv(memo, p2, schema, att);
                 let i2 = schema.interleave(p1, d2);
                 schema.choice(i1, i2)
-            },
+            }
             Pat::OneOrMore(p, _) => {
                 let s1 = Self::att_deriv(memo, p, schema, att);
                 let s2 = schema.choice(pat, schema.empty());
                 schema.group(s1, s2)
-            },
+            }
             Pat::Attribute(ref nc, p) => {
                 let att_pat = schema.patt(p);
                 if contains(nc, att.name) && Self::value_match(att_pat, schema, &att.value) {
@@ -1038,7 +1127,7 @@ impl<'a> Validator<'a> {
                 } else {
                     schema.not_allowed()
                 }
-            },
+            }
             _ => schema.not_allowed(),
         };
         memo.insert(pat, v);
@@ -1060,29 +1149,27 @@ impl<'a> Validator<'a> {
             Pat::After(p1, p2) => {
                 let a1 = Self::start_tag_close_deriv(p1, schema);
                 schema.after(a1, p2)
-            },
+            }
             Pat::Choice(p1, p2, _) => {
                 let c1 = Self::start_tag_close_deriv(p1, schema);
                 let c2 = Self::start_tag_close_deriv(p2, schema);
                 schema.choice(c1, c2)
-            },
+            }
             Pat::Group(p1, p2, _) => {
                 let c1 = Self::start_tag_close_deriv(p1, schema);
                 let c2 = Self::start_tag_close_deriv(p2, schema);
                 schema.group(c1, c2)
-            },
+            }
             Pat::Interleave(p1, p2, _) => {
                 let c1 = Self::start_tag_close_deriv(p1, schema);
                 let c2 = Self::start_tag_close_deriv(p2, schema);
                 schema.interleave(c1, c2)
-            },
+            }
             Pat::OneOrMore(p, _) => {
                 let o = Self::start_tag_close_deriv(p, schema);
                 schema.one_or_more(p)
-            },
-            Pat::Attribute(_, _) => {
-                schema.not_allowed()
-            },
+            }
+            Pat::Attribute(_, _) => schema.not_allowed(),
             _ => pid,
         };
         v
@@ -1096,7 +1183,7 @@ impl<'a> Validator<'a> {
                 let c1 = Self::end_tag_deriv(p1, schema);
                 let c2 = Self::end_tag_deriv(p2, schema);
                 schema.choice(c1, c2)
-            },
+            }
             Pat::After(p1, p2) => {
                 let p1 = schema.patt(p1);
                 if p1.is_nullable() {
@@ -1104,7 +1191,7 @@ impl<'a> Validator<'a> {
                 } else {
                     schema.not_allowed()
                 }
-            },
+            }
             _ => schema.not_allowed(),
         }
     }
@@ -1125,7 +1212,9 @@ impl<'a> Validator<'a> {
                 self.explain_choices(&mut choices, p2);
                 text.push_str("( ");
                 for (i, c) in choices.into_iter().enumerate() {
-                    if i>0 { text.push_str(" | "); }
+                    if i > 0 {
+                        text.push_str(" | ");
+                    }
                     self.explain_impl(text, c);
                 }
                 text.push_str(" )");
@@ -1183,7 +1272,7 @@ impl<'a> Validator<'a> {
             Pat::Choice(p1, p2, _) => {
                 self.explain_choices(choices, p1);
                 self.explain_choices(choices, p2);
-            },
+            }
             _ => choices.push(id),
         }
     }
@@ -1192,7 +1281,7 @@ impl<'a> Validator<'a> {
             Pat::Interleave(p1, p2, _) => {
                 self.explain_interleave(interleave, p1);
                 self.explain_interleave(interleave, p2);
-            },
+            }
             _ => interleave.push(id),
         }
     }
@@ -1201,19 +1290,25 @@ impl<'a> Validator<'a> {
             Pat::Group(p1, p2, _) => {
                 self.explain_seq(seq, p1);
                 self.explain_seq(seq, p2);
-            },
+            }
             _ => seq.push(id),
         }
     }
     fn explain_nameclass(&self, text: &mut String, nc: &NameClass) {
         match nc {
-            NameClass::Named { namespace_uri, name } => {
+            NameClass::Named {
+                namespace_uri,
+                name,
+            } => {
                 text.push_str("{");
                 text.push_str(&namespace_uri);
                 text.push_str("}");
                 text.push_str(&name);
             }
-            NameClass::NsName { namespace_uri, except } => {
+            NameClass::NsName {
+                namespace_uri,
+                except,
+            } => {
                 text.push_str("{");
                 text.push_str(&namespace_uri);
                 text.push_str("}");
@@ -1226,7 +1321,6 @@ impl<'a> Validator<'a> {
                 if let Some(except) = except {
                     text.push_str(" - ..");
                 }
-
             }
             NameClass::Alt { a, b } => {
                 self.explain_nameclass(text, &a);
@@ -1236,7 +1330,12 @@ impl<'a> Validator<'a> {
         }
     }
 
-    pub fn diagnostic(&self, name: String, source: String, err: &ValidatorError) -> (codemap::CodeMap, codemap_diagnostic::Diagnostic) {
+    pub fn diagnostic(
+        &self,
+        name: String,
+        source: String,
+        err: &ValidatorError,
+    ) -> (codemap::CodeMap, codemap_diagnostic::Diagnostic) {
         let mut map = codemap::CodeMap::new();
         let file = map.add_file(name, source);
         let d = match err {
@@ -1247,29 +1346,29 @@ impl<'a> Validator<'a> {
                 let label = codemap_diagnostic::SpanLabel {
                     span,
                     label: None,
-                    style: codemap_diagnostic::SpanStyle::Primary
+                    style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: format!("{}", err),
                     code: None,
-                    spans: vec![]
+                    spans: vec![],
                 }
             }
             ValidatorError::NotAllowed(tok) => {
                 let span = match tok {
-                    Token::Declaration { span, .. } |
-                    Token::ProcessingInstruction { span, .. } |
-                    Token::Comment { span, .. } |
-                    Token::DtdStart { span, .. } |
-                    Token::EmptyDtd { span, .. } |
-                    Token::EntityDeclaration { span, .. } |
-                    Token::DtdEnd { span, .. } |
-                    Token::ElementStart { span, .. } |
-                    Token::Attribute { span, .. } |
-                    Token::ElementEnd { span, .. } |
-                    Token::Cdata { span, .. } => span,
+                    Token::Declaration { span, .. }
+                    | Token::ProcessingInstruction { span, .. }
+                    | Token::Comment { span, .. }
+                    | Token::DtdStart { span, .. }
+                    | Token::EmptyDtd { span, .. }
+                    | Token::EntityDeclaration { span, .. }
+                    | Token::DtdEnd { span, .. }
+                    | Token::ElementStart { span, .. }
+                    | Token::Attribute { span, .. }
+                    | Token::ElementEnd { span, .. }
+                    | Token::Cdata { span, .. } => span,
                     Token::Text { text } => text,
                 };
                 let name = match tok {
@@ -1289,58 +1388,60 @@ impl<'a> Validator<'a> {
                 let label = codemap_diagnostic::SpanLabel {
                     span: file.span.subspan(span.start() as _, span.end() as _),
                     label: Some("Not allowed".to_string()),
-                    style: codemap_diagnostic::SpanStyle::Primary
+                    style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: format!("{} not expected here", name),
                     code: None,
-                    spans: vec![label]
+                    spans: vec![label],
                 }
             }
             ValidatorError::UndefinedNamespacePrefix { prefix } => {
                 let label = codemap_diagnostic::SpanLabel {
                     span: file.span.subspan(prefix.start() as _, prefix.end() as _),
-                    label: Some(format!("Add an xmlns:{}=\"..\" attribute to define this prefix", prefix.as_str())),
-                    style: codemap_diagnostic::SpanStyle::Primary
+                    label: Some(format!(
+                        "Add an xmlns:{}=\"..\" attribute to define this prefix",
+                        prefix.as_str()
+                    )),
+                    style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: format!("The prefix {:?} is not defined", prefix.as_str()),
                     code: None,
-                    spans: vec![label]
+                    spans: vec![label],
                 }
             }
             ValidatorError::UndefinedEntity { name, span } => {
                 let label = codemap_diagnostic::SpanLabel {
                     span: file.span.subspan(span.start as _, span.end as _),
                     label: Some("undefined".to_string()),
-                    style: codemap_diagnostic::SpanStyle::Primary
+                    style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: format!("The entity &{:?}; is not defined", name),
                     code: None,
-                    spans: vec![label]
+                    spans: vec![label],
                 }
             }
             ValidatorError::InvalidOrUnclosedEntity { span } => {
                 let label = codemap_diagnostic::SpanLabel {
                     span: file.span.subspan(span.start as _, span.end as _),
                     label: None,
-                    style: codemap_diagnostic::SpanStyle::Primary
+                    style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: "Invalid or unclosed entity reference".to_string(),
                     code: None,
-                    spans: vec![label]
+                    spans: vec![label],
                 }
-
             }
         };
         (map, d)
@@ -1353,7 +1454,7 @@ enum Txt<'a> {
     Entity(usize, &'a str),
 }
 
-fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item=Result<Txt, ValidatorError>> {
+fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, ValidatorError>> {
     struct Entities<'a> {
         text: &'a str,
         pos: usize,
@@ -1371,23 +1472,31 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item=Result<Txt, Vali
                 if self.in_entity {
                     if c == ';' {
                         self.in_entity = false;
-                        let result = Txt::Entity(self.offset+self.pos, &self.text[self.offset..self.offset + i]);
+                        let result = Txt::Entity(
+                            self.offset + self.pos,
+                            &self.text[self.offset..self.offset + i],
+                        );
                         self.offset += i + 1;
                         return Some(Ok(result));
                     }
                 } else {
                     if c == '&' {
                         self.in_entity = true;
-                        let result = Txt::Text(self.offset+self.pos, &self.text[self.offset..self.offset + i]);
+                        let result = Txt::Text(
+                            self.offset + self.pos,
+                            &self.text[self.offset..self.offset + i],
+                        );
                         self.offset += i + 1;
                         return Some(Ok(result));
                     }
                 }
             }
             if self.in_entity {
-                Some(Err(ValidatorError::InvalidOrUnclosedEntity { span: self.pos+self.offset-1..self.pos+self.offset }))
+                Some(Err(ValidatorError::InvalidOrUnclosedEntity {
+                    span: self.pos + self.offset - 1..self.pos + self.offset,
+                }))
             } else {
-                let result = Txt::Text(self.offset+self.pos, &self.text[self.offset..]);
+                let result = Txt::Text(self.offset + self.pos, &self.text[self.offset..]);
                 self.offset = self.text.len();
                 Some(Ok(result))
             }
@@ -1400,7 +1509,6 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item=Result<Txt, Vali
         in_entity: false,
     }
 }
-
 
 fn is_whitespace_char(c: char) -> bool {
     ['\x20', '\x09', '\x0d', '\x0a'].contains(&c)
@@ -1420,15 +1528,19 @@ impl<'a> ElementStack<'a> {
         self.elements
             .iter()
             .rev()
-            .find_map(|elem| elem.lookup_namespace_uri(prefix) )
+            .find_map(|elem| elem.lookup_namespace_uri(prefix))
     }
 
-    fn try_lookup_namespace_uri(&self, prefix: StrSpan<'a>) -> Result<Option<StrSpan<'a>>, ValidatorError<'a>> {
+    fn try_lookup_namespace_uri(
+        &self,
+        prefix: StrSpan<'a>,
+    ) -> Result<Option<StrSpan<'a>>, ValidatorError<'a>> {
         if "" == prefix.as_str() {
             Ok(None)
         } else {
-            Ok(Some(self.lookup_namespace_uri(&prefix)
-                .ok_or_else(|| ValidatorError::UndefinedNamespacePrefix { prefix })?))
+            Ok(Some(self.lookup_namespace_uri(&prefix).ok_or_else(
+                || ValidatorError::UndefinedNamespacePrefix { prefix },
+            )?))
         }
     }
 
@@ -1440,19 +1552,23 @@ impl<'a> ElementStack<'a> {
             attributes: vec![],
         })
     }
-    fn add_attr(&mut self, prefix: StrSpan<'a>, local: StrSpan<'a>, value: StrSpan<'a>, span: StrSpan<'a>) {
+    fn add_attr(
+        &mut self,
+        prefix: StrSpan<'a>,
+        local: StrSpan<'a>,
+        value: StrSpan<'a>,
+        span: StrSpan<'a>,
+    ) {
         if prefix.as_str() == "xmlns" {
-            self.elements
-                .last_mut()
-                .unwrap()
-                .namespaces
-                .push(Ns { prefix: local, namespace_uri: value })
+            self.elements.last_mut().unwrap().namespaces.push(Ns {
+                prefix: local,
+                namespace_uri: value,
+            })
         } else if prefix.as_str() == "" && local.as_str() == "xmlns" {
-            self.elements
-                .last_mut()
-                .unwrap()
-                .namespaces
-                .push(Ns { prefix, namespace_uri: value })
+            self.elements.last_mut().unwrap().namespaces.push(Ns {
+                prefix,
+                namespace_uri: value,
+            })
         } else {
             self.elements
                 .last_mut()
@@ -1462,14 +1578,12 @@ impl<'a> ElementStack<'a> {
                     prefix,
                     local,
                     value,
-                    span
+                    span,
                 })
         }
     }
     fn current_element(&self) -> Result<QualifiedName<'a>, ValidatorError<'a>> {
-        let curr = self.elements
-            .last()
-            .unwrap();
+        let curr = self.elements.last().unwrap();
         let namespace_uri = self.try_lookup_namespace_uri(curr.prefix)?;
         Ok(QualifiedName {
             namespace_uri,
@@ -1511,19 +1625,22 @@ struct ElementState<'a> {
     prefix: StrSpan<'a>,
     local: StrSpan<'a>,
     namespaces: Vec<Ns<'a>>,
-    attributes: Vec<UnresolvedAttr<'a>>
+    attributes: Vec<UnresolvedAttr<'a>>,
 }
 
 impl<'a> ElementState<'a> {
     fn define_ns(&mut self, prefix: StrSpan<'a>, namespace_uri: StrSpan<'a>) {
-        self.namespaces.push(Ns { prefix, namespace_uri })
+        self.namespaces.push(Ns {
+            prefix,
+            namespace_uri,
+        })
     }
 
     fn lookup_namespace_uri(&self, prefix: &str) -> Option<StrSpan<'a>> {
         self.namespaces
             .iter()
-            .find(|ns| ns.prefix.as_str() == prefix )
-            .map(|ns| ns.namespace_uri )
+            .find(|ns| ns.prefix.as_str() == prefix)
+            .map(|ns| ns.namespace_uri)
     }
 }
 
@@ -1535,14 +1652,14 @@ struct Ns<'a> {
 #[cfg(test)]
 mod tests {
     use crate::Validator;
-    use relaxng_model::{Compiler, Files, RelaxError, Syntax};
-    use std::path::Path;
-    use std::io;
     use assert_matches::assert_matches;
     use relaxng_model::model::DefineRule;
+    use relaxng_model::{Compiler, Files, RelaxError, Syntax};
+    use std::io;
+    use std::path::Path;
 
     struct Fixture {
-        schema: std::rc::Rc<std::cell::RefCell<Option<DefineRule>>>
+        schema: std::rc::Rc<std::cell::RefCell<Option<DefineRule>>>,
     }
     impl Fixture {
         fn correct(schema: &str) -> Fixture {
@@ -1551,7 +1668,12 @@ mod tests {
                 fn load(&self, name: &Path) -> Result<String, RelaxError> {
                     let t = match name.to_str().unwrap() {
                         "main.rnc" => self.0.clone(),
-                        _ => return Err(RelaxError::Io(name.to_path_buf(), io::Error::from(io::ErrorKind::NotFound))),
+                        _ => {
+                            return Err(RelaxError::Io(
+                                name.to_path_buf(),
+                                io::Error::from(io::ErrorKind::NotFound),
+                            ))
+                        }
                     };
                     Ok(t.to_string())
                 }
@@ -1563,11 +1685,9 @@ mod tests {
                 Err(e) => {
                     c.dump_diagnostic(&e);
                     panic!(e);
-                },
+                }
             };
-            Fixture {
-                schema
-            }
+            Fixture { schema }
         }
 
         fn valid(&self, xml: &str) {
@@ -1576,7 +1696,10 @@ mod tests {
             while let Some(i) = v.next() {
                 if let Err(err) = i {
                     let (map, d) = v.diagnostic("valid.xml".to_string(), xml.to_string(), &err);
-                    let mut emitter = codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Auto, Some(&map));
+                    let mut emitter = codemap_diagnostic::Emitter::stderr(
+                        codemap_diagnostic::ColorConfig::Auto,
+                        Some(&map),
+                    );
                     emitter.emit(&[d]);
                     println!("explanation: {}", v.explain());
                     panic!("{:?}", err);
@@ -1602,7 +1725,12 @@ mod tests {
             fn load(&self, name: &Path) -> Result<String, RelaxError> {
                 let t = match name.to_str().unwrap() {
                     "main.rnc" => self.0.clone(),
-                    _ => return Err(RelaxError::Io(name.to_path_buf(), io::Error::from(io::ErrorKind::NotFound))),
+                    _ => {
+                        return Err(RelaxError::Io(
+                            name.to_path_buf(),
+                            io::Error::from(io::ErrorKind::NotFound),
+                        ))
+                    }
                 };
                 Ok(t.to_string())
             }
@@ -1614,7 +1742,7 @@ mod tests {
             Err(e) => {
                 c.dump_diagnostic(&e);
                 panic!(e);
-            },
+            }
         };
 
         let reader = xmlparser::Tokenizer::from(doc);
@@ -1727,22 +1855,16 @@ mod tests {
     #[test]
     fn element_whitespace_one_or_more() {
         // the whitespace prior to the initial <b/> should not make the doc invalid
-        Fixture::correct(
-            "start = element a { element b { empty }+ }",
-        ).valid(
-            "<a> <b/><b/><b/></a>",
-        );
+        Fixture::correct("start = element a { element b { empty }+ }")
+            .valid("<a> <b/><b/><b/></a>");
     }
 
     #[test]
     fn text_element_group() {
         // a bug in the implementation of start_tag_open_deriv(Pat::Group) used to cause this to
         // fail
-        Fixture::correct(
-            "start = element a { text, element b { empty } }",
-        ).valid(
-            "<a>foo <b/></a>",
-        );
+        Fixture::correct("start = element a { text, element b { empty } }")
+            .valid("<a>foo <b/></a>");
     }
 
     #[test]
@@ -1753,20 +1875,12 @@ mod tests {
         //  - the "&" of the decoded character reference
         //  - the trailing " bar"
         // this should still be a valid value of the string datatype
-        Fixture::correct(
-            "start = element a { xsd:string }",
-        ).valid(
-            "<a>foo &amp; bar</a>",
-        );
+        Fixture::correct("start = element a { xsd:string }").valid("<a>foo &amp; bar</a>");
     }
 
     #[test]
     fn top_level_grammar() {
-        Fixture::correct(
-            "grammar { start = element a { empty } }",
-        ).valid(
-            "<a/>",
-        );
+        Fixture::correct("grammar { start = element a { empty } }").valid("<a/>");
     }
 
     #[test]
@@ -1778,7 +1892,8 @@ mod tests {
                 attribute mediaPresentationDuration { xsd:duration }?, \
                 attribute * - (foo:* | local:*)  { text } \
              }",
-        ).invalid(
+        )
+        .invalid(
             "<?xml verion=\"1.0\"?>\
             <MPD xmlns=\"urn:foo\" mediaPresentationDuration=\"XPT0H11M58.998S\"></MPD>",
         );

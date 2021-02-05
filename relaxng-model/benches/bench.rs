@@ -17,9 +17,8 @@ fn relaxng_compile(c: &mut Criterion) {
                     compiler.compile(input).expect("compiler.load()");
                 }
             });
-        })
+        }),
     );
-
 }
 
 criterion_group!(benches, relaxng_compile);

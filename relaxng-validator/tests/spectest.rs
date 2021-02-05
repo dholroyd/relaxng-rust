@@ -1,19 +1,19 @@
 // TODO: https://github.com/LukasKalbertodt/libtest-mimic ?
 
-use std::fs::File;
-use std::io::Read;
-use roxmltree::{ExpandedName, Node, NodeType};
-use std::path::{Path, PathBuf};
-use std::io;
-use relaxng_validator::{ValidatorError, Validator};
-use std::cell::RefCell;
-use relaxng_model::{RelaxError, Compiler};
-use std::rc::Rc;
 use relaxng_model::model::DefineRule;
-use std::panic;
-use std::convert::TryFrom;
+use relaxng_model::{Compiler, RelaxError};
+use relaxng_validator::{Validator, ValidatorError};
+use roxmltree::{ExpandedName, Node, NodeType};
 use std::any::Any;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::convert::TryFrom;
+use std::fs::File;
+use std::io;
+use std::io::Read;
+use std::panic;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 fn main() {
     // TODO: only run this test if testcases are not filtered or if the filter matches this case
@@ -30,17 +30,21 @@ fn spectest() {
     f.read_to_string(&mut s).unwrap();
     let mut map = codemap::CodeMap::new();
     let file = map.add_file(src.to_string(), s.clone());
-    let mut emitter = codemap_diagnostic::Emitter::stderr(
-        codemap_diagnostic::ColorConfig::Auto,
-        Some(&map)
-    );
+    let mut emitter =
+        codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Auto, Some(&map));
     let mut opts = roxmltree::ParsingOptions::default();
     opts.allow_dtd = true;
     let doc = roxmltree::Document::parse_with_options(&s, opts).unwrap();
-    assert_eq!(doc.root_element().tag_name(), ExpandedName::from("testSuite"));
+    assert_eq!(
+        doc.root_element().tag_name(),
+        ExpandedName::from("testSuite")
+    );
     let mut stats = Stats::default();
     process_suite(&mut emitter, &file, &mut stats, doc.root_element());
-    eprintln!("{} passed, {} failed, {} skipped", stats.passed, stats.failed, stats.skipped);
+    eprintln!(
+        "{} passed, {} failed, {} skipped",
+        stats.passed, stats.failed, stats.skipped
+    );
 }
 
 #[derive(Default)]
@@ -50,7 +54,12 @@ struct Stats {
     skipped: u64,
 }
 
-fn process_suite(emitter: &mut codemap_diagnostic::Emitter, file: &codemap::File, stats: &mut Stats, suite: Node) {
+fn process_suite(
+    emitter: &mut codemap_diagnostic::Emitter,
+    file: &codemap::File,
+    stats: &mut Stats,
+    suite: Node,
+) {
     for child in suite.children() {
         if child.is_element() {
             if child.tag_name() == ExpandedName::from("testSuite") {
@@ -71,7 +80,7 @@ struct TestCase {
     section: Option<String>,
     documentation: Option<String>,
     fixture: Fixture,
-    span: std::ops::Range<usize>
+    span: std::ops::Range<usize>,
 }
 #[derive(Clone)]
 enum Fixture {
@@ -82,13 +91,12 @@ enum Fixture {
         resources: HashMap<String, String>,
         valid: Vec<String>,
         invalid: Vec<String>,
-    }
+    },
 }
 impl Fixture {
     fn resources(&self) -> &HashMap<String, String> {
         match self {
-            Fixture::Incorrect { resources, .. } |
-            Fixture::Correct { resources, .. } => resources
+            Fixture::Incorrect { resources, .. } | Fixture::Correct { resources, .. } => resources,
         }
     }
 }
@@ -110,15 +118,26 @@ impl<'a, 'input> TryFrom<Node<'a, 'input>> for TestCase {
                     "documentation" => documentation = child.text(),
                     "incorrect" => incorrect = child.first_element_child(),
                     "correct" => correct = child.first_element_child(),
-                    "valid" => valid.push(child.first_element_child().expect("child element of <valid>")),
-                    "invalid" => invalid.push(child.first_element_child().expect("child element of <invalid>")),
+                    "valid" => valid.push(
+                        child
+                            .first_element_child()
+                            .expect("child element of <valid>"),
+                    ),
+                    "invalid" => invalid.push(
+                        child
+                            .first_element_child()
+                            .expect("child element of <invalid>"),
+                    ),
                     "dir" | "resource" => {
                         load_resources(&PathBuf::new(), &mut resources, child);
-                    },
+                    }
                     "requires" => {
                         println!("TODO: ignoring {:?}", child);
-                    },
-                    _ => panic!("unexpected child of <testCase>: <{}>", child.tag_name().name()),
+                    }
+                    _ => panic!(
+                        "unexpected child of <testCase>: <{}>",
+                        child.tag_name().name()
+                    ),
                 }
             }
         }
@@ -138,12 +157,12 @@ impl<'a, 'input> TryFrom<Node<'a, 'input>> for TestCase {
             } else if let Some(_correct) = correct {
                 Fixture::Correct {
                     resources,
-                    valid: valid.iter().map(|node| stringify(*node) ).collect(),
-                    invalid: invalid.iter().map(|node| stringify(*node) ).collect(),
+                    valid: valid.iter().map(|node| stringify(*node)).collect(),
+                    invalid: invalid.iter().map(|node| stringify(*node)).collect(),
                 }
             } else {
                 panic!("Neither <correct> nor <incorrect> specified")
-            }
+            },
         })
     }
 }
@@ -151,25 +170,36 @@ impl<'a, 'input> TryFrom<Node<'a, 'input>> for TestCase {
 fn load_resources(path: &Path, resources: &mut HashMap<String, String>, node: Node) {
     match node.tag_name().name() {
         "dir" => {
-            let sub = node.attribute("name").expect(&format!("Expected @name on <dir>: {:?}", node));
+            let sub = node
+                .attribute("name")
+                .expect(&format!("Expected @name on <dir>: {:?}", node));
             let sub_path = path.join(sub);
             for child in node.children().filter(|n| n.is_element()) {
                 load_resources(&sub_path, resources, child);
             }
         }
         "resource" => {
-            let name = node.attribute("name").expect("Expected @name on <resource>");
+            let name = node
+                .attribute("name")
+                .expect("Expected @name on <resource>");
             let sub_name = path.join(name);
             println!("resource {:?} --", sub_name);
-            let data = node.first_element_child().expect("expected child element in <resource>");
+            let data = node
+                .first_element_child()
+                .expect("expected child element in <resource>");
             println!("{}", stringify(data));
             resources.insert(sub_name.to_string_lossy().to_string(), stringify(data));
-        },
+        }
         other_name => panic!("unsupported tag {:?}", node),
     }
 }
 
-fn process_case(emitter: &mut codemap_diagnostic::Emitter, file: &codemap::File, stats: &mut Stats, case: Node) {
+fn process_case(
+    emitter: &mut codemap_diagnostic::Emitter,
+    file: &codemap::File,
+    stats: &mut Stats,
+    case: Node,
+) {
     let test_case = match TestCase::try_from(case) {
         Ok(c) => c,
         Err(e) => {
@@ -181,36 +211,32 @@ fn process_case(emitter: &mut codemap_diagnostic::Emitter, file: &codemap::File,
     let (tx, rx) = std::sync::mpsc::channel();
     let test = test_case.clone();
     let thread = std::thread::spawn(move || {
-        let result = panic::catch_unwind(|| {
-            run_test(test.clone())
-        });
+        let result = panic::catch_unwind(|| run_test(test.clone()));
         tx.send(result)
     });
     let result = rx.recv_timeout(std::time::Duration::from_secs(5));
     match result {
-        Ok(result) => {
-            match result {
-                Ok(test_result) => match test_result {
-                    TestResult::Pass => {
-                        stats.passed += 1;
-                        eprintln!("  ✅ passed");
-                    }
-                    TestResult::Fail => {
-                        stats.failed += 1;
-                        diagnostic(emitter, file, case.range());
-                        eprintln!("  ❌ failed");
-                    }
-                    TestResult::Suppressed => {
-                        stats.skipped += 1;
-                        eprintln!("  🙈 skipped");
-                    }
+        Ok(result) => match result {
+            Ok(test_result) => match test_result {
+                TestResult::Pass => {
+                    stats.passed += 1;
+                    eprintln!("  ✅ passed");
                 }
-                Err(e) => {
-                    eprintln!(" ❌ Test thread failed: {:?}", e);
+                TestResult::Fail => {
                     stats.failed += 1;
+                    diagnostic(emitter, file, case.range());
+                    eprintln!("  ❌ failed");
                 }
+                TestResult::Suppressed => {
+                    stats.skipped += 1;
+                    eprintln!("  🙈 skipped");
+                }
+            },
+            Err(e) => {
+                eprintln!(" ❌ Test thread failed: {:?}", e);
+                stats.failed += 1;
             }
-        }
+        },
         Err(err) => {
             eprintln!(" ⛔ Timeout waiting for test to complete:");
             panic!("{:?}", err);
@@ -218,7 +244,11 @@ fn process_case(emitter: &mut codemap_diagnostic::Emitter, file: &codemap::File,
     }
 }
 
-fn diagnostic(emitter: &mut codemap_diagnostic::Emitter, file: &codemap::File, span: std::ops::Range<usize>) {
+fn diagnostic(
+    emitter: &mut codemap_diagnostic::Emitter,
+    file: &codemap::File,
+    span: std::ops::Range<usize>,
+) {
     let label = codemap_diagnostic::SpanLabel {
         span: file.span.subspan(span.start as _, span.end as _),
         style: codemap_diagnostic::SpanStyle::Primary,
@@ -228,7 +258,7 @@ fn diagnostic(emitter: &mut codemap_diagnostic::Emitter, file: &codemap::File, s
         level: codemap_diagnostic::Level::Error,
         message: "Test failed".to_string(),
         code: None,
-        spans: vec![label]
+        spans: vec![label],
     };
     emitter.emit(&[d]);
 }
@@ -247,7 +277,11 @@ fn run_test(test_case: TestCase) -> TestResult {
 
             match c.compile(input) {
                 Err(e) => {
-                    if let relaxng_model::RelaxError::XmlParse(_, relaxng_syntax::xml::Error::Todo(e)) = e {
+                    if let relaxng_model::RelaxError::XmlParse(
+                        _,
+                        relaxng_syntax::xml::Error::Todo(e),
+                    ) = e
+                    {
                         eprintln!("  {}", resources.get("incorrect.rng").unwrap());
                         eprintln!("  ❌ TODO: {}", e);
                         TestResult::Suppressed
@@ -258,7 +292,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                         c.dump_diagnostic(&e);
                         TestResult::Pass
                     }
-                },
+                }
                 Ok(result) => {
                     eprintln!("--------");
                     eprintln!("  {}", resources.get("incorrect.rng").unwrap());
@@ -267,13 +301,21 @@ fn run_test(test_case: TestCase) -> TestResult {
                 }
             }
         }
-        Fixture::Correct { resources, valid, invalid } => {
+        Fixture::Correct {
+            resources,
+            valid,
+            invalid,
+        } => {
             let mut c = create_compiler(resources.clone());
             let input = Path::new("correct.rng");
 
             match c.compile(input) {
                 Err(e) => {
-                    if let relaxng_model::RelaxError::XmlParse(_, relaxng_syntax::xml::Error::Todo(e)) = e {
+                    if let relaxng_model::RelaxError::XmlParse(
+                        _,
+                        relaxng_syntax::xml::Error::Todo(e),
+                    ) = e
+                    {
                         eprintln!("  {}", resources.get("correct.rng").unwrap());
                         eprintln!("  ❌ TODO: {}", e);
                         TestResult::Suppressed
@@ -284,7 +326,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                         c.dump_diagnostic(&e);
                         TestResult::Fail
                     }
-                },
+                }
                 Ok(result) => {
                     for doc in valid {
                         let reader = xmlparser::Tokenizer::from(&doc[..]);
@@ -295,14 +337,14 @@ fn run_test(test_case: TestCase) -> TestResult {
                         loop {
                             match v.next() {
                                 None => break,
-                                Some(Ok(())) => {},
+                                Some(Ok(())) => {}
                                 Some(Err(err)) => {
                                     println!("v.next(): {:?}", err);
                                     eprintln!("  {}", resources.get("correct.rng").unwrap());
                                     eprintln!("  {}", doc);
                                     eprintln!("  ❌ Valid input rejected");
                                     return TestResult::Fail;
-                                },
+                                }
                             }
                         }
                         //eprintln!("  ✅ Valid input accepted");
@@ -317,11 +359,11 @@ fn run_test(test_case: TestCase) -> TestResult {
                         loop {
                             match v.next() {
                                 None => break,
-                                Some(Ok(())) => {},
+                                Some(Ok(())) => {}
                                 Some(Err(err)) => {
                                     //eprintln!("  ✅ Invalid input rejected");
                                     return TestResult::Pass;
-                                },
+                                }
                             }
                         }
                         eprintln!("  {}", resources.get("correct.rng").unwrap());
@@ -343,15 +385,14 @@ fn stringify(node: Node) -> String {
     if let Some(prev) = node.prev_sibling() {
         if let Some(text) = prev.text() {
             let last_line = if let Some(pos) = text.rfind("\n") {
-                &text[pos+1..]
+                &text[pos + 1..]
             } else {
                 text
             };
             res.push_str(last_line);
         }
     }
-    res.push_str(&node.document()
-        .input_text()[node.range()]);
+    res.push_str(&node.document().input_text()[node.range()]);
     res
 }
 
@@ -362,7 +403,12 @@ fn create_compiler(resources: HashMap<String, String>) -> Compiler<FS> {
         fn load(&self, name: &Path) -> Result<String, relaxng_model::RelaxError> {
             self.0
                 .get(name.to_str().unwrap())
-                .ok_or_else(|| relaxng_model::RelaxError::Io(name.to_path_buf(), io::Error::from(io::ErrorKind::NotFound)))
+                .ok_or_else(|| {
+                    relaxng_model::RelaxError::Io(
+                        name.to_path_buf(),
+                        io::Error::from(io::ErrorKind::NotFound),
+                    )
+                })
                 .map(String::to_string)
         }
     }
@@ -382,4 +428,3 @@ fn validate(schema: Rc<RefCell<Option<DefineRule>>>, doc: &str) -> Result<(), Va
     }
     Ok(())
 }
-

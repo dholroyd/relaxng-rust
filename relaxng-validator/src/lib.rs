@@ -844,7 +844,7 @@ impl<'a> Validator<'a> {
                             local: att.name.local_name,
                             value: att.value,
                             span: att.span,
-                        }))
+                        }));
                     }
                 }
                 pat
@@ -1222,11 +1222,21 @@ impl<'a> Validator<'a> {
             Pat::Empty => {}
             Pat::Text => {}
             Pat::NotAllowed => {}
-            Pat::Attribute(_, _) => { result.insert(pat); }
-            Pat::Element(_, _) => { result.insert(pat); }
-            Pat::Datatype(_) => { result.insert(pat); }
-            Pat::DatatypeValue(_) => { result.insert(pat); }
-            Pat::DatatypeExcept(_, _) => { result.insert(pat); }
+            Pat::Attribute(_, _) => {
+                result.insert(pat);
+            }
+            Pat::Element(_, _) => {
+                result.insert(pat);
+            }
+            Pat::Datatype(_) => {
+                result.insert(pat);
+            }
+            Pat::DatatypeValue(_) => {
+                result.insert(pat);
+            }
+            Pat::DatatypeExcept(_, _) => {
+                result.insert(pat);
+            }
             Pat::List(p) => self.head(result, p),
             Pat::Placeholder(_) => panic!("Unexpected {:?}", pat),
             Pat::After(p, _) => self.head(result, p),
@@ -1238,7 +1248,17 @@ impl<'a> Validator<'a> {
         let mut result = String::new();
         const MAX_ELEMENTS: usize = 4;
         let mut rest = 0;
-        for (i, nameclass) in heads.iter().filter_map(|p| if let Pat::Element(nameclass, _) = p { Some(nameclass) } else { None }).enumerate() {
+        for (i, nameclass) in heads
+            .iter()
+            .filter_map(|p| {
+                if let Pat::Element(nameclass, _) = p {
+                    Some(nameclass)
+                } else {
+                    None
+                }
+            })
+            .enumerate()
+        {
             if i == 0 {
                 result.push_str("Element ");
             }
@@ -1261,12 +1281,18 @@ impl<'a> Validator<'a> {
         // TODO: plus attributes and everything else
         result
     }
-    fn describe_nameclass(&self, nc: &NameClass, desc: &mut String)  {
+    fn describe_nameclass(&self, nc: &NameClass, desc: &mut String) {
         match nc {
-            NameClass::Named { namespace_uri: _, name } => {
+            NameClass::Named {
+                namespace_uri: _,
+                name,
+            } => {
                 desc.push_str(name);
             }
-            NameClass::NsName { namespace_uri, except } => {
+            NameClass::NsName {
+                namespace_uri,
+                except,
+            } => {
                 desc.push_str(namespace_uri);
                 desc.push_str(":*");
                 if let Some(except) = except {
@@ -1315,7 +1341,6 @@ impl<'a> Validator<'a> {
                     code: None,
                     spans: vec![label],
                 });
-
             }
             ValidatorError::NotAllowed(tok) => {
                 let span = match tok {
@@ -1451,10 +1476,7 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, Va
                         let result = if let Some(text) = text.strip_prefix('#') {
                             numeric_entity(self.offset, text)
                         } else {
-                            Ok(Txt::Entity(
-                                self.offset + self.pos,
-                                text,
-                            ))
+                            Ok(Txt::Entity(self.offset + self.pos, text))
                         };
                         self.offset += i + 1;
                         return Some(result);
@@ -1482,12 +1504,12 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, Va
     }
     fn numeric_entity(pos: usize, text: &str) -> Result<Txt, ValidatorError> {
         if text.is_empty() {
-            return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })
+            return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos });
         }
         let c = if let Some(text) = text.strip_prefix('x') {
             let pos = pos + 1;
             if text.is_empty() {
-                return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })
+                return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos });
             }
             u32::from_str_radix(text, 16)
                 .map_err(|_e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
@@ -1497,7 +1519,8 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, Va
         };
         Ok(Txt::Char(
             pos,
-            std::char::from_u32(c).ok_or(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
+            std::char::from_u32(c)
+                .ok_or(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?,
         ))
     }
     Entities {
@@ -1536,7 +1559,9 @@ impl<'a> ElementStack<'a> {
         if "" == prefix.as_str() {
             Ok(None)
         } else {
-            Ok(Some(self.lookup_namespace_uri(&prefix).ok_or(ValidatorError::UndefinedNamespacePrefix { prefix })?))
+            Ok(Some(self.lookup_namespace_uri(&prefix).ok_or(
+                ValidatorError::UndefinedNamespacePrefix { prefix },
+            )?))
         }
     }
 

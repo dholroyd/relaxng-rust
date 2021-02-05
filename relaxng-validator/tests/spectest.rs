@@ -1,7 +1,7 @@
 // TODO: https://github.com/LukasKalbertodt/libtest-mimic ?
 
 use relaxng_model::model::DefineRule;
-use relaxng_model::{Compiler};
+use relaxng_model::Compiler;
 use relaxng_validator::{Validator, ValidatorError};
 use roxmltree::{ExpandedName, Node};
 

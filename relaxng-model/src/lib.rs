@@ -522,11 +522,9 @@ impl<'a> Context<'a> {
         ),
     > + '_ {
         match self {
-            Context::Root { refs, .. } | Context::Grammar { refs, .. } => refs
-                .borrow()
-                .clone()
-                .into_iter()
-                .map(|(id, r)| (id, r)),
+            Context::Root { refs, .. } | Context::Grammar { refs, .. } => {
+                refs.borrow().clone().into_iter().map(|(id, r)| (id, r))
+            }
             _ => panic!("ref_iter() only valid for root context"),
         }
     }
@@ -709,9 +707,7 @@ impl<FS: Files> Compiler<FS> {
             self.check(&mut seen, start.borrow().as_ref().unwrap().pattern())?;
             Ok(start)
         } else {
-            Err(RelaxError::StartRuleNotDefined {
-                span: file.span,
-            })
+            Err(RelaxError::StartRuleNotDefined { span: file.span })
         }
     }
 
@@ -1488,12 +1484,10 @@ impl<FS: Files> Compiler<FS> {
             | (
                 DefineRule::CombineOnly(this_span, CombineRule::Interleave, _),
                 DefineRule::AssignCombine(that_span, Some(CombineRule::Choice), _),
-            ) => {
-                Err(RelaxError::DefineRulesMixesChoiceAndInterleave {
-                    this_span,
-                    that_span,
-                })
-            }
+            ) => Err(RelaxError::DefineRulesMixesChoiceAndInterleave {
+                this_span,
+                that_span,
+            }),
         }
     }
 
@@ -1639,13 +1633,10 @@ impl<FS: Files> Compiler<FS> {
                         .map(|d| match d {
                             model::DefineRule::AssignCombine(_, _, p)
                             | model::DefineRule::CombineOnly(_, _, p) => p,
-                        }).ok_or(RelaxError::StartRuleNotDefined {
-                            span: file_span,
                         })
+                        .ok_or(RelaxError::StartRuleNotDefined { span: file_span })
                 } else {
-                    Err(RelaxError::StartRuleNotDefined {
-                        span: file_span,
-                    })
+                    Err(RelaxError::StartRuleNotDefined { span: file_span })
                 }
             }
         }

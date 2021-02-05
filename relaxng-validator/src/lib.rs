@@ -1402,11 +1402,11 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item=Result<Txt, Vali
 }
 
 
-pub fn is_whitespace_char(c: char) -> bool {
+fn is_whitespace_char(c: char) -> bool {
     ['\x20', '\x09', '\x0d', '\x0a'].contains(&c)
 }
 
-pub fn is_whitespace_str(s: &str) -> bool {
+fn is_whitespace_str(s: &str) -> bool {
     s.chars().all(is_whitespace_char)
 }
 

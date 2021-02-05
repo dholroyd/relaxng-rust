@@ -173,7 +173,7 @@ fn span(start: LocatedSpan<&str>, end: LocatedSpan<&str>) -> Range<usize> {
 
 // identifier	  ::=  	(NCName - keyword)
 //                   | quotedIdentifier
-pub fn identifier(input: Span) -> IResult<Span, Identifier> {
+fn identifier(input: Span) -> IResult<Span, Identifier> {
     let res = alt((
         recognize(tuple((tag("\\"), keyword))),
         recognize(tuple((not(peek(keyword)), nc_name))),
@@ -664,7 +664,7 @@ fn cname(input: Span) -> IResult<Span, QName> {
 }
 
 // TODO: use `is_a()`  with an impl of `FindToken` for `RangeBounds`
-pub fn char_in<I, R, Error: ParseError<I>>(range: R) -> impl Fn(I) -> IResult<I, char, Error>
+fn char_in<I, R, Error: ParseError<I>>(range: R) -> impl Fn(I) -> IResult<I, char, Error>
 where
     I: Slice<RangeFrom<usize>> + InputIter,
     <I as InputIter>::Item: AsChar + Copy,

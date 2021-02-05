@@ -93,7 +93,7 @@ impl DatatypeCompiler for Compiler {
                 .relax
                 .datatype_value(ctx, datatype_name, value)
                 .map(DatatypeValues::Relax)
-                .map_err(|e| Errors::Relax(e)),
+                .map_err(Errors::Relax),
             types::DatatypeName::CName(types::QName(ref namespace_uri, _)) => self.dt_value(
                 ctx,
                 datatype_name,
@@ -121,7 +121,7 @@ impl DatatypeCompiler for Compiler {
                 .relax
                 .datatype_name(ctx, datatype_name, params)
                 .map(Datatypes::Relax)
-                .map_err(|e| Errors::Relax(e)),
+                .map_err(Errors::Relax),
             DatatypeName::CName(types::QName(types::NcName(span, namespace_uri), _)) => {
                 self.dt_name(ctx, datatype_name, params, &span, namespace_uri)
             }
@@ -147,7 +147,7 @@ impl Compiler {
                 .relax
                 .datatype_name(ctx, datatype_name, params)
                 .map(Datatypes::Relax)
-                .map_err(|e| Errors::Relax(e)),
+                .map_err(Errors::Relax),
             xsd::NAMESPACE_URI => self
                 .xsd
                 .datatype_name(ctx, datatype_name, params)
@@ -173,7 +173,7 @@ impl Compiler {
                 .relax
                 .datatype_value(ctx, datatype_name, value)
                 .map(DatatypeValues::Relax)
-                .map_err(|e| Errors::Relax(e)),
+                .map_err(Errors::Relax),
             xsd::NAMESPACE_URI => self
                 .xsd
                 .datatype_value(ctx, datatype_name, value)

@@ -1002,7 +1002,7 @@ mod test {
         T: PartialEq + fmt::Debug,
     {
         let (remaining, result) =
-            f(LocatedSpan::new(input)).expect(&format!("failed to parse {:#?}", input));
+            f(LocatedSpan::new(input)).unwrap_or_else(|_| panic!("failed to parse {:#?}", input));
         assert_eq!(result, expected);
         assert_eq!(remaining.fragment, "");
     }

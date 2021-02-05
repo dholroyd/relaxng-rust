@@ -86,22 +86,22 @@ impl super::Datatype for XsdDatatypes {
             XsdDatatypes::Decimal {
                 min_max,
                 pattern: pat,
-                fraction_digits,
-                total_digits,
+                fraction_digits: _,
+                total_digits: _,
             } => {
                 bigdecimal::BigDecimal::from_str(value)
                     .map(|v| min_max.is_valid(&v))
                     .unwrap_or(false)
                     && pat.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::NmTokens(len) => {
+            XsdDatatypes::NmTokens(_len) => {
                 unimplemented!()
             }
-            XsdDatatypes::NmToken(len) => {
+            XsdDatatypes::NmToken(_len) => {
                 unimplemented!()
             }
             XsdDatatypes::NcName(len) => len.is_valid(value) && is_valid_ncname(value),
-            XsdDatatypes::Token(len) => {
+            XsdDatatypes::Token(_len) => {
                 unimplemented!()
             }
             XsdDatatypes::Duration(patt) => {
@@ -222,7 +222,7 @@ impl LengthFacet {
             LengthFacet::Unbounded => other,
             LengthFacet::MinLength(min) => match other {
                 LengthFacet::Unbounded | LengthFacet::MinMaxLength(_, _) => unreachable!(),
-                LengthFacet::MinLength(min) => {
+                LengthFacet::MinLength(_min) => {
                     return Err(FacetError::ConflictingFacet("minLength"))
                 }
                 LengthFacet::MaxLength(max) => {
@@ -456,7 +456,7 @@ impl super::DatatypeCompiler for Compiler {
         value: &str,
     ) -> Result<Self::DTValue, Self::Error> {
         match datatype_name {
-            DatatypeName::CName(types::QName(namespace_uri, name)) => {
+            DatatypeName::CName(types::QName(_namespace_uri, name)) => {
                 self.compile_value(ctx, &name.0, &name.1, value)
             }
             DatatypeName::NamespacedName(_) => {
@@ -473,7 +473,7 @@ impl super::DatatypeCompiler for Compiler {
         params: &[types::Param],
     ) -> Result<Self::DT, Self::Error> {
         match datatype_name {
-            types::DatatypeName::CName(types::QName(namespace_uri, name)) => {
+            types::DatatypeName::CName(types::QName(_namespace_uri, name)) => {
                 self.compile(ctx, &name.0, &name.1, params)
             }
             _ => panic!("Unexpected {:?}", datatype_name),
@@ -732,8 +732,8 @@ impl Compiler {
         }
 
         Ok(XsdDatatypes::Decimal {
-            min_max: min_max,
-            pattern: pattern,
+            min_max,
+            pattern,
             fraction_digits,
             total_digits,
         })
@@ -1146,12 +1146,10 @@ impl TryFromVal for QNameVal {
             } else {
                 Err(())
             }
+        } else if is_valid_ncname(val) {
+            Ok(QNameVal(val.to_string()))
         } else {
-            if is_valid_ncname(val) {
-                Ok(QNameVal(val.to_string()))
-            } else {
-                Err(())
-            }
+            Err(())
         }
     }
 }

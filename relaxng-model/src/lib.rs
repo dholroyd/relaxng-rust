@@ -2,7 +2,7 @@ use crate::datatype::xsd::{FacetError, XsdDatatypeError};
 use crate::datatype::{DatatypeCompiler, Errors};
 use crate::model::Pattern;
 use codemap::CodeMap;
-use nom;
+
 use nom_locate::LocatedSpan;
 use relaxng_syntax::types::{
     DatatypeName, Name, NamespaceUriLiteral, NamespacedName, NcName, QName, Schema,
@@ -74,7 +74,7 @@ impl Syntax {
                             .subspan(i.offset as _, (i.offset + i.fragment.len()) as _),
                         e,
                     ),
-                    nom::Err::Incomplete(n) => unimplemented!("{:?}", e),
+                    nom::Err::Incomplete(_n) => unimplemented!("{:?}", e),
                 })?;
                 Ok(schema)
             }
@@ -340,7 +340,7 @@ impl<'a> Context<'a> {
     fn declare_namespace(&mut self, prefix: String, uri: String) -> Result<(), RelaxError> {
         match self {
             Context::Root { namespaces, .. } | Context::Include { namespaces, .. } => {
-                if let Some(old_uri) = namespaces.get(&prefix) {
+                if let Some(_old_uri) = namespaces.get(&prefix) {
                     //Err(RelaxError::NamespacePrefixAlreadyDefined { span: self.convert_span(), prefix })
                     Ok(())
                 } else {
@@ -468,7 +468,7 @@ impl<'a> Context<'a> {
                         // TODO: return Err, not panic
                         panic!("TODO: redefined override {:?}", id)
                     } else {
-                        overrides.insert(id.to_string(), (rule.span().clone(), false));
+                        overrides.insert(id.to_string(), (*rule.span(), false));
                         parant_of_include.define(id, rule)?;
                     };
                     Ok(())
@@ -526,7 +526,7 @@ impl<'a> Context<'a> {
                 .borrow()
                 .clone()
                 .into_iter()
-                .map(|(id, r)| (id.clone(), r.clone())),
+                .map(|(id, r)| (id, r)),
             _ => panic!("ref_iter() only valid for root context"),
         }
     }
@@ -614,7 +614,7 @@ impl<'a> Context<'a> {
     fn parent_attribute(&self) -> Option<codemap::Span> {
         match self {
             Context::Root { .. } | Context::Grammar { .. } => None,
-            Context::Attribute { span, .. } => Some(span.clone()),
+            Context::Attribute { span, .. } => Some(*span),
             Context::Include { parent, .. }
             | Context::IncludeOverrides { parent }
             | Context::Define { parent, .. }
@@ -697,7 +697,7 @@ impl<FS: Files> Compiler<FS> {
                 //println!("Undefined {:?} :(", name);
                 return Err(RelaxError::UndefinedReference {
                     span: file.span.subspan(0, 0),
-                    identifier: name.clone(),
+                    identifier: name,
                 });
             } else {
                 //println!("Defined {:?} => :)", name);
@@ -707,10 +707,10 @@ impl<FS: Files> Compiler<FS> {
             let mut seen = HashSet::new();
             // TODO: this is a temporary hack to detect bad references; do this in a better way?
             self.check(&mut seen, start.borrow().as_ref().unwrap().pattern())?;
-            Ok(start.clone())
+            Ok(start)
         } else {
             Err(RelaxError::StartRuleNotDefined {
-                span: file.span.clone(),
+                span: file.span,
             })
         }
     }
@@ -741,7 +741,7 @@ impl<FS: Files> Compiler<FS> {
                         self.check(seen, rule.pattern())?
                     } else {
                         return Err(RelaxError::UndefinedReference {
-                            span: span.clone(),
+                            span: *span,
                             identifier: name.to_string(),
                         });
                     }
@@ -774,7 +774,7 @@ impl<FS: Files> Compiler<FS> {
                     codemap_diagnostic::SpanStyle::Secondary
                 };
                 let label = codemap_diagnostic::SpanLabel {
-                    span: span.clone(),
+                    span: *span,
                     style,
                     label: Some("as included here".to_owned()),
                 };
@@ -789,7 +789,7 @@ impl<FS: Files> Compiler<FS> {
             },
             RelaxError::UndefinedReference { span, identifier } => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: span.clone(),
+                    span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("name is referenced here, but is not defined".to_owned()),
                 };
@@ -802,7 +802,7 @@ impl<FS: Files> Compiler<FS> {
             }
             RelaxError::NoParentAvailable(span) => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: span.clone(),
+                    span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("No parent context in which to look-up this name".to_owned()),
                 };
@@ -816,7 +816,7 @@ impl<FS: Files> Compiler<FS> {
             RelaxError::XmlParse(span, e) => match e {
                 relaxng_syntax::xml::Error::Expected(_, msg) => {
                     let label = codemap_diagnostic::SpanLabel {
-                        span: span.clone(),
+                        span: *span,
                         style: codemap_diagnostic::SpanStyle::Primary,
                         label: None,
                     };
@@ -829,7 +829,7 @@ impl<FS: Files> Compiler<FS> {
                 }
                 relaxng_syntax::xml::Error::Unexpected(_, msg) => {
                     let label = codemap_diagnostic::SpanLabel {
-                        span: span.clone(),
+                        span: *span,
                         style: codemap_diagnostic::SpanStyle::Primary,
                         label: None,
                     };
@@ -842,7 +842,7 @@ impl<FS: Files> Compiler<FS> {
                 }
                 relaxng_syntax::xml::Error::Xml(_, msg) => {
                     let label = codemap_diagnostic::SpanLabel {
-                        span: span.clone(),
+                        span: *span,
                         style: codemap_diagnostic::SpanStyle::Primary,
                         label: None,
                     };
@@ -857,7 +857,7 @@ impl<FS: Files> Compiler<FS> {
             },
             RelaxError::UndefinedNamespacePrefix { span, prefix } => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: span.clone(),
+                    span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: None,
                 };
@@ -871,7 +871,7 @@ impl<FS: Files> Compiler<FS> {
             RelaxError::DatatypeError(e) => match e {
                 Errors::UnsupportedDatatypeLibrary { span, namespace } => {
                     let label = codemap_diagnostic::SpanLabel {
-                        span: span.clone(),
+                        span: *span,
                         style: codemap_diagnostic::SpanStyle::Primary,
                         label: None,
                     };
@@ -885,7 +885,7 @@ impl<FS: Files> Compiler<FS> {
                 Errors::Relax(e) => match e {
                     datatype::relax::Error::ParamNotAllowed { span, name: _ } => {
                         let label = codemap_diagnostic::SpanLabel {
-                            span: span.clone(),
+                            span: *span,
                             style: codemap_diagnostic::SpanStyle::Primary,
                             label: Some("remove this parameter".to_string()),
                         };
@@ -898,7 +898,7 @@ impl<FS: Files> Compiler<FS> {
                     }
                     datatype::relax::Error::DatataypeNameUnknown { span, name } => {
                         let label = codemap_diagnostic::SpanLabel {
-                            span: span.clone(),
+                            span: *span,
                             style: codemap_diagnostic::SpanStyle::Primary,
                             label: Some("Only 'string' and 'token' supported".to_string()),
                         };
@@ -914,33 +914,33 @@ impl<FS: Files> Compiler<FS> {
                     XsdDatatypeError::Facet { type_name, facet } => {
                         let mut labels = vec![];
                         match facet {
-                            FacetError::ConflictingFacet(name) => {
+                            FacetError::ConflictingFacet(_name) => {
                                 unimplemented!("Support for ConflictingFacet")
                             }
                             FacetError::InvalidInt(span, msg) => {
                                 labels.push(codemap_diagnostic::SpanLabel {
-                                    span: span.clone(),
+                                    span: *span,
                                     style: codemap_diagnostic::SpanStyle::Primary,
                                     label: Some(format!("Invalid integer value: {}", msg)),
                                 })
                             }
                             FacetError::InvalidFloat(span, msg) => {
                                 labels.push(codemap_diagnostic::SpanLabel {
-                                    span: span.clone(),
+                                    span: *span,
                                     style: codemap_diagnostic::SpanStyle::Primary,
                                     label: Some(format!("Invalid floating-point value: {}", msg)),
                                 })
                             }
                             FacetError::InvalidPattern(span, err) => {
                                 labels.push(codemap_diagnostic::SpanLabel {
-                                    span: span.clone(),
+                                    span: *span,
                                     style: codemap_diagnostic::SpanStyle::Primary,
                                     label: Some(format!("Invalid pattern value: {}", err)),
                                 })
                             }
                             FacetError::InvalidFacet(span, name) => {
                                 labels.push(codemap_diagnostic::SpanLabel {
-                                    span: span.clone(),
+                                    span: *span,
                                     style: codemap_diagnostic::SpanStyle::Primary,
                                     label: Some(format!("Invalid facet for type: {}", name)),
                                 })
@@ -955,7 +955,7 @@ impl<FS: Files> Compiler<FS> {
                     }
                     XsdDatatypeError::UnsupportedDatatype { span, name } => {
                         let label = codemap_diagnostic::SpanLabel {
-                            span: span.clone(),
+                            span: *span,
                             style: codemap_diagnostic::SpanStyle::Primary,
                             label: None,
                         };
@@ -971,7 +971,7 @@ impl<FS: Files> Compiler<FS> {
                     }
                     XsdDatatypeError::InvalidValueOfType { span, type_name } => {
                         let label = codemap_diagnostic::SpanLabel {
-                            span: span.clone(),
+                            span: *span,
                             style: codemap_diagnostic::SpanStyle::Primary,
                             label: None,
                         };
@@ -987,16 +987,16 @@ impl<FS: Files> Compiler<FS> {
             RelaxError::RecursiveReference {
                 ref_id,
                 ref_span,
-                def_id,
+                def_id: _,
                 def_span,
             } => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: ref_span.clone(),
+                    span: *ref_span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: None,
                 };
                 let definition = codemap_diagnostic::SpanLabel {
-                    span: def_span.clone(),
+                    span: *def_span,
                     style: codemap_diagnostic::SpanStyle::Secondary,
                     label: Some("Definition is here".to_string()),
                 };
@@ -1009,7 +1009,7 @@ impl<FS: Files> Compiler<FS> {
             }
             RelaxError::UndefinedDatatypePrefix { span, prefix } => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: span.clone(),
+                    span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("undefined".to_string()),
                 };
@@ -1026,12 +1026,12 @@ impl<FS: Files> Compiler<FS> {
                 original,
             } => {
                 let dup = codemap_diagnostic::SpanLabel {
-                    span: duplicate.clone(),
+                    span: *duplicate,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("Duplicated here".to_string()),
                 };
                 let orig = codemap_diagnostic::SpanLabel {
-                    span: original.clone(),
+                    span: *original,
                     style: codemap_diagnostic::SpanStyle::Secondary,
                     label: Some("First seen here".to_string()),
                 };
@@ -1047,12 +1047,12 @@ impl<FS: Files> Compiler<FS> {
                 that_span,
             } => {
                 let dup = codemap_diagnostic::SpanLabel {
-                    span: this_span.clone(),
+                    span: *this_span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("Defined here with one define-rule".to_string()),
                 };
                 let orig = codemap_diagnostic::SpanLabel {
-                    span: that_span.clone(),
+                    span: *that_span,
                     style: codemap_diagnostic::SpanStyle::Secondary,
                     label: Some(
                         "Previously defined here with a different combine-rule".to_string(),
@@ -1068,7 +1068,7 @@ impl<FS: Files> Compiler<FS> {
             }
             RelaxError::StartRuleNotDefined { span } => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: span.clone(),
+                    span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("needs a 'start' rule".to_string()),
                 };
@@ -1084,12 +1084,12 @@ impl<FS: Files> Compiler<FS> {
                 element_span,
             } => {
                 let elem = codemap_diagnostic::SpanLabel {
-                    span: element_span.clone(),
+                    span: *element_span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("Remove this element".to_string()),
                 };
                 let attr = codemap_diagnostic::SpanLabel {
-                    span: attribute_span.clone(),
+                    span: *attribute_span,
                     style: codemap_diagnostic::SpanStyle::Secondary,
                     label: Some("In this attribute's body".to_string()),
                 };
@@ -1102,7 +1102,7 @@ impl<FS: Files> Compiler<FS> {
             }
             RelaxError::RecursiveInclude { name, span } => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: span.clone(),
+                    span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("Remove recursive include reference".to_string()),
                 };
@@ -1115,7 +1115,7 @@ impl<FS: Files> Compiler<FS> {
             }
             RelaxError::IncludedFileMustBeGrammar { span } => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: span.clone(),
+                    span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("Add a 'grammar' declaration at the top level".to_string()),
                 };
@@ -1132,12 +1132,12 @@ impl<FS: Files> Compiler<FS> {
                 name,
             } => {
                 let override_label = codemap_diagnostic::SpanLabel {
-                    span: override_span.clone(),
+                    span: *override_span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: Some("Either remove this override...".to_string()),
                 };
                 let include_label = codemap_diagnostic::SpanLabel {
-                    span: include_span.clone(),
+                    span: *include_span,
                     style: codemap_diagnostic::SpanStyle::Secondary,
                     label: Some(format!(
                         "...or add a definition for {:?} to this grammar",
@@ -1156,7 +1156,7 @@ impl<FS: Files> Compiler<FS> {
             }
             RelaxError::Parse(span, _kind) => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: span.clone(),
+                    span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
                     label: None,
                 };
@@ -1305,7 +1305,7 @@ impl<FS: Files> Compiler<FS> {
             .get_schema(&path)
             .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?;
         // TODO: get the span of the grammar in the file, rather than the span of the whole file
-        let include_span = file.span.clone();
+        let include_span = file.span;
 
         let mut inc_ctx = ctx.new_include(span, file)?;
 
@@ -1346,7 +1346,7 @@ impl<FS: Files> Compiler<FS> {
                 if !defined {
                     return Err(RelaxError::OverrideMissingFromInclude {
                         name: name.clone(),
-                        override_span: override_span.clone(),
+                        override_span: *override_span,
                         include_span,
                     });
                 }
@@ -1382,7 +1382,7 @@ impl<FS: Files> Compiler<FS> {
         use model::{CombineRule, DefineRule};
         match (a, b) {
             (DefineRule::AssignCombine(this, _, _), DefineRule::AssignCombine(that, _, _)) => {
-                return Err(RelaxError::DuplicateDefinition {
+                Err(RelaxError::DuplicateDefinition {
                     name: name.to_string(),
                     duplicate: this,
                     original: that,
@@ -1489,7 +1489,7 @@ impl<FS: Files> Compiler<FS> {
                 DefineRule::CombineOnly(this_span, CombineRule::Interleave, _),
                 DefineRule::AssignCombine(that_span, Some(CombineRule::Choice), _),
             ) => {
-                return Err(RelaxError::DefineRulesMixesChoiceAndInterleave {
+                Err(RelaxError::DefineRulesMixesChoiceAndInterleave {
                     this_span,
                     that_span,
                 })
@@ -1612,7 +1612,7 @@ impl<FS: Files> Compiler<FS> {
         let (file, s) = self
             .get_schema(&path)
             .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?;
-        let file_span = file.span.clone();
+        let file_span = file.span;
         let mut inc_ctx = ctx.new_include(span, file)?;
 
         match &s.pattern_or_grammar {
@@ -1629,7 +1629,7 @@ impl<FS: Files> Compiler<FS> {
                         // TODO: retain span information for references so that we don't report bogus data
                         return Err(RelaxError::UndefinedReference {
                             span: child_ctx.convert_span(&(0..0)),
-                            identifier: name.clone(),
+                            identifier: name,
                         });
                     }
                 }
@@ -1639,13 +1639,12 @@ impl<FS: Files> Compiler<FS> {
                         .map(|d| match d {
                             model::DefineRule::AssignCombine(_, _, p)
                             | model::DefineRule::CombineOnly(_, _, p) => p,
-                        })
-                        .ok_or_else(|| RelaxError::StartRuleNotDefined {
-                            span: file_span.clone(),
+                        }).ok_or(RelaxError::StartRuleNotDefined {
+                            span: file_span,
                         })
                 } else {
                     Err(RelaxError::StartRuleNotDefined {
-                        span: file_span.clone(),
+                        span: file_span,
                     })
                 }
             }
@@ -1790,7 +1789,7 @@ impl<FS: Files> Compiler<FS> {
         let datatype = self
             .datatype_compiler
             .datatype_value(ctx, &name, &datatype_value.1.as_string_value())
-            .map_err(|e| RelaxError::DatatypeError(e))?;
+            .map_err(RelaxError::DatatypeError)?;
         Ok(Pattern::DatatypeValue { datatype })
     }
     fn compile_datatype_name_pattern(
@@ -1825,7 +1824,7 @@ impl<FS: Files> Compiler<FS> {
         let datatype = self
             .datatype_compiler
             .datatype_name(ctx, &name, params)
-            .map_err(|e| RelaxError::DatatypeError(e))?;
+            .map_err(RelaxError::DatatypeError)?;
         Ok(model::Pattern::DatatypeName {
             datatype,
             except: if let Some(ref except) = datatype_name.2 {

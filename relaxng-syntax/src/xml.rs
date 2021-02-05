@@ -50,7 +50,7 @@ fn pattern_or_grammar(root: Node) -> Result<PatternOrGrammar> {
 
 type Result<T> = std::result::Result<T, Error>;
 
-const NS: &'static str = "http://relaxng.org/ns/structure/1.0";
+const NS: &str = "http://relaxng.org/ns/structure/1.0";
 
 fn pattern(node: Node) -> Result<Pattern> {
     if node.is_element() && node.tag_name().namespace() == Some(NS) {
@@ -227,7 +227,7 @@ fn any_name(node: Node) -> Result<AnyName> {
     } else {
         None
     };
-    Ok(AnyName(except.map(|e| Box::new(e))))
+    Ok(AnyName(except.map(Box::new)))
 }
 
 fn except_nameclass(node: Node) -> Result<NameClass> {
@@ -264,7 +264,7 @@ fn ns_name(node: Node) -> Result<NsName> {
         // TODO: the NsName type was defined to match compact-syntax and doesn't really work with
         //       xml syntax; we need a representation that works for xml-syntax too
         name: NamespaceOrPrefix::NamespaceUri(ns.unwrap_or(Literal::new(0..0, String::new()))),
-        except: except.map(|e| Box::new(e)),
+        except: except.map(Box::new),
     })
 }
 
@@ -744,7 +744,7 @@ fn div_grammar_content(node: Node) -> Result<GrammarContent> {
 
 fn attr_ncname(attr: &Attribute) -> Result<Identifier> {
     // TODO: further checks
-    if attr.value().contains(":") {
+    if attr.value().contains(':') {
         Err(Error::Unexpected(attr.value_range(), "Colon in NCName"))
     } else {
         ident(attr.value_range(), attr.value().trim())
@@ -863,14 +863,12 @@ fn ncname(range: Range<usize>, val: &str) -> Result<NcName> {
                     "Unexpected character for NcName",
                 ));
             }
-        } else {
-            if !is_nc_name_char(c) {
-                println!("NcName Urk! {:?}", val);
-                return Err(Error::Unexpected(
-                    range.start + i..range.start + i + 1,
-                    "Unexpected character for NcName",
-                ));
-            }
+        } else if !is_nc_name_char(c) {
+            println!("NcName Urk! {:?}", val);
+            return Err(Error::Unexpected(
+                range.start + i..range.start + i + 1,
+                "Unexpected character for NcName",
+            ));
         }
     }
     Ok(NcName(range, val.to_string()))
@@ -903,21 +901,18 @@ fn ident(range: Range<usize>, val: &str) -> Result<Identifier> {
                     "Unexpected character within identifier",
                 ));
             }
-        } else {
-            if !is_nc_name_char(c) {
-                return Err(Error::Unexpected(
-                    range.start + i..range.start + i + 1,
-                    "Unexpected character within identifier",
-                ));
-            }
+        } else if !is_nc_name_char(c) {
+            return Err(Error::Unexpected(
+                range.start + i..range.start + i + 1,
+                "Unexpected character within identifier",
+            ));
         }
     }
     Ok(Identifier(range, val.to_string()))
 }
 
 fn is_nc_name_start_char(c: char) -> bool {
-    match c {
-        'A'..='Z'
+    matches!(c, 'A'..='Z'
         | '_'
         | 'a'..='z'
         | '\u{C0}'..='\u{D6}'
@@ -931,23 +926,18 @@ fn is_nc_name_start_char(c: char) -> bool {
         | '\u{3001}'..='\u{D7FF}'
         | '\u{F900}'..='\u{FDCF}'
         | '\u{FDF0}'..='\u{FFFD}'
-        | '\u{10000}'..='\u{EFFFF}' => true,
-        _ => false,
-    }
+        | '\u{10000}'..='\u{EFFFF}')
 }
 fn is_nc_name_char(c: char) -> bool {
     if is_nc_name_start_char(c) {
-        return true;
+        true
     } else {
-        match c {
-            '-'
+        matches!(c, '-'
             | '.'
             | '0'..='9'
             | '\u{B7}'
             | '\u{0300}'..='\u{036F}'
-            | '\u{203F}'..='\u{2040}' => true,
-            _ => false,
-        }
+            | '\u{203F}'..='\u{2040}')
     }
 }
 

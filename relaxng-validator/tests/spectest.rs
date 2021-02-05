@@ -1,10 +1,10 @@
 // TODO: https://github.com/LukasKalbertodt/libtest-mimic ?
 
 use relaxng_model::model::DefineRule;
-use relaxng_model::{Compiler, RelaxError};
+use relaxng_model::{Compiler};
 use relaxng_validator::{Validator, ValidatorError};
-use roxmltree::{ExpandedName, Node, NodeType};
-use std::any::Any;
+use roxmltree::{ExpandedName, Node};
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -18,7 +18,7 @@ use std::rc::Rc;
 fn main() {
     // TODO: only run this test if testcases are not filtered or if the filter matches this case
     //       this hack of checking for Some("spectest") does not handle all filtering cases
-    if let Some("spectest") = std::env::args().skip(1).next().as_ref().map(String::as_str) {
+    if let Some("spectest") = std::env::args().nth(1).as_deref() {
         spectest()
     }
 }
@@ -172,7 +172,7 @@ fn load_resources(path: &Path, resources: &mut HashMap<String, String>, node: No
         "dir" => {
             let sub = node
                 .attribute("name")
-                .expect(&format!("Expected @name on <dir>: {:?}", node));
+                .unwrap_or_else(|| panic!("Expected @name on <dir>: {:?}", node));
             let sub_path = path.join(sub);
             for child in node.children().filter(|n| n.is_element()) {
                 load_resources(&sub_path, resources, child);
@@ -190,7 +190,7 @@ fn load_resources(path: &Path, resources: &mut HashMap<String, String>, node: No
             println!("{}", stringify(data));
             resources.insert(sub_name.to_string_lossy().to_string(), stringify(data));
         }
-        other_name => panic!("unsupported tag {:?}", node),
+        _other_name => panic!("unsupported tag {:?}", node),
     }
 }
 
@@ -202,15 +202,15 @@ fn process_case(
 ) {
     let test_case = match TestCase::try_from(case) {
         Ok(c) => c,
-        Err(e) => {
+        Err(_e) => {
             eprintln!(" 🙈 TODO: Test case not handled");
             return;
         }
     };
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let test = test_case.clone();
-    let thread = std::thread::spawn(move || {
+    let test = test_case;
+    std::thread::spawn(move || {
         let result = panic::catch_unwind(|| run_test(test.clone()));
         tx.send(result)
     });
@@ -293,7 +293,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                         TestResult::Pass
                     }
                 }
-                Ok(result) => {
+                Ok(_result) => {
                     eprintln!("--------");
                     eprintln!("  {}", resources.get("incorrect.rng").unwrap());
                     eprintln!("  ❌ Incorrect schema should have failed");
@@ -360,7 +360,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                             match v.next() {
                                 None => break,
                                 Some(Ok(())) => {}
-                                Some(Err(err)) => {
+                                Some(Err(_err)) => {
                                     //eprintln!("  ✅ Invalid input rejected");
                                     return TestResult::Pass;
                                 }
@@ -384,7 +384,7 @@ fn stringify(node: Node) -> String {
     // extra work to give the first line consistent indentation with the rest of the lines
     if let Some(prev) = node.prev_sibling() {
         if let Some(text) = prev.text() {
-            let last_line = if let Some(pos) = text.rfind("\n") {
+            let last_line = if let Some(pos) = text.rfind('\n') {
                 &text[pos + 1..]
             } else {
                 text
@@ -412,8 +412,7 @@ fn create_compiler(resources: HashMap<String, String>) -> Compiler<FS> {
                 .map(String::to_string)
         }
     }
-    let mut c = relaxng_model::Compiler::new(FS(resources), relaxng_model::Syntax::Xml);
-    c
+    relaxng_model::Compiler::new(FS(resources), relaxng_model::Syntax::Xml)
 }
 
 fn validate(schema: Rc<RefCell<Option<DefineRule>>>, doc: &str) -> Result<(), ValidatorError> {

@@ -44,7 +44,7 @@ pub enum BuiltinDatatype {
     String,
 }
 impl super::Datatype for BuiltinDatatype {
-    fn is_valid(&self, value: &str) -> bool {
+    fn is_valid(&self, _value: &str) -> bool {
         match self {
             BuiltinDatatype::Token => {
                 // TODO: assert valid token
@@ -83,7 +83,7 @@ impl super::DatatypeCompiler for Compiler {
             DatatypeName::CName(QName(_, NcName(_, name))) if name == "token" => {
                 BuiltinDatatypeValue::TokenValue(normalize_whitespace(value))
             }
-            DatatypeName::CName(QName(prefix, localname)) => {
+            DatatypeName::CName(QName(_prefix, localname)) => {
                 return Err(Error::DatataypeNameUnknown {
                     span: ctx.convert_span(&localname.0),
                     name: localname.1.clone(),
@@ -119,7 +119,7 @@ impl super::DatatypeCompiler for Compiler {
             DatatypeName::CName(QName(_, NcName(_, name))) if name == "token" => {
                 BuiltinDatatype::Token
             }
-            DatatypeName::CName(QName(prefix, localname)) => {
+            DatatypeName::CName(QName(_prefix, localname)) => {
                 return Err(Error::DatataypeNameUnknown {
                     span: ctx.convert_span(&localname.0),
                     name: localname.1.clone(),

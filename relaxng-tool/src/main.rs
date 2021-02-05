@@ -1,12 +1,12 @@
-use relaxng_model::model::DefineRule;
-use relaxng_model::{Compiler, RelaxError};
+
+use relaxng_model::Compiler;
 use relaxng_validator::Validator;
-use std::cell::RefCell;
+
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::exit;
-use std::rc::Rc;
+
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
@@ -25,7 +25,7 @@ fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
     let model = match compiler.compile(&schema) {
         Ok(m) => m,
         Err(err) => {
-            let d = compiler.dump_diagnostic(&err);
+            compiler.dump_diagnostic(&err);
             exit(1);
         }
     };

@@ -837,7 +837,7 @@ impl<'a> Validator<'a> {
                 let mut pat = next_pat;
                 for att in attributes {
                     let mut memo = HashMap::new();
-                    pat = Self::att_deriv(&mut memo, pat, schema, att.clone());
+                    pat = Self::att_deriv(&mut memo, pat, schema, att);
                     if let Pat::NotAllowed = schema.patt(pat) {
                         return Err(ValidatorError::NotAllowed(Token::Attribute {
                             prefix: att.name.namespace_uri.unwrap_or_else(|| StrSpan::from("")),
@@ -1246,7 +1246,7 @@ impl<'a> Validator<'a> {
                 rest += 1;
             } else {
                 if i > 0 {
-                    result.push_str(" ");
+                    result.push(' ');
                 }
                 // TODO: also provide namespace information; grouping by namespace to make the
                 //       information more succinct
@@ -1263,27 +1263,27 @@ impl<'a> Validator<'a> {
     }
     fn describe_nameclass(&self, nc: &NameClass, desc: &mut String)  {
         match nc {
-            NameClass::Named { namespace_uri, name } => {
+            NameClass::Named { namespace_uri: _, name } => {
                 desc.push_str(name);
             }
             NameClass::NsName { namespace_uri, except } => {
                 desc.push_str(namespace_uri);
                 desc.push_str(":*");
                 if let Some(except) = except {
-                    desc.push_str("-");
+                    desc.push('-');
                     self.describe_nameclass(except, desc);
                 }
             }
             NameClass::AnyName { except } => {
-                desc.push_str("*");
+                desc.push('*');
                 if let Some(except) = except {
-                    desc.push_str("-");
+                    desc.push('-');
                     self.describe_nameclass(except, desc);
                 }
             }
             NameClass::Alt { a, b } => {
                 self.describe_nameclass(a, desc);
-                desc.push_str("|");
+                desc.push('|');
                 self.describe_nameclass(b, desc);
             }
         }
@@ -1298,7 +1298,7 @@ impl<'a> Validator<'a> {
         let mut map = codemap::CodeMap::new();
         let file = map.add_file(name, source);
         let mut diagnostics = vec![];
-        let d = match err {
+        match err {
             ValidatorError::Xml(err) => {
                 let line = file.line_span(err.pos().row as _);
                 let span = line.subspan(err.pos().row as _, err.pos().row as _);
@@ -1417,7 +1417,7 @@ impl<'a> Validator<'a> {
                     spans: vec![label],
                 })
             }
-        };
+        }
         (map, diagnostics)
     }
 }
@@ -1448,8 +1448,8 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, Va
                     if c == ';' {
                         self.in_entity = false;
                         let text = &self.text[self.offset..self.offset + i];
-                        let result = if text.starts_with("#") {
-                            numeric_entity(self.offset, &text[1..])
+                        let result = if let Some(text) = text.strip_prefix('#') {
+                            numeric_entity(self.offset, text)
                         } else {
                             Ok(Txt::Entity(
                                 self.offset + self.pos,
@@ -1484,21 +1484,20 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, Va
         if text.is_empty() {
             return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })
         }
-        let c = if text.starts_with("x") {
-            let text = &text[1..];
+        let c = if let Some(text) = text.strip_prefix('x') {
             let pos = pos + 1;
             if text.is_empty() {
                 return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })
             }
             u32::from_str_radix(text, 16)
-                .map_err(|e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
+                .map_err(|_e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
         } else {
             u32::from_str_radix(text, 10)
-                .map_err(|e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
+                .map_err(|_e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
         };
         Ok(Txt::Char(
             pos,
-            std::char::from_u32(c).ok_or_else(|| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
+            std::char::from_u32(c).ok_or(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
         ))
     }
     Entities {

@@ -147,7 +147,7 @@ impl super::Datatype for XsdDatatypes {
 }
 
 fn is_valid_ncname(text: &str) -> bool {
-    match relaxng_syntax::parse::nc_name(relaxng_syntax::parse::Span::new(text)) {
+    match relaxng_syntax::compact::nc_name(relaxng_syntax::compact::Span::new(text)) {
         Ok((rest, _name)) => {
             rest.fragment.is_empty()
         }

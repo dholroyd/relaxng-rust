@@ -1,4 +1,4 @@
-pub mod parse;
+pub mod compact;
 pub mod types;
 pub mod xml;
 
@@ -73,6 +73,6 @@ mod tests {
         anyAttribute = attribute * { text }
         ";
 
-        assert!(parse::schema(LocatedSpan::new(schema_data)).is_ok());
+        assert!(compact::schema(LocatedSpan::new(schema_data)).is_ok());
     }
 }

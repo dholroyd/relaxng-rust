@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io;
 use std::io::Read;
-use relaxng_syntax::{parse, types};
+use relaxng_syntax::{compact, types};
 use nom;
 use nom_locate::LocatedSpan;
 use std::collections::{HashMap, HashSet};
@@ -58,7 +58,7 @@ impl Syntax {
             }
             Syntax::Compact => {
                 let input = LocatedSpan::new(file.source());
-                let schema = parse::schema(input).map_err(|e| match e {
+                let schema = compact::schema(input).map_err(|e| match e {
                     nom::Err::Error((i, e)) => RelaxError::Parse(file.span.subspan(i.offset as _, (i.offset+i.fragment.len()) as _), e),
                     nom::Err::Failure((i, e)) => RelaxError::Parse(file.span.subspan(i.offset as _, (i.offset+i.fragment.len()) as _), e),
                     nom::Err::Incomplete(n) => unimplemented!("{:?}", e),

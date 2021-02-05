@@ -47,8 +47,7 @@ fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
                         codemap_diagnostic::ColorConfig::Auto,
                         Some(&map),
                     );
-                    emitter.emit(&[d]);
-                    println!("Explanation: {}", v.explain());
+                    emitter.emit(&d[..]);
                     exit(2);
                 }
                 None => break,

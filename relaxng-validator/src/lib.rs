@@ -1193,136 +1193,98 @@ impl<'a> Validator<'a> {
         }
     }
 
-    //fn children_deriv()
-
-    pub fn explain(&self) -> String {
-        let mut text = String::new();
-        self.explain_impl(&mut text, self.current_step);
-        text
+    fn heads(&self, id: PatId) -> HashSet<Pat> {
+        let mut result = HashSet::new();
+        self.head(&mut result, id);
+        result
     }
-
-    fn explain_impl(&self, text: &mut String, id: PatId) {
-        match self.schema.patt(id) {
+    fn head(&self, result: &mut HashSet<Pat>, p: PatId) {
+        // https://www.kohsuke.org/relaxng/implbook/Validation1.html#IDATGOO
+        let pat = self.schema.patt(p);
+        match pat {
             Pat::Choice(p1, p2, _) => {
-                let mut choices = vec![];
-                self.explain_choices(&mut choices, p1);
-                self.explain_choices(&mut choices, p2);
-                text.push_str("( ");
-                for (i, c) in choices.into_iter().enumerate() {
-                    if i > 0 {
-                        text.push_str(" | ");
-                    }
-                    self.explain_impl(text, c);
-                }
-                text.push_str(" )");
+                self.head(result, p1);
+                self.head(result, p2);
             }
             Pat::Interleave(p1, p2, _) => {
-                let mut interleave = vec![];
-                self.explain_interleave(&mut interleave, p1);
-                self.explain_interleave(&mut interleave, p2);
-                text.push_str("( ");
-                for c in interleave {
-                    self.explain_impl(text, c);
-                    text.push_str(" & ");
-                }
-                text.push_str(" )");
+                self.head(result, p1);
+                self.head(result, p2);
             }
             Pat::Group(p1, p2, _) => {
-                let mut seq = vec![];
-                self.explain_seq(&mut seq, p1);
-                self.explain_seq(&mut seq, p2);
-                text.push_str("( ");
-                for c in seq {
-                    self.explain_impl(text, c);
-                    text.push_str(", ");
+                if self.schema.patt(p1).is_nullable() {
+                    self.head(result, p1);
+                } else {
+                    self.head(result, p1);
+                    self.head(result, p2);
                 }
-                text.push_str(" )");
             }
-            Pat::OneOrMore(p, _) => {
-                self.explain_impl(text, p);
-                text.push('+');
-            }
-            Pat::Empty => text.push_str("empty"),
-            Pat::Text => text.push_str("text"),
-            Pat::NotAllowed => text.push_str("notAllowed"),
-            Pat::Attribute(nc, _) => {
-                text.push_str("attribute ");
-                self.explain_nameclass(text, &nc);
-            }
-            Pat::Element(nc, _) => {
-                text.push_str("element ");
-                self.explain_nameclass(text, &nc);
-            }
-            Pat::Datatype(_) => unimplemented!(),
-            Pat::DatatypeValue(_) => unimplemented!(),
-            Pat::DatatypeExcept(_, _) => unimplemented!(),
-            Pat::List(_) => unimplemented!(),
-            Pat::Placeholder(_) => unimplemented!(),
-            Pat::After(p1, _p2) => {
-                self.explain_impl(text, p1);
-                text.push_str(" [followed be end tag]");
-            }
+            Pat::OneOrMore(p, _) => self.head(result, p),
+            Pat::Empty => {}
+            Pat::Text => {}
+            Pat::NotAllowed => {}
+            Pat::Attribute(_, _) => { result.insert(pat); }
+            Pat::Element(_, _) => { result.insert(pat); }
+            Pat::Datatype(_) => { result.insert(pat); }
+            Pat::DatatypeValue(_) => { result.insert(pat); }
+            Pat::DatatypeExcept(_, _) => { result.insert(pat); }
+            Pat::List(p) => self.head(result, p),
+            Pat::Placeholder(_) => panic!("Unexpected {:?}", pat),
+            Pat::After(p, _) => self.head(result, p),
         }
     }
-    fn explain_choices(&self, choices: &mut Vec<PatId>, id: PatId) {
-        match self.schema.patt(id) {
-            Pat::Choice(p1, p2, _) => {
-                self.explain_choices(choices, p1);
-                self.explain_choices(choices, p2);
+
+    fn describe_expected(&self, expected_patt: PatId) -> String {
+        let heads = self.heads(expected_patt);
+        let mut result = String::new();
+        const MAX_ELEMENTS: usize = 4;
+        let mut rest = 0;
+        for (i, nameclass) in heads.iter().filter_map(|p| if let Pat::Element(nameclass, _) = p { Some(nameclass) } else { None }).enumerate() {
+            if i == 0 {
+                result.push_str("Element ");
             }
-            _ => choices.push(id),
-        }
-    }
-    fn explain_interleave(&self, interleave: &mut Vec<PatId>, id: PatId) {
-        match self.schema.patt(id) {
-            Pat::Interleave(p1, p2, _) => {
-                self.explain_interleave(interleave, p1);
-                self.explain_interleave(interleave, p2);
+            if i >= MAX_ELEMENTS {
+                rest += 1;
+            } else {
+                if i > 0 {
+                    result.push_str(" ");
+                }
+                // TODO: also provide namespace information; grouping by namespace to make the
+                //       information more succinct
+                let mut desc = String::new();
+                self.describe_nameclass(nameclass, &mut desc);
+                result.push_str(&desc);
             }
-            _ => interleave.push(id),
         }
-    }
-    fn explain_seq(&self, seq: &mut Vec<PatId>, id: PatId) {
-        match self.schema.patt(id) {
-            Pat::Group(p1, p2, _) => {
-                self.explain_seq(seq, p1);
-                self.explain_seq(seq, p2);
-            }
-            _ => seq.push(id),
+        if rest > 0 {
+            result.push_str(&format!(" .. or one of {} more", rest))
         }
+        // TODO: plus attributes and everything else
+        result
     }
-    fn explain_nameclass(&self, text: &mut String, nc: &NameClass) {
+    fn describe_nameclass(&self, nc: &NameClass, desc: &mut String)  {
         match nc {
-            NameClass::Named {
-                namespace_uri,
-                name,
-            } => {
-                text.push('{');
-                text.push_str(&namespace_uri);
-                text.push('}');
-                text.push_str(&name);
+            NameClass::Named { namespace_uri, name } => {
+                desc.push_str(name);
             }
-            NameClass::NsName {
-                namespace_uri,
-                except,
-            } => {
-                text.push('{');
-                text.push_str(&namespace_uri);
-                text.push('}');
-                if let Some(_except) = except {
-                    text.push_str(" - ..");
+            NameClass::NsName { namespace_uri, except } => {
+                desc.push_str(namespace_uri);
+                desc.push_str(":*");
+                if let Some(except) = except {
+                    desc.push_str("-");
+                    self.describe_nameclass(except, desc);
                 }
             }
             NameClass::AnyName { except } => {
-                text.push('*');
-                if let Some(_except) = except {
-                    text.push_str(" - ..");
+                desc.push_str("*");
+                if let Some(except) = except {
+                    desc.push_str("-");
+                    self.describe_nameclass(except, desc);
                 }
             }
             NameClass::Alt { a, b } => {
-                self.explain_nameclass(text, &a);
-                text.push('|');
-                self.explain_nameclass(text, &b);
+                self.describe_nameclass(a, desc);
+                desc.push_str("|");
+                self.describe_nameclass(b, desc);
             }
         }
     }
@@ -1332,26 +1294,28 @@ impl<'a> Validator<'a> {
         name: String,
         source: String,
         err: &ValidatorError,
-    ) -> (codemap::CodeMap, codemap_diagnostic::Diagnostic) {
+    ) -> (codemap::CodeMap, Vec<codemap_diagnostic::Diagnostic>) {
         let mut map = codemap::CodeMap::new();
         let file = map.add_file(name, source);
+        let mut diagnostics = vec![];
         let d = match err {
             ValidatorError::Xml(err) => {
                 let line = file.line_span(err.pos().row as _);
                 let span = line.subspan(err.pos().row as _, err.pos().row as _);
 
-                let _label = codemap_diagnostic::SpanLabel {
+                let label = codemap_diagnostic::SpanLabel {
                     span,
                     label: None,
                     style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
-                codemap_diagnostic::Diagnostic {
+                diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: format!("{}", err),
                     code: None,
-                    spans: vec![],
-                }
+                    spans: vec![label],
+                });
+
             }
             ValidatorError::NotAllowed(tok) => {
                 let span = match tok {
@@ -1388,12 +1352,25 @@ impl<'a> Validator<'a> {
                     style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
-                codemap_diagnostic::Diagnostic {
+                diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: format!("{} not expected here", name),
                     code: None,
                     spans: vec![label],
-                }
+                });
+
+                let desc = self.describe_expected(self.current_step);
+                let message = if desc.is_empty() {
+                    "Remove this".to_string()
+                } else {
+                    format!("Expected {}", desc)
+                };
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Help,
+                    message,
+                    code: None,
+                    spans: vec![],
+                });
             }
             ValidatorError::UndefinedNamespacePrefix { prefix } => {
                 let label = codemap_diagnostic::SpanLabel {
@@ -1405,12 +1382,12 @@ impl<'a> Validator<'a> {
                     style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
-                codemap_diagnostic::Diagnostic {
+                diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: format!("The prefix {:?} is not defined", prefix.as_str()),
                     code: None,
                     spans: vec![label],
-                }
+                })
             }
             ValidatorError::UndefinedEntity { name, span } => {
                 let label = codemap_diagnostic::SpanLabel {
@@ -1419,12 +1396,12 @@ impl<'a> Validator<'a> {
                     style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
-                codemap_diagnostic::Diagnostic {
+                diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: format!("The entity &{:?}; is not defined", name),
                     code: None,
                     spans: vec![label],
-                }
+                })
             }
             ValidatorError::InvalidOrUnclosedEntity { span } => {
                 let label = codemap_diagnostic::SpanLabel {
@@ -1433,15 +1410,15 @@ impl<'a> Validator<'a> {
                     style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
-                codemap_diagnostic::Diagnostic {
+                diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: "Invalid or unclosed entity reference".to_string(),
                     code: None,
                     spans: vec![label],
-                }
+                })
             }
         };
-        (map, d)
+        (map, diagnostics)
     }
 }
 
@@ -1720,8 +1697,7 @@ mod tests {
                         codemap_diagnostic::ColorConfig::Auto,
                         Some(&map),
                     );
-                    emitter.emit(&[d]);
-                    println!("explanation: {}", v.explain());
+                    emitter.emit(&d[..]);
                     panic!("{:?}", err);
                 }
             }
@@ -1778,7 +1754,6 @@ mod tests {
             }
         }
         if let Some(err) = fail {
-            println!("explanation: {}", v.explain());
             return Err(format!("{:?}", err));
         }
         Ok(())

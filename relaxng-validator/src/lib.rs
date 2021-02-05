@@ -747,7 +747,12 @@ impl<'a> Validator<'a> {
                                         });
                                     }
                                 }
+                                Txt::Char(_pos, val) => {
+                                    buffer.push(val);
+                                    continue;
+                                }
                             };
+                            // we only reach this point for Txt::Text and Txt::Entity cases,
                             if txt.len() == text.len() {
                                 // no need to copy data into the buffer, just process the whole input in one go
                                 break;
@@ -1444,6 +1449,7 @@ impl<'a> Validator<'a> {
 enum Txt<'a> {
     Text(usize, &'a str),
     Entity(usize, &'a str),
+    Char(usize, char),
 }
 
 fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, ValidatorError>> {
@@ -1464,12 +1470,17 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, Va
                 if self.in_entity {
                     if c == ';' {
                         self.in_entity = false;
-                        let result = Txt::Entity(
-                            self.offset + self.pos,
-                            &self.text[self.offset..self.offset + i],
-                        );
+                        let text = &self.text[self.offset..self.offset + i];
+                        let result = if text.starts_with("#") {
+                            numeric_entity(self.offset, &text[1..])
+                        } else {
+                            Ok(Txt::Entity(
+                                self.offset + self.pos,
+                                text,
+                            ))
+                        };
                         self.offset += i + 1;
-                        return Some(Ok(result));
+                        return Some(result);
                     }
                 } else if c == '&' {
                     self.in_entity = true;
@@ -1491,6 +1502,27 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, Va
                 Some(Ok(result))
             }
         }
+    }
+    fn numeric_entity(pos: usize, text: &str) -> Result<Txt, ValidatorError> {
+        if text.is_empty() {
+            return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })
+        }
+        let c = if text.starts_with("x") {
+            let text = &text[1..];
+            let pos = pos + 1;
+            if text.is_empty() {
+                return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })
+            }
+            u32::from_str_radix(text, 16)
+                .map_err(|e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
+        } else {
+            u32::from_str_radix(text, 10)
+                .map_err(|e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
+        };
+        Ok(Txt::Char(
+            pos,
+            std::char::from_u32(c).ok_or_else(|| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
+        ))
     }
     Entities {
         text,

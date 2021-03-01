@@ -2,6 +2,35 @@
 
 [Rust](/home/dave/projects/relaxng-rust/README.md) implementation of the [RELAX NG](https://relaxng.org/) XML schema language.
 
+## Example
+
+```
+start =
+  element data { children }
+
+children =
+  element dog { text } |
+  element sheep { text }
+```
+
+```xml
+<data>
+  <cats>henry</cats>
+</data>
+```
+
+```
+$ rng validate schema.rnc input.xml
+
+Validating "input.xml"
+error: element-start not expected here
+ --> input.xml:2:4
+  |
+2 |   <cats>henry</cats>
+  |    ^^^^ Not allowed
+help: Expected Element sheep dog
+```
+
 ## Status
 
 The as of Feburary 2021, `relaxng-validator` crate passes 259 and fails 125 tests from the RELAX NG test suite.

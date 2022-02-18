@@ -1918,6 +1918,34 @@ mod tests {
         );
     }
 
+    //#[test]
+    fn blowup() {
+        // we need some optimisations in place to avoid exponential blow-up
+        // https://relaxng.org/jclark/derivative.html#Avoiding_exponential_blowup
+        Fixture::correct(
+            "start = element root { a8 | b8 } \
+            a8 = a7 | b7+ \
+            b8 = b7 | a7+ \
+            a7 = a6 | b6+ \
+            b7 = b6 | a6+ \
+            a6 = a5 | b5+ \
+            b6 = b5 | a5+ \
+            a5 = a4 | b4+ \
+            b5 = b4 | a4+ \
+            a4 = a3 | b3+ \
+            b4 = b3 | a3+ \
+            a3 = a2 | b2+ \
+            b3 = b2 | a2+ \
+            a2 = a1 | b1+ \
+            b2 = b1 | a1+ \
+            a1 = a | b+ \
+            b1 = b | a+ \
+            a = element a { text } \
+            b = element b { text }",
+        )
+        .valid("<root><b/><b/><b/></root>");
+    }
+
     #[test]
     fn parse_entities() {
         let mut iter = super::parse_entities(0, "foo &bar; blat");

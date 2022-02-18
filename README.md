@@ -45,6 +45,9 @@ Current problems,
    panics will go away once the full datatype library is implemented.)
  - ❌ The implementation is currently very slow (compared to the [Jing](https://github.com/relaxng/jing-trang)
    implementation of RELAX NG validation, for example)
+ - ❌ Suffers from
+   [exponential performance blow-up](https://relaxng.org/jclark/derivative.html#Avoiding_exponential_blowup) for
+   certain pathological schema structures
 
 ## Subprojects
 

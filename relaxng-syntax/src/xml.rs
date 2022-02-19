@@ -1,6 +1,7 @@
 use crate::types::*;
 use roxmltree::{Attribute, Node};
 use std::ops::Range;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum Error {
@@ -623,7 +624,7 @@ fn external_ref(node: Node) -> Result<ExternalPattern> {
     // TODO: ExternalPattern's requirement for a 'literal' here is inconvenient, and its API should
     //       be altered to make using it here simpler
     let seg = LiteralSegment {
-        body: href.value().to_string(),
+        body: rebase_path(node, href.value())?,
     };
     let val = Literal(href.value_range(), vec![seg]);
 
@@ -751,13 +752,44 @@ fn attr_ncname(attr: &Attribute) -> Result<Identifier> {
     }
 }
 
+fn rebase_path(node: Node, href: &str) -> Result<String> {
+    let bases = node
+        .ancestors()
+        .filter_map(|node| node.attribute_node(("http://www.w3.org/XML/1998/namespace", "base")))
+        .collect::<Vec<_>>();
+    let mut result: Option<PathBuf> = None;
+    for base in bases.iter().rev() {
+        let new = base.value();
+        resolve(&mut result, new);
+    }
+    resolve(&mut result, href);
+    Ok(result.unwrap().to_str().unwrap().to_string())
+}
+
+fn resolve(mut result: &mut Option<PathBuf>, new: &str) {
+    *result = Some(if new.starts_with("/") {
+        PathBuf::from(new)
+    } else {
+        match *result {
+            Some(ref mut old) => {
+                if !old.to_str().unwrap().ends_with("/") {
+                    old.pop();
+                }
+                old.push(new);
+                old.clone()
+            }
+            None => PathBuf::from(new),
+        }
+    });
+}
+
 fn include(node: Node) -> Result<Include> {
     let href = node
         .attribute_node("href")
         .ok_or(Error::Expected(node.range(), "href attribute"))?;
 
     let seg = LiteralSegment {
-        body: href.value().to_string(),
+        body: rebase_path(node, href.value())?,
     };
     let val = Literal(href.value_range(), vec![seg]);
 

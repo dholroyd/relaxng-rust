@@ -711,22 +711,18 @@ impl<'a> Validator<'a> {
                         let next_id =
                             Self::close_element_start(&self.stack, &mut self.schema, evt, pat)?;
                         let pat = self.schema.patt(next_id);
-                        let next_pat = if self.last_was_start_element {
-                            // The last event was XmlEvent::StartElement with no child elements or child
-                            // text nodes.
-                            //
-                            // Per https://relaxng.org/jclark/derivative.html ,
-                            //     "The case where the list of children is empty is
-                            //      treated as if there were a text node whose value
-                            //      were the empty string."
-                            //
-                            // This fake text node is required for a pattern like 'element foo { token }'
-                            // to match the input '<foo/>' or '<foo></foo>'
-                            let p = Self::text_deriv(pat, &mut self.schema, "");
-                            self.schema.patt(p)
-                        } else {
-                            pat
-                        };
+                        // The last event was XmlEvent::StartElement with no child elements or child
+                        // text nodes.
+                        //
+                        // Per https://relaxng.org/jclark/derivative.html ,
+                        //     "The case where the list of children is empty is
+                        //      treated as if there were a text node whose value
+                        //      were the empty string."
+                        //
+                        // This fake text node is required for a pattern like 'element foo { token }'
+                        // to match the input '<foo/>' or '<foo></foo>'
+                        let p = Self::text_deriv(pat, &mut self.schema, "");
+                        let next_pat = self.schema.patt(p);
                         Self::end_tag_deriv(next_pat, &mut self.schema)
                     }
                 }
@@ -1956,5 +1952,14 @@ mod tests {
         assert_matches!(iter.next(), Some(Ok(super::Txt::Text(0, "foo "))));
         assert_matches!(iter.next(), Some(Ok(super::Txt::Entity(5, "bar"))));
         assert_matches!(iter.next(), Some(Ok(super::Txt::Text(9, " blat"))));
+    }
+
+    #[test]
+    fn accept_empty_except() {
+        let res = check_simple(
+            "start = element a { token - \"x\" }",
+            "<?xml version=\"1.0\"?><a/>",
+        );
+        assert_matches!(res, Ok(()));
     }
 }

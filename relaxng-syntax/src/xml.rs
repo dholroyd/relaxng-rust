@@ -92,7 +92,7 @@ fn check_standard_attrs(node: Node) -> Result<()> {
             // TODO: move these checks into relaxng-model crate
             if !rfc2396::validate(val) {
                 Err(Error::Unexpected(
-                    dt_lib.value_range(),
+                    dt_lib.range_value(),
                     "Datatype library URI is invalid",
                 ))
             } else {
@@ -100,7 +100,7 @@ fn check_standard_attrs(node: Node) -> Result<()> {
                     Ok(url) => {
                         if url.fragment().is_some() {
                             Err(Error::Unexpected(
-                                dt_lib.value_range(),
+                                dt_lib.range_value(),
                                 "Datatype library URI must not include a fragment identifier",
                             ))
                         } else {
@@ -108,7 +108,7 @@ fn check_standard_attrs(node: Node) -> Result<()> {
                         }
                     }
                     Err(_) => Err(Error::Unexpected(
-                        dt_lib.value_range(),
+                        dt_lib.range_value(),
                         "Invalid datatype library URI",
                     )),
                 }
@@ -145,7 +145,7 @@ fn next_rng_sibling<'a, 'input: 'a>(node: Node<'a, 'input>) -> Option<Node<'a, '
 fn element(node: Node) -> Result<ElementPattern> {
     no_attrs_except(node, &["name", "ns", "datatypeLibrary"])?;
     let (name_class, pattern) = if let Some(name) = node.attribute_node("name") {
-        let name_class = NameClass::Name(qname_att(node, name)?);
+        let name_class = NameClass::Name(qname_att(node, &name)?);
         let pat_el = first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?;
         let pattern = single_pattern_or_group(pat_el)?;
         (name_class, pattern)
@@ -168,7 +168,6 @@ fn element(node: Node) -> Result<ElementPattern> {
 fn no_attrs_except(node: Node, names: &[&str]) -> std::result::Result<(), Error> {
     if let Some(a) = node
         .attributes()
-        .iter()
         .find(|a| is_rng_att(a) && !names.contains(&a.name()))
     {
         return Err(Error::Unexpected(a.range(), "Unexpected attribute"));
@@ -271,7 +270,7 @@ fn ns_name(node: Node) -> Result<NsName> {
 
 fn get_ns(node: Node) -> Option<Literal> {
     if let Some(ns) = get_ns_att(node) {
-        Some(Literal::new(ns.value_range(), ns.value().to_string()))
+        Some(Literal::new(ns.range_value(), ns.value().to_string()))
     } else {
         None
     }
@@ -279,7 +278,7 @@ fn get_ns(node: Node) -> Option<Literal> {
 
 /// Find the 'ns' attribute on the element, or its nearest parent element, or None if there is no
 /// ns attribute on any parent element
-fn get_ns_att<'a, 'input: 'a>(start: Node<'a, 'input>) -> Option<&'a Attribute<'input>> {
+fn get_ns_att<'a, 'input: 'a>(start: Node<'a, 'input>) -> Option<Attribute<'a, 'input>> {
     let mut this = Some(start);
     while let Some(node) = this {
         if let Some(ns) = node.attribute_node("ns") {
@@ -292,7 +291,7 @@ fn get_ns_att<'a, 'input: 'a>(start: Node<'a, 'input>) -> Option<&'a Attribute<'
 
 fn get_datatype_lib(node: Node) -> Option<Literal> {
     if let Some(ns) = get_dt_lib_att(node) {
-        Some(Literal::new(ns.value_range(), ns.value().to_string()))
+        Some(Literal::new(ns.range_value(), ns.value().to_string()))
     } else {
         None
     }
@@ -300,7 +299,7 @@ fn get_datatype_lib(node: Node) -> Option<Literal> {
 
 /// Find the 'datatypeLibrary' attribute on the element, or its nearest parent element, or None if there is no
 /// ns attribute on any parent element
-fn get_dt_lib_att<'a, 'input: 'a>(start: Node<'a, 'input>) -> Option<&'a Attribute<'input>> {
+fn get_dt_lib_att<'a, 'input: 'a>(start: Node<'a, 'input>) -> Option<Attribute<'a, 'input>> {
     let mut this = Some(start);
     while let Some(node) = this {
         if let Some(ns) = node.attribute_node("datatypeLibrary") {
@@ -338,7 +337,7 @@ fn attribute(node: Node) -> Result<AttributePattern> {
     let (name_class, rest) = if let Some(name) = node.attribute_node("name") {
         if name.value() == "xmlns" && (ns == None || ns.unwrap().value() == "") {
             return Err(Error::Unexpected(
-                name.value_range(),
+                name.range_value(),
                 "Schemas may not define the xmlns attribute",
             ));
         }
@@ -350,7 +349,7 @@ fn attribute(node: Node) -> Result<AttributePattern> {
             ));
         }
         (
-            NameClass::Name(qname_att(node, name)?),
+            NameClass::Name(qname_att(node, &name)?),
             first_rng_child(node),
         )
     } else {
@@ -443,7 +442,7 @@ fn mixed(node: Node) -> Result<MixedPattern> {
 fn ref_patt(node: Node) -> Result<Identifier> {
     no_rng_element_children(node)?;
     if let Some(name) = node.attribute_node("name") {
-        attr_ncname(name)
+        attr_ncname(&name)
     } else {
         Err(Error::Expected(node.range(), "name attribute"))
     }
@@ -452,7 +451,7 @@ fn ref_patt(node: Node) -> Result<Identifier> {
 fn parent_ref(node: Node) -> Result<Identifier> {
     no_rng_element_children(node)?;
     if let Some(name) = node.attribute_node("name") {
-        attr_ncname(name)
+        attr_ncname(&name)
     } else {
         Err(Error::Expected(node.range(), "name attribute"))
     }
@@ -477,7 +476,7 @@ fn value(node: Node) -> Result<DatatypeValuePattern> {
     let datatype_ns = get_datatype_lib(node).unwrap_or(Literal::new(0..0, "".to_string()));
     let type_name = node
         .attribute_node("type")
-        .map(|attr| ncname(attr.value_range(), attr.value()))
+        .map(|attr| ncname(attr.range_value(), attr.value()))
         .transpose()?;
     let val = if let Some(child) = node.first_child() {
         let seg = LiteralSegment {
@@ -516,7 +515,7 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
         // TODO: check datatypeLibrary namespace!
         "token" => DatatypeName::Token,
         val => {
-            let name = ncname(type_attr.value_range(), val)?;
+            let name = ncname(type_attr.range_value(), val)?;
             DatatypeName::NamespacedName(NamespacedName {
                 namespace_uri: datatype_ns,
                 localname: name,
@@ -525,7 +524,6 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
     };
     if let Some(a) = node
         .attributes()
-        .iter()
         .find(|a| is_rng_att(a) && a.name() != "type" && a.name() != "datatypeLibrary")
     {
         return Err(Error::Unexpected(a.range(), "Unexpected attribute"));
@@ -589,7 +587,7 @@ fn param(node: Node) -> Result<Param> {
     let name = node
         .attribute_node("name")
         .ok_or(Error::Expected(node.range(), "name attribute"))?;
-    let name = attr_ncname(name)?;
+    let name = attr_ncname(&name)?;
 
     let child = node
         .first_child()
@@ -626,7 +624,7 @@ fn external_ref(node: Node) -> Result<ExternalPattern> {
     let seg = LiteralSegment {
         body: rebase_path(node, href.value())?,
     };
-    let val = Literal(href.value_range(), vec![seg]);
+    let val = Literal(href.range_value(), vec![seg]);
 
     Ok(ExternalPattern(val, None))
 }
@@ -674,7 +672,7 @@ fn start(node: Node) -> Result<Define> {
             "interleave" => AssignMethod::Interleave,
             _ => {
                 return Err(Error::Expected(
-                    combine.value_range(),
+                    combine.range_value(),
                     "Expected either \"choice\" or \"interleave\"",
                 ))
             }
@@ -684,7 +682,6 @@ fn start(node: Node) -> Result<Define> {
     };
     if let Some(a) = node
         .attributes()
-        .iter()
         .find(|a| is_rng_att(a) && a.name() != "combine")
     {
         return Err(Error::Unexpected(a.range(), "Unexpected attribute"));
@@ -712,7 +709,7 @@ fn define(node: Node) -> Result<Define> {
             "interleave" => AssignMethod::Interleave,
             _ => {
                 return Err(Error::Expected(
-                    combine.value_range(),
+                    combine.range_value(),
                     "Expected either \"choice\" or \"interleave\"",
                 ))
             }
@@ -724,7 +721,7 @@ fn define(node: Node) -> Result<Define> {
     let name = node
         .attribute_node("name")
         .ok_or(Error::Expected(node.range(), "name attribute"))?;
-    let name = attr_ncname(name)?;
+    let name = attr_ncname(&name)?;
 
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "Child pattern element"))?,
@@ -746,9 +743,9 @@ fn div_grammar_content(node: Node) -> Result<GrammarContent> {
 fn attr_ncname(attr: &Attribute) -> Result<Identifier> {
     // TODO: further checks
     if attr.value().contains(':') {
-        Err(Error::Unexpected(attr.value_range(), "Colon in NCName"))
+        Err(Error::Unexpected(attr.range_value(), "Colon in NCName"))
     } else {
-        ident(attr.value_range(), attr.value().trim())
+        ident(attr.range_value(), attr.value().trim())
     }
 }
 
@@ -791,7 +788,7 @@ fn include(node: Node) -> Result<Include> {
     let seg = LiteralSegment {
         body: rebase_path(node, href.value())?,
     };
-    let val = Literal(href.value_range(), vec![seg]);
+    let val = Literal(href.range_value(), vec![seg]);
 
     let mut next = first_rng_child(node);
     let mut content = vec![];
@@ -838,8 +835,8 @@ fn div_include_content(node: Node) -> Result<IncludeContent> {
 fn qname_att(node: Node, name: &Attribute) -> Result<Name> {
     let val = name.value();
     if let Some(pos) = val.find(':') {
-        let start = name.value_range().start;
-        let end = name.value_range().end;
+        let start = name.range_value().start;
+        let end = name.range_value().end;
         let prefix = &val[0..pos];
         let prefix_span = start..(start + pos);
         let namespace = lookup_namespace_def(node, Some(prefix.trim()))
@@ -852,7 +849,7 @@ fn qname_att(node: Node, name: &Attribute) -> Result<Name> {
         }))
     } else {
         let ns = get_ns(node).unwrap_or(Literal::new(0..0, String::new())); // TODO allow None or something rather than inventing an 'empty' NcName
-        let localname = ncname(name.value_range(), val)?;
+        let localname = ncname(name.range_value(), val)?;
         Ok(Name::NamespacedName(NamespacedName {
             namespace_uri: ns,
             localname,
@@ -914,7 +911,6 @@ fn lookup_namespace_def<'a, 'input: 'a>(
         Some("http://www.w3.org/XML/1998/namespace")
     } else {
         node.namespaces()
-            .iter()
             .find(|ns| ns.name() == prefix)
             .map(|n| n.uri())
     }
@@ -995,7 +991,7 @@ fn is_rng(ns: Option<&str>) -> bool {
 }
 
 fn no_attrs(node: Node) -> Result<()> {
-    if let Some(att) = node.attributes().iter().find(|a| is_rng_att(a)) {
+    if let Some(att) = node.attributes().find(|a| is_rng_att(a)) {
         Err(Error::Unexpected(att.range(), "Unexpected attribute"))
     } else {
         Ok(())

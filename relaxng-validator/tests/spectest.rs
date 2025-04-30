@@ -1,11 +1,9 @@
 // TODO: https://github.com/LukasKalbertodt/libtest-mimic ?
 
-use relaxng_model::model::DefineRule;
 use relaxng_model::Compiler;
-use relaxng_validator::{Validator, ValidatorError};
+use relaxng_validator::Validator;
 use roxmltree::{ExpandedName, Node};
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::File;
@@ -13,7 +11,6 @@ use std::io;
 use std::io::Read;
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 fn main() {
     // TODO: only run this test if testcases are not filtered or if the filter matches this case

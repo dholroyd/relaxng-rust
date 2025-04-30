@@ -298,6 +298,7 @@ impl Schema {
         }
     }
 
+    #[allow(unused)]
     pub fn d(&self, pat: PatId) -> Result<(), io::Error> {
         let mut o = io::stdout();
         self.dumpy(pat, &mut o)

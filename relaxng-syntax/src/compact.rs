@@ -1,7 +1,11 @@
 use crate::types::*;
+use nom::character::complete::satisfy;
 use nom::combinator::cut;
+use nom::error::{Error, ParseError};
+use nom::multi::separated_list1;
 use nom::sequence::preceded;
 use nom::{
+    AsChar, IResult,
     branch::alt,
     bytes::complete::{is_not, tag, take_until},
     character::{
@@ -9,13 +13,13 @@ use nom::{
         streaming::not_line_ending,
     },
     combinator::{all_consuming, map, not, opt, peek, recognize},
-    error::{ErrorKind, ParseError},
-    multi::{fold_many0, fold_many1, many0, separated_list, separated_nonempty_list},
-    sequence::{delimited, tuple},
-    AsChar, IResult, InputIter, Slice,
+    error::ErrorKind,
+    multi::{fold_many0, fold_many1, many0, separated_list0},
+    sequence::delimited,
 };
-use nom_locate::{position, LocatedSpan};
-use std::ops::{Range, RangeBounds, RangeFrom};
+use nom::{Input, Parser};
+use nom_locate::{LocatedSpan, position};
+use std::ops::{Range, RangeBounds};
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
@@ -27,19 +31,21 @@ pub type Span<'a> = LocatedSpan<&'a str>;
 //  - check rules are left-factored as required to avoid inefficiently rematching the same sub-rule
 //    in multiple alternatives
 
-pub fn schema(input: Span) -> Result<Schema, nom::Err<(Span, nom::error::ErrorKind)>> {
-    all_consuming(tuple((space_comment0, top_level, space_comment0)))(input).map(|(_, (_, r, _))| r)
+pub fn schema(input: Span) -> Result<Schema, nom::Err<Error<Span>>> {
+    all_consuming((space_comment0, top_level, space_comment0))
+        .parse(input)
+        .map(|(_, (_, r, _))| r)
 }
 
 // topLevel	  ::=  	decl* (pattern | grammarContent*)
 fn top_level(input: Span) -> IResult<Span, Schema> {
-    let parse = tuple((
-        separated_list(space_comment1, decl),
+    let parse = (
+        separated_list0(space_comment1, decl),
         space_comment0, // TODO: should be space_comment1, and only required if there are decls
         alt((
             // TODO: proper span for GrammarPattern
             map(
-                separated_nonempty_list(space_comment1, grammar_content),
+                separated_list1(space_comment1, grammar_content),
                 |content| {
                     PatternOrGrammar::Grammar(GrammarPattern {
                         span: 0..0,
@@ -49,13 +55,13 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
             ),
             map(pattern, PatternOrGrammar::Pattern),
         )),
-    ));
-    let parse = map(parse, |(decls, _, pattern_or_grammar)| Schema {
+    );
+    let mut parser = map(parse, |(decls, _, pattern_or_grammar)| Schema {
         decls,
         pattern_or_grammar,
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 // decl      ::=  	"namespace" identifierOrKeyword "=" namespaceURILiteral
@@ -66,10 +72,11 @@ fn decl(input: Span) -> IResult<Span, Decl> {
         map(decl_namespace, Decl::Namespace),
         map(decl_default_namespace, Decl::DefaultNamespace),
         map(decl_datatypes, Decl::Datatypes),
-    ))(input)
+    ))
+    .parse(input)
 }
 fn decl_namespace(input: Span) -> IResult<Span, NamespaceDeclaration> {
-    let (input, (_keyword, _, prefix, _, _, _, uri)) = tuple((
+    let (input, (_keyword, _, prefix, _, _, _, uri)) = (
         tag("namespace"),
         space_comment1,
         identifier_or_keyword,
@@ -77,7 +84,8 @@ fn decl_namespace(input: Span) -> IResult<Span, NamespaceDeclaration> {
         tag("="),
         space_comment0,
         namespace_uri_literal,
-    ))(input)?;
+    )
+        .parse(input)?;
     IResult::Ok((
         input,
         NamespaceDeclaration {
@@ -87,7 +95,7 @@ fn decl_namespace(input: Span) -> IResult<Span, NamespaceDeclaration> {
     ))
 }
 fn decl_default_namespace(input: Span) -> IResult<Span, DefaultNamespaceDeclaration> {
-    let (input, (_keyword, _, _, _, prefix, _, _, _, uri)) = tuple((
+    let (input, (_keyword, _, _, _, prefix, _, _, _, uri)) = (
         tag("default"),
         space_comment1,
         tag("namespace"),
@@ -97,7 +105,8 @@ fn decl_default_namespace(input: Span) -> IResult<Span, DefaultNamespaceDeclarat
         tag("="),
         space_comment0,
         namespace_uri_literal,
-    ))(input)?;
+    )
+        .parse(input)?;
     IResult::Ok((
         input,
         DefaultNamespaceDeclaration {
@@ -107,7 +116,7 @@ fn decl_default_namespace(input: Span) -> IResult<Span, DefaultNamespaceDeclarat
     ))
 }
 fn decl_datatypes(input: Span) -> IResult<Span, DatatypesDeclaration> {
-    let (input, (_keyword, _, prefix, _, _, _, uri)) = tuple((
+    let (input, (_keyword, _, prefix, _, _, _, uri)) = (
         tag("datatypes"),
         space_comment1,
         identifier_or_keyword,
@@ -115,7 +124,8 @@ fn decl_datatypes(input: Span) -> IResult<Span, DatatypesDeclaration> {
         tag("="),
         space_comment0,
         literal,
-    ))(input)?;
+    )
+        .parse(input)?;
     IResult::Ok((
         input,
         DatatypesDeclaration {
@@ -131,7 +141,8 @@ fn identifier_or_keyword(input: Span) -> IResult<Span, IdentifierOrKeyword> {
     alt((
         map(identifier, IdentifierOrKeyword::Identifier),
         map(keyword, IdentifierOrKeyword::Keyword),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // namespaceURILiteral	  ::=  	literal
@@ -140,22 +151,20 @@ fn namespace_uri_literal(input: Span) -> IResult<Span, NamespaceUriLiteral> {
     alt((
         map(tag("inherit"), |_| NamespaceUriLiteral::Inherit),
         map(literal, NamespaceUriLiteral::Uri),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // literal	  ::=  	literalSegment ("~" literalSegment)+
 fn literal(input: Span) -> IResult<Span, Literal> {
-    let parser = tuple((
+    let parser = (
         position,
-        separated_nonempty_list(
-            tuple((space_comment0, tag("~"), space_comment0)),
-            literal_segment,
-        ),
+        separated_list1((space_comment0, tag("~"), space_comment0), literal_segment),
         position,
-    ));
-    let parser = map(parser, |(start, v, end)| Literal(span(start, end), v));
+    );
+    let mut parser = map(parser, |(start, v, end)| Literal(span(start, end), v));
 
-    parser(input)
+    parser.parse(input)
 }
 
 // literalSegment	  ::=  	'"' (Char - ('"' | newline))* '"'
@@ -168,7 +177,8 @@ fn literal_segment(input: Span) -> IResult<Span, LiteralSegment> {
         delimited(tag("'''"), take_until("'''"), tag("'''")),
         delimited(tag("\""), recognize(opt(is_not("\"\n"))), tag("\"")),
         delimited(tag("'"), recognize(opt(is_not("'\n"))), tag("'")),
-    ))(input)?;
+    ))
+    .parse(input)?;
 
     IResult::Ok((
         input,
@@ -180,8 +190,8 @@ fn literal_segment(input: Span) -> IResult<Span, LiteralSegment> {
 
 fn span(start: LocatedSpan<&str>, end: LocatedSpan<&str>) -> Range<usize> {
     Range {
-        start: start.offset,
-        end: end.offset,
+        start: start.location_offset(),
+        end: end.location_offset(),
     }
 }
 
@@ -189,25 +199,26 @@ fn span(start: LocatedSpan<&str>, end: LocatedSpan<&str>) -> Range<usize> {
 //                   | quotedIdentifier
 fn identifier(input: Span) -> IResult<Span, Identifier> {
     let res = alt((
-        recognize(tuple((tag("\\"), keyword))),
-        recognize(tuple((not(peek(keyword)), nc_name))),
-    ))(input);
+        recognize((tag("\\"), keyword)),
+        recognize((not(peek(keyword)), nc_name)),
+    ))
+    .parse(input);
 
     res.map(|(input, v)| (input, Identifier(span(v, input), v.to_string())))
 }
 
 pub fn nc_name(input: Span) -> IResult<Span, NcName> {
-    let parse = tuple((
+    let parse = (
         position,
-        recognize(tuple((nc_name_start_char, many0(nc_name_char)))),
+        recognize((nc_name_start_char, many0(nc_name_char))),
         position,
-    ));
+    );
 
-    let parse = map(parse, |(start, v, end)| {
-        NcName(span(start, end), v.fragment.to_string())
+    let mut parser = map(parse, |(start, v, end)| {
+        NcName(span(start, end), v.fragment().to_string())
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn nc_name_start_char(input: Span) -> IResult<Span, char> {
@@ -228,7 +239,8 @@ fn nc_name_start_char(input: Span) -> IResult<Span, char> {
         char_in('\u{F900}'..='\u{FDCF}'),
         char_in('\u{FDF0}'..='\u{FFFD}'),
         char_in('\u{10000}'..='\u{EFFFF}'),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 fn nc_name_char(input: Span) -> IResult<Span, char> {
@@ -240,11 +252,12 @@ fn nc_name_char(input: Span) -> IResult<Span, char> {
         char('\u{B7}'),
         char_in('\u{0300}'..='\u{036F}'),
         char_in('\u{203F}'..='\u{2040}'),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 fn keyword(input: Span) -> IResult<Span, Keyword> {
-    let parse = tuple((
+    let parse = (
         alt((
             tag("attribute"),
             tag("default"),
@@ -268,13 +281,13 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
         )),
         position,
         peek(not(nc_name_char)),
-    ));
+    );
 
-    let parse = map(parse, |(k, end, _)| {
-        Keyword(span(k, end), k.fragment.to_string())
+    let mut parser = map(parse, |(k, end, _)| {
+        Keyword(span(k, end), k.fragment().to_string())
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 // pattern  ::=
@@ -314,17 +327,17 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
         map(datatype_value_pattern, Pattern::DatatypeValue),
         map(datatype_param_pattern, Pattern::DatatypeName),
         map(identifier, Pattern::Identifier),
-        map(
-            tuple((tag("parent"), space_comment1, identifier)),
-            |(_, _, p)| Pattern::Parent(p),
-        ),
+        map((tag("parent"), space_comment1, identifier), |(_, _, p)| {
+            Pattern::Parent(p)
+        }),
         map(tag("empty"), |_| Pattern::Empty),
         map(tag("text"), |_| Pattern::Text),
         map(tag("notAllowed"), |_| Pattern::NotAllowed),
         map(external_pattern, Pattern::External),
         map(grammar_pattern, Pattern::Grammar),
         map(group_pattern, |p| Pattern::Group(Box::new(p))),
-    ))(input)?;
+    ))
+    .parse(input)?;
 
     let (mut input, follow_annotations) = follow_annotation_list(input)?;
     if !follow_annotations.is_empty() {
@@ -378,7 +391,7 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
 }
 // "element" nameClass "{" pattern "}"
 fn element_pattern(input: Span) -> IResult<Span, ElementPattern> {
-    let parse = tuple((
+    let parse = (
         tag("element"),
         space_comment1,
         name_class,
@@ -389,7 +402,7 @@ fn element_pattern(input: Span) -> IResult<Span, ElementPattern> {
         space_comment0,
         cut(tag("}")),
         position,
-    ));
+    );
 
     map(
         parse,
@@ -398,12 +411,13 @@ fn element_pattern(input: Span) -> IResult<Span, ElementPattern> {
             name_class,
             pattern: Box::new(pattern),
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // "attribute" nameClass "{" pattern "}"
 fn attribute_pattern(input: Span) -> IResult<Span, AttributePattern> {
-    let parse = tuple((
+    let parse = (
         tag("attribute"),
         space_comment1,
         name_class,
@@ -414,7 +428,7 @@ fn attribute_pattern(input: Span) -> IResult<Span, AttributePattern> {
         space_comment0,
         cut(tag("}")),
         position,
-    ));
+    );
 
     map(
         parse,
@@ -423,10 +437,11 @@ fn attribute_pattern(input: Span) -> IResult<Span, AttributePattern> {
             name_class,
             pattern: Box::new(pattern),
         },
-    )(input)
+    )
+    .parse(input)
 }
 fn list_pattern(input: Span) -> IResult<Span, ListPattern> {
-    let parse = tuple((
+    let parse = (
         tag("list"),
         space_comment0,
         tag("{"),
@@ -434,14 +449,15 @@ fn list_pattern(input: Span) -> IResult<Span, ListPattern> {
         cut(pattern),
         space_comment0,
         cut(tag("}")),
-    ));
+    );
 
     map(parse, |(_, _, _, _, pattern, _, _)| {
         ListPattern(Box::new(pattern))
-    })(input)
+    })
+    .parse(input)
 }
 fn mixed_pattern(input: Span) -> IResult<Span, MixedPattern> {
-    let parse = tuple((
+    let parse = (
         tag("mixed"),
         space_comment0,
         tag("{"),
@@ -449,91 +465,90 @@ fn mixed_pattern(input: Span) -> IResult<Span, MixedPattern> {
         cut(pattern),
         space_comment0,
         cut(tag("}")),
-    ));
+    );
 
     map(parse, |(_, _, _, _, pattern, _, _)| {
         MixedPattern(Box::new(pattern))
-    })(input)
+    })
+    .parse(input)
 }
 
 // "external" anyURILiteral [inherit]
 fn external_pattern(input: Span) -> IResult<Span, ExternalPattern> {
-    let parse = tuple((
+    let parse = (
         tag("external"),
         space_comment1,
         any_uri_literal,
-        opt(map(tuple((space_comment1, inherit)), |(_, inherit)| {
-            inherit
-        })),
-    ));
+        opt(map((space_comment1, inherit), |(_, inherit)| inherit)),
+    );
 
-    let parse = map(parse, |(_, _, uri, inherit)| ExternalPattern(uri, inherit));
+    let mut parser = map(parse, |(_, _, uri, inherit)| ExternalPattern(uri, inherit));
 
-    parse(input)
+    parser.parse(input)
 }
 
 // "grammar" "{" grammarContent* "}"
 fn grammar_pattern(input: Span) -> IResult<Span, GrammarPattern> {
-    let parse = tuple((
+    let parse = (
         tag("grammar"),
         space_comment0,
         tag("{"),
         space_comment0,
-        separated_list(space_comment1, grammar_content),
+        separated_list0(space_comment1, grammar_content),
         space_comment0,
         cut(tag("}")),
         position,
-    ));
+    );
 
-    let parse = map(parse, |(start, _, _, _, content, _, _, end)| {
+    let mut parser = map(parse, |(start, _, _, _, content, _, _, end)| {
         GrammarPattern {
             span: span(start, end),
             content,
         }
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn group_pattern(input: Span) -> IResult<Span, Pattern> {
-    let parse = tuple((tag("("), space_comment0, pattern, space_comment0, tag(")")));
+    let parse = (tag("("), space_comment0, pattern, space_comment0, tag(")"));
 
-    let parse = map(parse, |(_, _, content, _, _)| content);
+    let mut parser = map(parse, |(_, _, content, _, _)| content);
 
-    parse(input)
+    parser.parse(input)
 }
 
 // [datatypeName] datatypeValue
 fn datatype_value_pattern(input: Span) -> IResult<Span, DatatypeValuePattern> {
-    let parse = tuple((opt(datatype_name), space_comment0, datatype_value));
+    let parse = (opt(datatype_name), space_comment0, datatype_value);
 
-    let parse = map(parse, |(name, _, value)| DatatypeValuePattern(name, value));
+    let mut parser = map(parse, |(name, _, value)| DatatypeValuePattern(name, value));
 
-    parse(input)
+    parser.parse(input)
 }
 
 // datatypeName ["{" param* "}"] [exceptPattern]
 fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
-    let params = tuple((
+    let params = (
         space_comment0,
         tag("{"),
         space_comment0,
-        separated_list(space_comment1, param),
+        separated_list0(space_comment1, param),
         space_comment0,
         cut(tag("}")),
-    ));
+    );
     let params = map(params, |(_, _, _, p, _, _)| p);
 
-    let parse = tuple((
+    let parse = (
         datatype_name,
         opt(params),
-        opt(map(tuple((space_comment0, except_pattern)), |(_, e)| e)),
-    ));
-    let parse = map(parse, |(name, params, except)| {
+        opt(map((space_comment0, except_pattern), |(_, e)| e)),
+    );
+    let mut parser = map(parse, |(name, params, except)| {
         DatatypeNamePattern(name, params, except.map(Box::new))
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 // datatypeValue  ::= 	literal
@@ -543,7 +558,7 @@ fn datatype_value(input: Span) -> IResult<Span, Literal> {
 
 // param	  ::=  	identifierOrKeyword "=" literal
 fn param(input: Span) -> IResult<Span, Param> {
-    let parse = tuple((
+    let parse = (
         position,
         maybe_initial_annotation,
         space_comment0,
@@ -553,25 +568,25 @@ fn param(input: Span) -> IResult<Span, Param> {
         space_comment0,
         literal,
         position,
-    ));
+    );
 
-    let parse = map(
+    let mut parser = map(
         parse,
         |(start, initial_annotation, _, name, _, _, _, val, end)| {
             Param(span(start, end), initial_annotation, name, val)
         },
     );
 
-    parse(input)
+    parser.parse(input)
 }
 
 // exceptPattern     ::=   "-" pattern
 fn except_pattern(input: Span) -> IResult<Span, Pattern> {
-    let parse = tuple((tag("-"), space_comment0, pattern));
+    let parse = (tag("-"), space_comment0, pattern);
 
-    let parse = map(parse, |(_, _, pat)| pat);
+    let mut parser = map(parse, |(_, _, pat)| pat);
 
-    parse(input)
+    parser.parse(input)
 }
 
 // datatypeName  ::=   CName
@@ -582,7 +597,8 @@ fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
         map(tag("string"), |_| DatatypeName::String),
         map(tag("token"), |_| DatatypeName::Token),
         map(cname, DatatypeName::CName),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 fn name_class(input: Span) -> IResult<Span, NameClass> {
@@ -596,7 +612,8 @@ fn name_class(input: Span) -> IResult<Span, NameClass> {
         map(any_name_nc, NameClass::AnyName),
         //map(alt_nc, |r| NameClass::Alt(r)),
         map(paren_nc, NameClass::Paren),
-    ))(input)?;
+    ))
+    .parse(input)?;
 
     let (input, follow_annotations) = follow_annotation_list(input)?;
     if !follow_annotations.is_empty() {
@@ -622,95 +639,78 @@ fn name(input: Span) -> IResult<Span, Name> {
     alt((
         map(cname, Name::CName),
         map(identifier_or_keyword, Name::Identifier),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 fn ns_name_nc(input: Span) -> IResult<Span, NsName> {
-    let parse = tuple((
+    let parse = (
         nc_name,
         tag(":*"),
-        opt(tuple((
-            space_comment0,
-            tag("-"),
-            space_comment0,
-            name_class,
-        ))),
-    ));
+        opt((space_comment0, tag("-"), space_comment0, name_class)),
+    );
 
-    let parse = map(parse, |(name, _, except)| NsName {
+    let mut parser = map(parse, |(name, _, except)| NsName {
         name: NamespaceOrPrefix::Prefix(name),
         except: except.map(|(_, _, _, name_class)| Box::new(name_class)),
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn any_name_nc(input: Span) -> IResult<Span, AnyName> {
-    let parse = tuple((
+    let parse = (
         tag("*"),
-        opt(tuple((
-            space_comment0,
-            tag("-"),
-            space_comment0,
-            name_class,
-        ))),
-    ));
+        opt((space_comment0, tag("-"), space_comment0, name_class)),
+    );
 
-    let parse = map(parse, |(_, except)| {
+    let mut parser = map(parse, |(_, except)| {
         AnyName(except.map(|(_, _, _, name_class)| Box::new(name_class)))
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn alt_nc(input: Span) -> IResult<Span, NameClass> {
-    let parse = tuple((space_comment0, tag("|"), space_comment0, name_class));
+    let parse = (space_comment0, tag("|"), space_comment0, name_class);
 
-    let parse = map(parse, |(_, _, _, right)| right);
+    let mut parser = map(parse, |(_, _, _, right)| right);
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn paren_nc(input: Span) -> IResult<Span, ParenName> {
-    let parse = tuple((
+    let parse = (
         tag("("),
         space_comment0,
         name_class,
         space_comment0,
         tag(")"),
-    ));
+    );
 
-    let parse = map(parse, |(_, _, name_class, _, _)| {
+    let mut parser = map(parse, |(_, _, name_class, _, _)| {
         ParenName(Box::new(name_class))
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 // NCName ":" NCName
 fn cname(input: Span) -> IResult<Span, QName> {
-    let parse = tuple((nc_name, tag(":"), nc_name));
+    let parse = (nc_name, tag(":"), nc_name);
 
-    let parse = map(parse, |(prefix, _, local_name)| QName(prefix, local_name));
+    let mut parser = map(parse, |(prefix, _, local_name)| QName(prefix, local_name));
 
-    parse(input)
+    parser.parse(input)
 }
 
-// TODO: use `is_a()`  with an impl of `FindToken` for `RangeBounds`
-fn char_in<I, R, Error: ParseError<I>>(range: R) -> impl Fn(I) -> IResult<I, char, Error>
+pub fn char_in<I, R, Error: ParseError<I>>(range: R) -> impl FnMut(I) -> IResult<I, char, Error>
 where
-    I: Slice<RangeFrom<usize>> + InputIter,
-    <I as InputIter>::Item: AsChar + Copy,
+    I: Input,
+    <I as Input>::Item: AsChar,
     R: RangeBounds<char>,
 {
-    move |i: I| match (i)
-        .iter_elements()
-        .next()
-        .map(|c| (c, range.contains(&c.as_char())))
-    {
-        Some((c, true)) => Ok((i.slice(c.len()..), c.as_char())),
-        _ => Err(nom::Err::Error(Error::from_error_kind(i, ErrorKind::OneOf))),
-    }
+    satisfy(move |c| range.contains(&c.as_char()))
 }
 
 // grammarContent	  ::=  	start
@@ -724,12 +724,13 @@ fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
         map(div_grammar_content, GrammarContent::Div),
         map(include, GrammarContent::Include),
         map(annotation_element, GrammarContent::Annotation),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // start	  ::=  	"start" assignMethod pattern
 fn start(input: Span) -> IResult<Span, Define> {
-    let parse = tuple((
+    let parser = (
         position,
         tag("start"),
         space_comment0,
@@ -737,13 +738,13 @@ fn start(input: Span) -> IResult<Span, Define> {
         space_comment0,
         cut(pattern),
         position,
-    ));
+    );
 
     // we just produce another 'Define' named "start", rather than using a dedicated 'Start' type,
     // so as to avoid duplication of code handling 'start' definitions and other definitions
 
-    let parse = map(
-        parse,
+    let mut parser = map(
+        parser,
         |(start, start_tag, _, assign_method, _, pattern, end)| {
             Define(
                 span(start, end),
@@ -754,12 +755,12 @@ fn start(input: Span) -> IResult<Span, Define> {
         },
     );
 
-    parse(input)
+    parser.parse(input)
 }
 
 // define	  ::=  	identifier assignMethod pattern
 fn define(input: Span) -> IResult<Span, Define> {
-    let parse = tuple((
+    let parse = (
         position,
         identifier,
         space_comment0,
@@ -767,16 +768,16 @@ fn define(input: Span) -> IResult<Span, Define> {
         space_comment0,
         cut(pattern),
         position,
-    ));
+    );
 
-    let parse = map(
+    let mut parser = map(
         parse,
         |(start, identifier, _, assign_method, _, pattern, end)| {
             Define(span(start, end), identifier, assign_method, pattern)
         },
     );
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn assign_method(input: Span) -> IResult<Span, AssignMethod> {
@@ -784,51 +785,52 @@ fn assign_method(input: Span) -> IResult<Span, AssignMethod> {
         map(tag("="), |_| AssignMethod::Assign),
         map(tag("|="), |_| AssignMethod::Choice),
         map(tag("&="), |_| AssignMethod::Interleave),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // "div" "{" grammarContent* "}"
 fn div_grammar_content(input: Span) -> IResult<Span, Vec<GrammarContent>> {
-    let parse = tuple((
+    let parse = (
         tag("div"),
         space_comment0,
         tag("{"),
         space_comment0,
-        separated_list(space_comment1, grammar_content),
+        separated_list0(space_comment1, grammar_content),
         space_comment0,
         cut(tag("}")),
-    ));
+    );
 
-    let parse = map(parse, |(_, _, _, _, content, _, _)| content);
+    let mut parser = map(parse, |(_, _, _, _, content, _, _)| content);
 
-    parse(input)
+    parser.parse(input)
 }
 
 // "include" anyURILiteral [inherit] ["{" includeContent* "}"]
 fn include(input: Span) -> IResult<Span, Include> {
-    let parse = tuple((
+    let parse = (
         tag("include"),
         space_comment1,
         any_uri_literal,
-        opt(map(tuple((space_comment1, inherit)), |(_, v)| v)),
+        opt(map((space_comment1, inherit), |(_, v)| v)),
         opt(map(
-            tuple((
+            (
                 space_comment0,
                 tag("{"),
                 space_comment0,
-                separated_list(space_comment1, include_content),
+                separated_list0(space_comment1, include_content),
                 space_comment0,
                 cut(tag("}")),
-            )),
+            ),
             |(_, _, _, inc, _, _)| inc,
         )),
-    ));
+    );
 
-    let parse = map(parse, |(_, _, uri, inherit, include)| {
+    let mut parser = map(parse, |(_, _, uri, inherit, include)| {
         Include(uri, inherit, include)
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 // anyURILiteral	  ::=  	literal
@@ -838,17 +840,17 @@ fn any_uri_literal(input: Span) -> IResult<Span, Literal> {
 
 // inherit	  ::=  	"inherit" "=" identifierOrKeyword
 fn inherit(input: Span) -> IResult<Span, Inherit> {
-    let parse = tuple((
+    let parse = (
         tag("inherit"),
         space_comment0,
         tag("="),
         space_comment0,
         identifier_or_keyword,
-    ));
+    );
 
-    let parse = map(parse, |(_, _, _, _, id)| Inherit(id));
+    let mut parser = map(parse, |(_, _, _, _, id)| Inherit(id));
 
-    parse(input)
+    parser.parse(input)
 }
 
 // includeContent  ::=  define
@@ -864,55 +866,53 @@ fn include_content(input: Span) -> IResult<Span, IncludeContent> {
         map(define, IncludeContent::Define),
         map(start, IncludeContent::Define),
         map(div_include_content, IncludeContent::Div),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // "div" "{" includeContent* "}"
 fn div_include_content(input: Span) -> IResult<Span, Vec<IncludeContent>> {
-    let parse = tuple((
+    let parse = (
         tag("div"),
         space_comment0,
         tag("{"),
         space_comment0,
-        separated_list(space_comment1, include_content),
+        separated_list0(space_comment1, include_content),
         space_comment0,
         cut(tag("}")),
-    ));
+    );
 
-    let parse = map(parse, |(_, _, _, _, content, _, _)| content);
+    let mut parser = map(parse, |(_, _, _, _, content, _, _)| content);
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn space_comment0(input: Span) -> IResult<Span, Span> {
-    recognize(fold_many0(alt((multispace1, comment)), (), |_, _| ()))(input)
+    recognize(fold_many0(alt((multispace1, comment)), || (), |_, _| ())).parse(input)
 }
 fn space_comment1(input: Span) -> IResult<Span, Span> {
-    recognize(fold_many1(alt((multispace1, comment)), (), |_, _| ()))(input)
+    recognize(fold_many1(alt((multispace1, comment)), || (), |_, _| ())).parse(input)
 }
 fn comment(input: Span) -> IResult<Span, Span> {
-    recognize(tuple((tag("#"), not_line_ending)))(input)
+    recognize((tag("#"), not_line_ending)).parse(input)
 }
 
 fn maybe_initial_annotation(input: Span) -> IResult<Span, Option<InitialAnnotation>> {
-    opt(map(
-        tuple((initial_annotation, space_comment0)),
-        |(anno, _)| anno,
-    ))(input)
+    opt(map((initial_annotation, space_comment0), |(anno, _)| anno)).parse(input)
 }
 
 fn initial_annotation(input: Span) -> IResult<Span, InitialAnnotation> {
-    let parse = tuple((
+    let parse = (
         tag("["),
         space_comment0,
-        separated_list(space_comment1, annotation_attribute),
+        separated_list0(space_comment1, annotation_attribute),
         space_comment0,
-        separated_list(space_comment1, annotation_element),
+        separated_list0(space_comment1, annotation_element),
         space_comment0,
         tag("]"),
-    ));
+    );
 
-    let parse = map(
+    let mut parser = map(
         parse,
         |(start, _, attribute_annotations, _, element_annotations, _, end)| InitialAnnotation {
             span: span(start, end),
@@ -921,24 +921,25 @@ fn initial_annotation(input: Span) -> IResult<Span, InitialAnnotation> {
         },
     );
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn follow_annotation_list(input: Span) -> IResult<Span, Vec<AnnotationElement>> {
-    separated_list(space_comment0, follow_annotation)(input)
+    separated_list0(space_comment0, follow_annotation).parse(input)
 }
 
 fn follow_annotation(input: Span) -> IResult<Span, AnnotationElement> {
     preceded(
-        tuple((space_comment0, tag(">>"), space_comment0)),
+        (space_comment0, tag(">>"), space_comment0),
         annotation_element,
-    )(input)
+    )
+    .parse(input)
 }
 
 fn annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute> {
-    let parse = tuple((name, space_comment0, tag("="), space_comment0, literal));
+    let parse = (name, space_comment0, tag("="), space_comment0, literal);
 
-    let parse = map(parse, |(name, _, _, _, value)| AnnotationAttribute {
+    let mut parser = map(parse, |(name, _, _, _, value)| AnnotationAttribute {
         span: Range {
             start: name.span().start,
             end: value.0.end,
@@ -947,29 +948,29 @@ fn annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute> {
         value,
     });
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
-    let parse = tuple((
+    let parse = (
         name,
         space_comment0,
         tag("["),
         space_comment0,
-        separated_list(space_comment1, annotation_attribute),
+        separated_list0(space_comment1, annotation_attribute),
         space_comment0,
-        separated_list(space_comment1, annotation_element_or_literal),
+        separated_list0(space_comment1, annotation_element_or_literal),
         space_comment0,
         tag("]"),
-    ));
+    );
 
-    let parse = map(
+    let mut parser = map(
         parse,
         |(name, _, _, _, annotation_attributes, _, annotation_elements_or_literals, _, end)| {
             AnnotationElement {
                 span: Range {
                     start: name.span().start,
-                    end: end.offset + end.fragment.len(),
+                    end: end.location_offset() + end.fragment().len(),
                 },
                 name,
                 annotation_attributes,
@@ -978,16 +979,16 @@ fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
         },
     );
 
-    parse(input)
+    parser.parse(input)
 }
 
 fn annotation_element_or_literal(input: Span) -> IResult<Span, AnnotationElementOrLiteral> {
-    let parse = alt((
+    let mut parser = alt((
         map(annotation_element, AnnotationElementOrLiteral::Element),
         map(literal, AnnotationElementOrLiteral::Literal),
     ));
 
-    parse(input)
+    parser.parse(input)
 }
 
 #[cfg(test)]
@@ -1004,7 +1005,7 @@ mod test {
         let (remaining, result) =
             f(LocatedSpan::new(input)).unwrap_or_else(|_| panic!("failed to parse {:#?}", input));
         assert_eq!(result, expected);
-        assert_eq!(remaining.fragment, "");
+        assert_eq!(remaining.fragment(), &"");
     }
 
     #[test]

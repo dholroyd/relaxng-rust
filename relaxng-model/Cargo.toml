@@ -8,8 +8,8 @@ edition = "2018"
 
 [dependencies]
 relaxng-syntax = { path = "../relaxng-syntax" }
-nom = "5.0"
-nom_locate = "1.0"
+nom = "8.0"
+nom_locate = "5.0"
 codemap = "0.1"
 codemap-diagnostic = "0.1"
 regex = "1.3.4"
@@ -26,4 +26,3 @@ assert_matches = "1.3"
 [[bench]]
 name = "bench"
 harness = false
-

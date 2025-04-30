@@ -6,3 +6,11 @@ members = [
     "relaxng-validator",
     "relaxng-tool",
 ]
+
+[profile.release]
+debug = true
+
+[profile.bench]
+# for profiling,
+debug = true
+

@@ -1700,7 +1700,7 @@ mod tests {
                 Ok(s) => s,
                 Err(e) => {
                     c.dump_diagnostic(&e);
-                    panic!(e);
+                    panic!("{:?}", e);
                 }
             };
             Fixture { schema }
@@ -1756,7 +1756,7 @@ mod tests {
             Ok(s) => s,
             Err(e) => {
                 c.dump_diagnostic(&e);
-                panic!(e);
+                panic!("{:?}", e);
             }
         };
 

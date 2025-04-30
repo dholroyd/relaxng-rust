@@ -27,6 +27,3 @@ assert_matches = "1.3"
 name = "bench"
 harness = false
 
-[profile.bench]
-# for profiling,
-debug = true

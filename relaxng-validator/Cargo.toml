@@ -24,6 +24,3 @@ codemap-diagnostic = "0.1"
 [[test]]
 harness = false
 name = "spectest"
-
-[profile.release]
-debug = true

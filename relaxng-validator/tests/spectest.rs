@@ -93,13 +93,7 @@ enum Fixture {
         invalid: Vec<String>,
     },
 }
-impl Fixture {
-    fn resources(&self) -> &HashMap<String, String> {
-        match self {
-            Fixture::Incorrect { resources, .. } | Fixture::Correct { resources, .. } => resources,
-        }
-    }
-}
+
 impl<'a, 'input> TryFrom<Node<'a, 'input>> for TestCase {
     type Error = ();
 

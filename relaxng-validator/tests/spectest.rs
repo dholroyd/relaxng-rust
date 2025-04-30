@@ -398,20 +398,21 @@ fn stringify(node: Node) -> String {
 
 struct FS(HashMap<String, String>);
 
-fn create_compiler(resources: HashMap<String, String>) -> Compiler<FS> {
-    impl relaxng_model::Files for FS {
-        fn load(&self, name: &Path) -> Result<String, relaxng_model::RelaxError> {
-            self.0
-                .get(name.to_str().unwrap())
-                .ok_or_else(|| {
-                    relaxng_model::RelaxError::Io(
-                        name.to_path_buf(),
-                        io::Error::from(io::ErrorKind::NotFound),
-                    )
-                })
-                .map(String::to_string)
-        }
+impl relaxng_model::Files for FS {
+    fn load(&self, name: &Path) -> Result<String, relaxng_model::RelaxError> {
+        self.0
+            .get(name.to_str().unwrap())
+            .ok_or_else(|| {
+                relaxng_model::RelaxError::Io(
+                    name.to_path_buf(),
+                    io::Error::from(io::ErrorKind::NotFound),
+                )
+            })
+            .map(String::to_string)
     }
+}
+
+fn create_compiler(resources: HashMap<String, String>) -> Compiler<FS> {
     relaxng_model::Compiler::new(FS(resources), relaxng_model::Syntax::Xml)
 }
 

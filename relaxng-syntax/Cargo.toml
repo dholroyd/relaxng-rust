@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 nom = "5.0"
 nom_locate = "1.0"
-roxmltree = "0.14.0"
+roxmltree = "0.20.0"
 url = "2.2.0"
 rfc2396 = "1.0.5"
 

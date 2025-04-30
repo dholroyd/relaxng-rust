@@ -553,18 +553,6 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn type_name(&self) -> &'static str {
-        match self {
-            Context::Root { .. } => "Root",
-            Context::Include { .. } => "Include",
-            Context::IncludeOverrides { .. } => "IncludeOverides",
-            Context::Grammar { .. } => "Grammar",
-            Context::Define { .. } => "Define",
-            Context::Element { .. } => "Element",
-            Context::Attribute { .. } => "Attribute",
-        }
-    }
-
     fn acquire_parent_ref(&self, id: &types::Identifier) -> Result<model::PatRef, RelaxError> {
         match self {
             Context::Root { .. } => {

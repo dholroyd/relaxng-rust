@@ -41,7 +41,7 @@ pub enum XsdDatatypes {
     String(StringFacets),
     Integer(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
     UnsignedInt(MinMaxFacet<num_bigint::BigUint>, Option<PatternFacet>),
-    UnsignedLong(MinMaxFacet<num_bigint::BigUint>, Option<PatternFacet>),
+    UnsignedLong(MinMaxFacet<u64>, Option<PatternFacet>),
     Decimal {
         min_max: MinMaxFacet<bigdecimal::BigDecimal>,
         pattern: Option<PatternFacet>,
@@ -139,7 +139,7 @@ impl super::Datatype for XsdDatatypes {
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::UnsignedLong(min_max, patt) => {
-                num_bigint::BigUint::from_str(value)
+                u64::from_str(value)
                     .map(|v| min_max.is_valid(&v))
                     .unwrap_or(false)
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
@@ -986,10 +986,10 @@ impl Compiler {
 
         for param in params {
             match &param.2.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::biguint(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::biguint(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::biguint(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::biguint(ctx, param)?)?,
+                "minInclusive" => min_max.min_inclusive(Self::u64(ctx, param)?)?,
+                "minExclusive" => min_max.min_exclusive(Self::u64(ctx, param)?)?,
+                "maxInclusive" => min_max.max_inclusive(Self::u64(ctx, param)?)?,
+                "maxExclusive" => min_max.max_exclusive(Self::u64(ctx, param)?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(

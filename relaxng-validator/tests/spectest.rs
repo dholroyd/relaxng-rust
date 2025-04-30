@@ -73,6 +73,7 @@ fn process_suite(
 }
 
 #[derive(Clone)]
+#[allow(unused)]
 struct TestCase {
     section: Option<String>,
     documentation: Option<String>,

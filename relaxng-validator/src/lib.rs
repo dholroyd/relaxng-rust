@@ -1913,9 +1913,9 @@ mod tests {
         );
     }
 
-    //#[test]
+    #[test]
+    #[ignore = "we need some optimisations in place to avoid exponential blow-up"]
     fn blowup() {
-        // we need some optimisations in place to avoid exponential blow-up
         // https://relaxng.org/jclark/derivative.html#Avoiding_exponential_blowup
         Fixture::correct(
             "start = element root { a8 | b8 } \

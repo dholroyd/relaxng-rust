@@ -415,16 +415,3 @@ impl relaxng_model::Files for FS {
 fn create_compiler(resources: HashMap<String, String>) -> Compiler<FS> {
     relaxng_model::Compiler::new(FS(resources), relaxng_model::Syntax::Xml)
 }
-
-fn validate(schema: Rc<RefCell<Option<DefineRule>>>, doc: &str) -> Result<(), ValidatorError> {
-    let reader = xmlparser::Tokenizer::from(&doc[..]);
-    let mut v = relaxng_validator::Validator::new(schema, reader);
-    loop {
-        match v.next() {
-            None => break,
-            Some(Ok(())) => {}
-            Some(Err(err)) => return Err(err),
-        }
-    }
-    Ok(())
-}

@@ -1813,34 +1813,6 @@ impl<FS: Files> Compiler<FS> {
             },
         })
     }
-    fn compile_params(
-        &mut self,
-        ctx: &mut Context,
-        params: &[types::Param],
-    ) -> Result<Vec<model::Param>, RelaxError> {
-        let mut seen = HashSet::new();
-        let mut result = vec![];
-        for p in params {
-            let name = p.2.to_string();
-            if seen.contains(&name) {
-                return Err(RelaxError::DuplicateParameterName(name));
-            }
-            result.push(self.compile_param(ctx, p)?);
-            seen.insert(name);
-        }
-        Ok(result)
-    }
-    fn compile_param(
-        &mut self,
-        _ctx: &mut Context,
-        param: &types::Param,
-    ) -> Result<model::Param, RelaxError> {
-        Ok(model::Param {
-            span: param.0.clone(),
-            name: param.2.to_string(),
-            value: param.3.as_string_value(),
-        })
-    }
 
     fn compile_declaration(
         &mut self,

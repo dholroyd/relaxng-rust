@@ -3,6 +3,7 @@ use crate::datatype::{DatatypeCompiler, Errors};
 use crate::model::Pattern;
 use codemap::CodeMap;
 
+use nom::error::Error;
 use nom_locate::LocatedSpan;
 use relaxng_syntax::types::{
     DatatypeName, Name, NamespaceUriLiteral, NamespacedName, NcName, QName, Schema,
@@ -64,15 +65,19 @@ impl Syntax {
             Syntax::Compact => {
                 let input = LocatedSpan::new(file.source());
                 let schema = compact::schema(input).map_err(|e| match e {
-                    nom::Err::Error((i, e)) => RelaxError::Parse(
-                        file.span
-                            .subspan(i.offset as _, (i.offset + i.fragment.len()) as _),
-                        e,
+                    nom::Err::Error(Error { input, code }) => RelaxError::Parse(
+                        file.span.subspan(
+                            input.location_offset() as _,
+                            (input.location_offset() + input.fragment().len()) as _,
+                        ),
+                        code,
                     ),
-                    nom::Err::Failure((i, e)) => RelaxError::Parse(
-                        file.span
-                            .subspan(i.offset as _, (i.offset + i.fragment.len()) as _),
-                        e,
+                    nom::Err::Failure(Error { input, code }) => RelaxError::Parse(
+                        file.span.subspan(
+                            input.location_offset() as _,
+                            (input.location_offset() + input.fragment().len()) as _,
+                        ),
+                        code,
                     ),
                     nom::Err::Incomplete(_n) => unimplemented!("{:?}", e),
                 })?;

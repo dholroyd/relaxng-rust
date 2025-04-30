@@ -766,7 +766,7 @@ fn rebase_path(node: Node, href: &str) -> Result<String> {
     Ok(result.unwrap().to_str().unwrap().to_string())
 }
 
-fn resolve(mut result: &mut Option<PathBuf>, new: &str) {
+fn resolve(result: &mut Option<PathBuf>, new: &str) {
     *result = Some(if new.starts_with("/") {
         PathBuf::from(new)
     } else {

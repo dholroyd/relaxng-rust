@@ -1652,13 +1652,6 @@ struct ElementState<'a> {
 }
 
 impl<'a> ElementState<'a> {
-    fn define_ns(&mut self, prefix: StrSpan<'a>, namespace_uri: StrSpan<'a>) {
-        self.namespaces.push(Ns {
-            prefix,
-            namespace_uri,
-        })
-    }
-
     fn lookup_namespace_uri(&self, prefix: &str) -> Option<StrSpan<'a>> {
         self.namespaces
             .iter()

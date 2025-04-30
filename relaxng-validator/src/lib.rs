@@ -621,6 +621,7 @@ impl<'a> Validator<'a> {
         }
     }
 
+    #[allow(unused)]
     fn assert_health(&self) {
         let mut fail = false;
         for v in self.schema.inner.borrow().refs.values() {

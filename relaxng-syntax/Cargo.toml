@@ -10,8 +10,7 @@ edition = "2024"
 nom = "8.0"
 nom_locate = "5.0"
 roxmltree = "0.20.0"
-url = "2.5.4"
-rfc2396 = "1.1.0"
+fluent-uri = "0.3.2"
 
 [dev-dependencies]
 assert_matches = "1.4.0"

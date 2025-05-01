@@ -90,28 +90,21 @@ fn check_standard_attrs(node: Node) -> Result<()> {
             Ok(())
         } else {
             // TODO: move these checks into relaxng-model crate
-            if !rfc2396::validate(val) {
-                Err(Error::Unexpected(
-                    dt_lib.range_value(),
-                    "Datatype library URI is invalid",
-                ))
-            } else {
-                match url::Url::parse(val) {
-                    Ok(url) => {
-                        if url.fragment().is_some() {
-                            Err(Error::Unexpected(
-                                dt_lib.range_value(),
-                                "Datatype library URI must not include a fragment identifier",
-                            ))
-                        } else {
-                            Ok(())
-                        }
+            match fluent_uri::Uri::parse(val) {
+                Ok(uri) => {
+                    if uri.fragment().is_some() {
+                        Err(Error::Unexpected(
+                            dt_lib.range_value(),
+                            "Datatype library URI must not include a fragment identifier",
+                        ))
+                    } else {
+                        Ok(())
                     }
-                    Err(_) => Err(Error::Unexpected(
-                        dt_lib.range_value(),
-                        "Invalid datatype library URI",
-                    )),
                 }
+                Err(_) => Err(Error::Unexpected(
+                    dt_lib.range_value(),
+                    "Invalid datatype library URI",
+                )),
             }
         }
     } else {

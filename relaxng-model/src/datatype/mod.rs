@@ -123,7 +123,7 @@ impl DatatypeCompiler for Compiler {
                 .map(Datatypes::Relax)
                 .map_err(Errors::Relax),
             DatatypeName::CName(types::QName(types::NcName(span, namespace_uri), _)) => {
-                self.dt_name(ctx, datatype_name, params, &span, namespace_uri)
+                self.dt_name(ctx, datatype_name, params, span, namespace_uri)
             }
             DatatypeName::NamespacedName(NamespacedName { namespace_uri, .. }) => {
                 let ns = &namespace_uri.as_string_value()[..];

@@ -10,6 +10,7 @@ use relaxng_syntax::types::{
 };
 use relaxng_syntax::{compact, types};
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
@@ -389,11 +390,14 @@ impl<'a> Context<'a> {
     fn declare_datatype(&mut self, prefix: String, uri: String) -> Result<(), RelaxError> {
         match self {
             Context::Root { datatypes, .. } | Context::Include { datatypes, .. } => {
-                if datatypes.contains_key(&prefix) {
-                    Err(RelaxError::DatatypePrefixAlreadyDefined(prefix))
-                } else {
-                    datatypes.insert(prefix, uri);
-                    Ok(())
+                match datatypes.entry(prefix) {
+                    Entry::Occupied(e) => {
+                        Err(RelaxError::DatatypePrefixAlreadyDefined(e.key().clone()))
+                    }
+                    Entry::Vacant(e) => {
+                        e.insert(uri);
+                        Ok(())
+                    }
                 }
             }
             Context::IncludeOverrides { .. }
@@ -528,7 +532,7 @@ impl<'a> Context<'a> {
     > + '_ {
         match self {
             Context::Root { refs, .. } | Context::Grammar { refs, .. } => {
-                refs.borrow().clone().into_iter().map(|(id, r)| (id, r))
+                refs.borrow().clone().into_iter()
             }
             _ => panic!("ref_iter() only valid for root context"),
         }
@@ -704,6 +708,7 @@ impl<FS: Files> Compiler<FS> {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn check(&self, seen: &mut HashSet<usize>, patt: &model::Pattern) -> Result<(), RelaxError> {
         match patt {
             Pattern::Choice(v) | Pattern::Interleave(v) | Pattern::Group(v) => {
@@ -753,6 +758,8 @@ impl<FS: Files> Compiler<FS> {
         let d = self.diagnostic(err);
         emitter.emit(&[d]);
     }
+
+    #[allow(clippy::only_used_in_recursion)]
     fn diagnostic(&self, err: &RelaxError) -> codemap_diagnostic::Diagnostic {
         match err {
             RelaxError::IncludeError(span, err) => {
@@ -811,7 +818,7 @@ impl<FS: Files> Compiler<FS> {
                     };
                     codemap_diagnostic::Diagnostic {
                         level: codemap_diagnostic::Level::Error,
-                        message: format!("Expected: {}", msg.to_string()),
+                        message: format!("Expected: {}", msg),
                         code: None,
                         spans: vec![label],
                     }
@@ -1216,7 +1223,7 @@ impl<FS: Files> Compiler<FS> {
     fn append_choice(choice: &mut Pattern, c: Pattern) {
         if let Pattern::Choice(ref mut this) = choice {
             if let Pattern::Choice(mut other) = c {
-                this.extend(other.drain(..))
+                this.append(&mut other)
             } else {
                 this.push(c)
             }
@@ -1227,7 +1234,7 @@ impl<FS: Files> Compiler<FS> {
     fn append_interleave(interleave: &mut Pattern, c: Pattern) {
         if let Pattern::Interleave(ref mut this) = interleave {
             if let Pattern::Interleave(mut other) = c {
-                this.extend(other.drain(..))
+                this.append(&mut other)
             } else {
                 this.push(c)
             }
@@ -1285,7 +1292,7 @@ impl<FS: Files> Compiler<FS> {
         let path = Path::new(ctx.file().name())
             .parent()
             .expect("TODO: no parent?")
-            .join(&inc.0.as_string_value());
+            .join(inc.0.as_string_value());
         let span = ctx
             .file()
             .span
@@ -1594,7 +1601,7 @@ impl<FS: Files> Compiler<FS> {
         let path = Path::new(ctx.file().name())
             .parent()
             .expect("TODO: no parent?")
-            .join(&external.0.as_string_value());
+            .join(external.0.as_string_value());
         let span = ctx.convert_span(&(external.0).0);
         let (file, s) = self
             .get_schema(&path)
@@ -1663,11 +1670,11 @@ impl<FS: Files> Compiler<FS> {
 
     fn compile_grammar_contents(
         &mut self,
-        mut child_ctx: &mut Context,
+        child_ctx: &mut Context,
         content: &[types::GrammarContent],
     ) -> Result<(), RelaxError> {
         for g in content {
-            self.compile_grammar_content_item(&mut child_ctx, g)?;
+            self.compile_grammar_content_item(child_ctx, g)?;
         }
         Ok(())
     }
@@ -1695,11 +1702,11 @@ impl<FS: Files> Compiler<FS> {
         let b = self.compile_pattern(ctx, b)?;
         let mut i = vec![];
         match a {
-            Pattern::Group(mut v) => i.extend(v.drain(..)),
+            Pattern::Group(mut v) => i.append(&mut v),
             _ => i.push(a),
         }
         match b {
-            Pattern::Group(mut v) => i.extend(v.drain(..)),
+            Pattern::Group(mut v) => i.append(&mut v),
             _ => i.push(b),
         }
         Ok(model::Pattern::Group(i))
@@ -1714,11 +1721,11 @@ impl<FS: Files> Compiler<FS> {
         let b = self.compile_pattern(ctx, b)?;
         let mut i = vec![];
         match a {
-            Pattern::Interleave(mut v) => i.extend(v.drain(..)),
+            Pattern::Interleave(mut v) => i.append(&mut v),
             _ => i.push(a),
         }
         match b {
-            Pattern::Interleave(mut v) => i.extend(v.drain(..)),
+            Pattern::Interleave(mut v) => i.append(&mut v),
             _ => i.push(b),
         }
         Ok(model::Pattern::Interleave(i))
@@ -1733,11 +1740,11 @@ impl<FS: Files> Compiler<FS> {
         let b = self.compile_pattern(ctx, b)?;
         let mut c = vec![];
         match a {
-            Pattern::Choice(mut v) => c.extend(v.drain(..)),
+            Pattern::Choice(mut v) => c.append(&mut v),
             _ => c.push(a),
         }
         match b {
-            Pattern::Choice(mut v) => c.extend(v.drain(..)),
+            Pattern::Choice(mut v) => c.append(&mut v),
             _ => c.push(b),
         }
         Ok(model::Pattern::Choice(c))
@@ -1812,7 +1819,7 @@ impl<FS: Files> Compiler<FS> {
         Ok(model::Pattern::DatatypeName {
             datatype,
             except: if let Some(ref except) = datatype_name.2 {
-                Some(Box::new(self.compile_pattern(ctx, &except)?))
+                Some(Box::new(self.compile_pattern(ctx, except)?))
             } else {
                 None
             },
@@ -1859,6 +1866,7 @@ impl<FS: Files> Compiler<FS> {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn compile_nameclass(
         &mut self,
         ctx: &mut Context,

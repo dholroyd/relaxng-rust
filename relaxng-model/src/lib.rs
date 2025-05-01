@@ -310,7 +310,9 @@ impl<'a> Context<'a> {
                 if let Context::Include { parent, .. } = parent {
                     parent.file()
                 } else {
-                    unreachable!("Should not be possible for Context::IncludeOverrides to have parent other than Context::Include")
+                    unreachable!(
+                        "Should not be possible for Context::IncludeOverrides to have parent other than Context::Include"
+                    )
                 }
             }
             Context::Grammar { parent, .. }
@@ -482,7 +484,9 @@ impl<'a> Context<'a> {
                     };
                     Ok(())
                 } else {
-                    unreachable!("Should not be possible for Context::IncludeOverrides to have parent other than Context::Include")
+                    unreachable!(
+                        "Should not be possible for Context::IncludeOverrides to have parent other than Context::Include"
+                    )
                 }
             }
             Context::Define { .. } => {
@@ -899,11 +903,14 @@ impl<FS: Files> Compiler<FS> {
                             label: Some("Only 'string' and 'token' supported".to_string()),
                         };
                         codemap_diagnostic::Diagnostic {
-                                level: codemap_diagnostic::Level::Error,
-                                message: format!("The relaxng build-in datatype bibrary does not support the type {:?}", name),
-                                code: None,
-                                spans: vec![label]
-                            }
+                            level: codemap_diagnostic::Level::Error,
+                            message: format!(
+                                "The relaxng build-in datatype bibrary does not support the type {:?}",
+                                name
+                            ),
+                            code: None,
+                            spans: vec![label],
+                        }
                     }
                 },
                 Errors::Xsd(e) => match e {
@@ -1221,7 +1228,7 @@ impl<FS: Files> Compiler<FS> {
         Ok(())
     }
     fn append_choice(choice: &mut Pattern, c: Pattern) {
-        if let Pattern::Choice(ref mut this) = choice {
+        if let Pattern::Choice(this) = choice {
             if let Pattern::Choice(mut other) = c {
                 this.append(&mut other)
             } else {
@@ -1232,7 +1239,7 @@ impl<FS: Files> Compiler<FS> {
         }
     }
     fn append_interleave(interleave: &mut Pattern, c: Pattern) {
-        if let Pattern::Interleave(ref mut this) = interleave {
+        if let Pattern::Interleave(this) = interleave {
             if let Pattern::Interleave(mut other) = c {
                 this.append(&mut other)
             } else {
@@ -1685,9 +1692,9 @@ impl<FS: Files> Compiler<FS> {
         g: &types::GrammarContent,
     ) -> Result<(), RelaxError> {
         match g {
-            types::GrammarContent::Define(ref d) => self.compile_define(child_ctx, d),
-            types::GrammarContent::Div(ref d) => self.compile_grammar_div(child_ctx, d),
-            types::GrammarContent::Include(ref i) => self.compile_include(child_ctx, i),
+            types::GrammarContent::Define(d) => self.compile_define(child_ctx, d),
+            types::GrammarContent::Div(d) => self.compile_grammar_div(child_ctx, d),
+            types::GrammarContent::Include(i) => self.compile_include(child_ctx, i),
             types::GrammarContent::Annotation(_) => Ok(()),
         }
     }
@@ -1841,7 +1848,7 @@ impl<FS: Files> Compiler<FS> {
                         )
                     }
                     NamespaceUriLiteral::Uri(uri) => {
-                        if let Some(ref p) = prefix {
+                        if let Some(p) = prefix {
                             ctx.declare_namespace(p.clone(), uri.as_string_value())
                         } else {
                             Ok(())
@@ -1996,7 +2003,7 @@ mod tests {
                         return Err(RelaxError::Io(
                             name.to_path_buf(),
                             io::Error::from(io::ErrorKind::NotFound),
-                        ))
+                        ));
                     }
                 };
                 Ok(t.to_string())

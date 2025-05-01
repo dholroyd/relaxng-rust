@@ -1,5 +1,5 @@
 [workspace]
-
+resolver = "3"
 members = [
     "relaxng-syntax",
     "relaxng-model",

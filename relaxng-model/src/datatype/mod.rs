@@ -94,16 +94,14 @@ impl DatatypeCompiler for Compiler {
                 .datatype_value(ctx, datatype_name, value)
                 .map(DatatypeValues::Relax)
                 .map_err(Errors::Relax),
-            types::DatatypeName::CName(types::QName(ref namespace_uri, _)) => self.dt_value(
+            types::DatatypeName::CName(types::QName(namespace_uri, _)) => self.dt_value(
                 ctx,
                 datatype_name,
                 value,
                 &namespace_uri.0,
                 &namespace_uri.1,
             ),
-            DatatypeName::NamespacedName(NamespacedName {
-                ref namespace_uri, ..
-            }) => {
+            DatatypeName::NamespacedName(NamespacedName { namespace_uri, .. }) => {
                 let ns = &namespace_uri.as_string_value()[..];
                 self.dt_value(ctx, datatype_name, value, &namespace_uri.0, ns)
             }

@@ -86,7 +86,7 @@ fn pattern(node: Node) -> Result<Pattern> {
 fn check_standard_attrs(node: Node) -> Result<()> {
     if let Some(dt_lib) = node.attribute_node("datatypeLibrary") {
         let val = dt_lib.value();
-        if val == "" {
+        if val.is_empty() {
             Ok(())
         } else {
             // TODO: move these checks into relaxng-model crate
@@ -269,11 +269,7 @@ fn ns_name(node: Node) -> Result<NsName> {
 }
 
 fn get_ns(node: Node) -> Option<Literal> {
-    if let Some(ns) = get_ns_att(node) {
-        Some(Literal::new(ns.range_value(), ns.value().to_string()))
-    } else {
-        None
-    }
+    get_ns_att(node).map(|ns| Literal::new(ns.range_value(), ns.value().to_string()))
 }
 
 /// Find the 'ns' attribute on the element, or its nearest parent element, or None if there is no
@@ -290,11 +286,7 @@ fn get_ns_att<'a, 'input: 'a>(start: Node<'a, 'input>) -> Option<Attribute<'a, '
 }
 
 fn get_datatype_lib(node: Node) -> Option<Literal> {
-    if let Some(ns) = get_dt_lib_att(node) {
-        Some(Literal::new(ns.range_value(), ns.value().to_string()))
-    } else {
-        None
-    }
+    get_dt_lib_att(node).map(|ns| Literal::new(ns.range_value(), ns.value().to_string()))
 }
 
 /// Find the 'datatypeLibrary' attribute on the element, or its nearest parent element, or None if there is no
@@ -335,7 +327,7 @@ fn attribute(node: Node) -> Result<AttributePattern> {
     no_attrs_except(node, &["name", "ns", "datatypeLibrary"])?;
     let ns = get_ns_att(node);
     let (name_class, rest) = if let Some(name) = node.attribute_node("name") {
-        if name.value() == "xmlns" && (ns == None || ns.unwrap().value() == "") {
+        if name.value() == "xmlns" && (ns.is_none() || ns.unwrap().value() == "") {
             return Err(Error::Unexpected(
                 name.range_value(),
                 "Schemas may not define the xmlns attribute",
@@ -674,7 +666,7 @@ fn start(node: Node) -> Result<Define> {
                 return Err(Error::Expected(
                     combine.range_value(),
                     "Expected either \"choice\" or \"interleave\"",
-                ))
+                ));
             }
         }
     } else {
@@ -711,7 +703,7 @@ fn define(node: Node) -> Result<Define> {
                 return Err(Error::Expected(
                     combine.range_value(),
                     "Expected either \"choice\" or \"interleave\"",
-                ))
+                ));
             }
         }
     } else {

@@ -327,7 +327,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                         //eprintln!("  {}", schema);
                         //eprintln!("  ❌ Incorrect schema should have failed");
                         loop {
-                            match v.next() {
+                            match v.validate_next() {
                                 None => break,
                                 Some(Ok(())) => {}
                                 Some(Err(err)) => {
@@ -349,7 +349,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                         //eprintln!("  {}", schema);
                         //eprintln!("  ❌ Incorrect schema should have failed");
                         loop {
-                            match v.next() {
+                            match v.validate_next() {
                                 None => break,
                                 Some(Ok(())) => {}
                                 Some(Err(_err)) => {

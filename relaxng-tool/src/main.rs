@@ -38,7 +38,7 @@ fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
         //v.assert_health();
         eprintln!("Validating {:?}", xml);
         loop {
-            match v.next() {
+            match v.validate_next() {
                 Some(Ok(())) => {}
                 Some(Err(err)) => {
                     let (map, d) = v.diagnostic(xml.to_string_lossy().to_string(), doc, &err);

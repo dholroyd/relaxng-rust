@@ -465,7 +465,7 @@ fn is_ns_match(namespace_uri: &str, target_namespace: Option<&StrSpan>) -> bool 
     if let Some(target_namespace) = target_namespace {
         target_namespace.as_str() == namespace_uri
     } else {
-        namespace_uri == ""
+        namespace_uri.is_empty()
     }
 }
 fn contains(nc: &model::NameClass, target_name: QualifiedName) -> bool {
@@ -478,7 +478,7 @@ fn contains(nc: &model::NameClass, target_name: QualifiedName) -> bool {
                 target_namespace.as_str() == namespace_uri
                     && target_name.local_name.as_str() == name
             } else {
-                namespace_uri == "" && target_name.local_name.as_str() == name
+                namespace_uri.is_empty() && target_name.local_name.as_str() == name
             }
         }
         NameClass::NsName {
@@ -533,7 +533,7 @@ impl<'a> Validator<'a> {
         let schema = Schema::default();
         let start = Self::compile(
             &schema,
-            &Rc::as_ref(&model).borrow().as_ref().unwrap().pattern(),
+            Rc::as_ref(&model).borrow().as_ref().unwrap().pattern(),
         );
         let mut entity_definitions = HashMap::default();
         entity_definitions.insert("lt".to_string(), "<".to_string());
@@ -608,13 +608,13 @@ impl<'a> Validator<'a> {
             model::Pattern::DatatypeValue { datatype } => s.datatype_value(datatype.clone()),
             model::Pattern::DatatypeName { datatype, except } => s.datatype_name(
                 datatype.clone(),
-                except.as_ref().map(|e| Self::compile(s, &e)),
+                except.as_ref().map(|e| Self::compile(s, e)),
             ),
             model::Pattern::List(p) => s.list(Self::compile(s, p)),
         }
     }
 
-    pub fn next(&mut self) -> Option<Result<(), ValidatorError<'a>>> {
+    pub fn validate_next(&mut self) -> Option<Result<(), ValidatorError<'a>>> {
         match self.tokenizer.next() {
             Some(Ok(evt)) => Some(self.validate(evt)),
             Some(Err(err)) => Some(Err(ValidatorError::Xml(err))),
@@ -1195,11 +1195,13 @@ impl<'a> Validator<'a> {
         }
     }
 
+    #[allow(clippy::mutable_key_type)] // false-positive
     fn heads(&self, id: PatId) -> HashSet<Pat> {
         let mut result = HashSet::new();
         self.head(&mut result, id);
         result
     }
+    #[allow(clippy::mutable_key_type)] // false-positive
     fn head(&self, result: &mut HashSet<Pat>, p: PatId) {
         // https://www.kohsuke.org/relaxng/implbook/Validation1.html#IDATGOO
         let pat = self.schema.patt(p);
@@ -1246,6 +1248,7 @@ impl<'a> Validator<'a> {
     }
 
     fn describe_expected(&self, expected_patt: PatId) -> String {
+        #[allow(clippy::mutable_key_type)] // false-positive
         let heads = self.heads(expected_patt);
         let mut result = String::new();
         const MAX_ELEMENTS: usize = 4;
@@ -1283,6 +1286,7 @@ impl<'a> Validator<'a> {
         // TODO: plus attributes and everything else
         result
     }
+    #[allow(clippy::only_used_in_recursion)]
     fn describe_nameclass(&self, nc: &NameClass, desc: &mut String) {
         match nc {
             NameClass::Named {
@@ -1516,7 +1520,7 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, Va
             u32::from_str_radix(text, 16)
                 .map_err(|_e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
         } else {
-            u32::from_str_radix(text, 10)
+            text.parse()
                 .map_err(|_e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
         };
         Ok(Txt::Char(
@@ -1709,7 +1713,7 @@ mod tests {
         fn valid(&self, xml: &str) {
             let reader = xmlparser::Tokenizer::from(xml);
             let mut v = Validator::new(self.schema.clone(), reader);
-            while let Some(i) = v.next() {
+            while let Some(i) = v.validate_next() {
                 if let Err(err) = i {
                     let (map, d) = v.diagnostic("valid.xml".to_string(), xml.to_string(), &err);
                     let mut emitter = codemap_diagnostic::Emitter::stderr(
@@ -1725,7 +1729,7 @@ mod tests {
         fn invalid(&self, xml: &str) {
             let reader = xmlparser::Tokenizer::from(xml);
             let mut v = Validator::new(self.schema.clone(), reader);
-            while let Some(i) = v.next() {
+            while let Some(i) = v.validate_next() {
                 if let Err(_err) = i {
                     return;
                 }
@@ -1766,7 +1770,7 @@ mod tests {
         v.schema.d(v.current_step).unwrap();
         println!("====");
         let mut fail = None;
-        while let Some(i) = v.next() {
+        while let Some(i) = v.validate_next() {
             if let Err(err) = i {
                 fail = Some(format!("{:?}", err));
                 break;

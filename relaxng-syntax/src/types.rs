@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{fmt::Display, ops::Range};
 
 pub type Span = Range<usize>;
 
@@ -204,11 +204,11 @@ impl IdentifierOrKeyword {
     }
 }
 
-impl ToString for IdentifierOrKeyword {
-    fn to_string(&self) -> String {
+impl Display for IdentifierOrKeyword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IdentifierOrKeyword::Identifier(id) => id.1.clone(),
-            IdentifierOrKeyword::Keyword(k) => k.1.clone(),
+            IdentifierOrKeyword::Identifier(id) => f.write_str(&id.1),
+            IdentifierOrKeyword::Keyword(k) => f.write_str(&k.1),
         }
     }
 }
@@ -305,7 +305,7 @@ impl QName {
     pub fn span(&self) -> Span {
         Span {
             start: (self.0).0.start,
-            end: self.1 .0.end,
+            end: self.1.0.end,
         }
     }
 }

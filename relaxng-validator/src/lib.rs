@@ -599,8 +599,7 @@ impl<'a> Validator<'a> {
                         placeholder_id
                     } else {
                         panic!(
-                            "Somehow definition for {:#?} is missing, used in {:?}",
-                            name, whence
+                            "Somehow definition for {name:#?} is missing, used in {whence:?}"
                         )
                     }
                 }
@@ -627,7 +626,7 @@ impl<'a> Validator<'a> {
         let mut fail = false;
         for v in self.schema.inner.borrow().refs.values() {
             if let Pat::Placeholder(_p) = self.schema.patt(*v) {
-                println!("Still a placeholder: {:?}", v);
+                println!("Still a placeholder: {v:?}");
                 fail = true;
             }
         }
@@ -1075,7 +1074,7 @@ impl<'a> Validator<'a> {
                 schema.choice(c1, c2)
             },
             Pat::NotAllowed => schema.not_allowed(),
-            _ => panic!("Only 'Choice', 'Interleave' or 'NotAllowed' patterns may be passed to apply_after(): {:?}", pat)
+            _ => panic!("Only 'Choice', 'Interleave' or 'NotAllowed' patterns may be passed to apply_after(): {pat:?}")
         }
     }
 
@@ -1242,7 +1241,7 @@ impl<'a> Validator<'a> {
                 result.insert(pat);
             }
             Pat::List(p) => self.head(result, p),
-            Pat::Placeholder(_) => panic!("Unexpected {:?}", pat),
+            Pat::Placeholder(_) => panic!("Unexpected {pat:?}"),
             Pat::After(p, _) => self.head(result, p),
         }
     }
@@ -1281,7 +1280,7 @@ impl<'a> Validator<'a> {
             }
         }
         if rest > 0 {
-            result.push_str(&format!(" .. or one of {} more", rest))
+            result.push_str(&format!(" .. or one of {rest} more"))
         }
         // TODO: plus attributes and everything else
         result
@@ -1343,7 +1342,7 @@ impl<'a> Validator<'a> {
 
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("{}", err),
+                    message: format!("{err}"),
                     code: None,
                     spans: vec![label],
                 });
@@ -1385,7 +1384,7 @@ impl<'a> Validator<'a> {
 
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("{} not expected here", name),
+                    message: format!("{name} not expected here"),
                     code: None,
                     spans: vec![label],
                 });
@@ -1394,7 +1393,7 @@ impl<'a> Validator<'a> {
                 let message = if desc.is_empty() {
                     "Remove this".to_string()
                 } else {
-                    format!("Expected {}", desc)
+                    format!("Expected {desc}")
                 };
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Help,
@@ -1429,7 +1428,7 @@ impl<'a> Validator<'a> {
 
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("The entity &{:?}; is not defined", name),
+                    message: format!("The entity &{name:?}; is not defined"),
                     code: None,
                     spans: vec![label],
                 })
@@ -1704,7 +1703,7 @@ mod tests {
                 Ok(s) => s,
                 Err(e) => {
                     c.dump_diagnostic(&e);
-                    panic!("{:?}", e);
+                    panic!("{e:?}");
                 }
             };
             Fixture { schema }
@@ -1721,7 +1720,7 @@ mod tests {
                         Some(&map),
                     );
                     emitter.emit(&d[..]);
-                    panic!("{:?}", err);
+                    panic!("{err:?}");
                 }
             }
         }
@@ -1760,7 +1759,7 @@ mod tests {
             Ok(s) => s,
             Err(e) => {
                 c.dump_diagnostic(&e);
-                panic!("{:?}", e);
+                panic!("{e:?}");
             }
         };
 
@@ -1772,12 +1771,12 @@ mod tests {
         let mut fail = None;
         while let Some(i) = v.validate_next() {
             if let Err(err) = i {
-                fail = Some(format!("{:?}", err));
+                fail = Some(format!("{err:?}"));
                 break;
             }
         }
         if let Some(err) = fail {
-            return Err(format!("{:?}", err));
+            return Err(format!("{err:?}"));
         }
         Ok(())
     }
@@ -1855,7 +1854,7 @@ mod tests {
             "<?xml version=\"1.0\"?><e1>one two</e1>",
         );
         if let Err(e) = res {
-            panic!("{:?}", e);
+            panic!("{e:?}");
         }
     }
 
@@ -1866,7 +1865,7 @@ mod tests {
             "<?xml version=\"1.0\"?><e1>x</e1>",
         );
         if let Err(e) = res {
-            panic!("{:?}", e);
+            panic!("{e:?}");
         }
     }
 

@@ -462,7 +462,7 @@ impl super::DatatypeCompiler for Compiler {
             DatatypeName::NamespacedName(_) => {
                 unimplemented!()
             }
-            _ => panic!("Unexpected {:?}", datatype_name),
+            _ => panic!("Unexpected {datatype_name:?}"),
         }
     }
 
@@ -476,7 +476,7 @@ impl super::DatatypeCompiler for Compiler {
             types::DatatypeName::CName(types::QName(_namespace_uri, name)) => {
                 self.compile(ctx, &name.0, &name.1, params)
             }
-            _ => panic!("Unexpected {:?}", datatype_name),
+            _ => panic!("Unexpected {datatype_name:?}"),
         }
     }
 }

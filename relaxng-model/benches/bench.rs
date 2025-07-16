@@ -11,7 +11,7 @@ fn relaxng_compile(c: &mut Criterion) {
 
     for test in &tests {
         if !Path::new(test).exists() {
-            println!("Missing file: {}", test);
+            println!("Missing file: {test}");
             return;
         }
     }

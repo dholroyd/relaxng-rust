@@ -29,8 +29,7 @@ fn spectest() {
     let file = map.add_file(src.to_string(), s.clone());
     let mut emitter =
         codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Auto, Some(&map));
-    let mut opts = roxmltree::ParsingOptions::default();
-    opts.allow_dtd = true;
+    let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
     let doc = roxmltree::Document::parse_with_options(&s, opts).unwrap();
     assert_eq!(
         doc.root_element().tag_name(),
@@ -65,7 +64,7 @@ fn process_suite(
                 process_case(emitter, file, stats, child)
             } else if child.tag_name() == ExpandedName::from("documentation") {
                 if let Some(text) = child.text() {
-                    eprintln!("== {} ==", text);
+                    eprintln!("== {text} ==");
                 }
             }
         }
@@ -124,7 +123,7 @@ impl<'a, 'input> TryFrom<Node<'a, 'input>> for TestCase {
                         load_resources(&PathBuf::new(), &mut resources, child);
                     }
                     "requires" => {
-                        println!("TODO: ignoring {:?}", child);
+                        println!("TODO: ignoring {child:?}");
                     }
                     _ => panic!(
                         "unexpected child of <testCase>: <{}>",
@@ -164,7 +163,7 @@ fn load_resources(path: &Path, resources: &mut HashMap<String, String>, node: No
         "dir" => {
             let sub = node
                 .attribute("name")
-                .unwrap_or_else(|| panic!("Expected @name on <dir>: {:?}", node));
+                .unwrap_or_else(|| panic!("Expected @name on <dir>: {node:?}"));
             let sub_path = path.join(sub);
             for child in node.children().filter(|n| n.is_element()) {
                 load_resources(&sub_path, resources, child);
@@ -175,14 +174,14 @@ fn load_resources(path: &Path, resources: &mut HashMap<String, String>, node: No
                 .attribute("name")
                 .expect("Expected @name on <resource>");
             let sub_name = path.join(name);
-            println!("resource {:?} --", sub_name);
+            println!("resource {sub_name:?} --");
             let data = node
                 .first_element_child()
                 .expect("expected child element in <resource>");
             println!("{}", stringify(data));
             resources.insert(sub_name.to_string_lossy().to_string(), stringify(data));
         }
-        _other_name => panic!("unsupported tag {:?}", node),
+        _other_name => panic!("unsupported tag {node:?}"),
     }
 }
 
@@ -225,13 +224,13 @@ fn process_case(
                 }
             },
             Err(e) => {
-                eprintln!(" ❌ Test thread failed: {:?}", e);
+                eprintln!(" ❌ Test thread failed: {e:?}");
                 stats.failed += 1;
             }
         },
         Err(err) => {
             eprintln!(" ⛔ Timeout waiting for test to complete:");
-            panic!("{:?}", err);
+            panic!("{err:?}");
         }
     }
 }
@@ -275,7 +274,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                     ) = e
                     {
                         eprintln!("  {}", resources.get("incorrect.rng").unwrap());
-                        eprintln!("  ❌ TODO: {}", e);
+                        eprintln!("  ❌ TODO: {e}");
                         TestResult::Suppressed
                     } else {
                         //eprintln!("--------");
@@ -309,7 +308,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                     ) = e
                     {
                         eprintln!("  {}", resources.get("correct.rng").unwrap());
-                        eprintln!("  ❌ TODO: {}", e);
+                        eprintln!("  ❌ TODO: {e}");
                         TestResult::Suppressed
                     } else {
                         //eprintln!("--------");
@@ -331,9 +330,9 @@ fn run_test(test_case: TestCase) -> TestResult {
                                 None => break,
                                 Some(Ok(())) => {}
                                 Some(Err(err)) => {
-                                    println!("v.next(): {:?}", err);
+                                    println!("v.next(): {err:?}");
                                     eprintln!("  {}", resources.get("correct.rng").unwrap());
-                                    eprintln!("  {}", doc);
+                                    eprintln!("  {doc}");
                                     eprintln!("  ❌ Valid input rejected");
                                     return TestResult::Fail;
                                 }
@@ -342,7 +341,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                         //eprintln!("  ✅ Valid input accepted");
                         // fall through to the 'invalid' case
                     }
-                    for doc in invalid {
+                    if let Some(doc) = invalid.into_iter().next() {
                         let reader = xmlparser::Tokenizer::from(&doc[..]);
                         let mut v = Validator::new(result, reader);
                         //eprintln!("--------");
@@ -359,7 +358,7 @@ fn run_test(test_case: TestCase) -> TestResult {
                             }
                         }
                         eprintln!("  {}", resources.get("correct.rng").unwrap());
-                        eprintln!("  {}", doc);
+                        eprintln!("  {doc}");
                         eprintln!("  ❌ Invalid input accepted");
                         return TestResult::Fail;
                     }

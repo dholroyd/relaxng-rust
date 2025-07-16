@@ -477,7 +477,7 @@ impl<'a> Context<'a> {
                     let mut overrides = overrides.borrow_mut();
                     if overrides.contains_key(id) {
                         // TODO: return Err, not panic
-                        panic!("TODO: redefined override {:?}", id)
+                        panic!("TODO: redefined override {id:?}")
                     } else {
                         overrides.insert(id.to_string(), (*rule.span(), false));
                         parant_of_include.define(id, rule)?;
@@ -795,7 +795,7 @@ impl<FS: Files> Compiler<FS> {
                 };
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("Undefined: {:?}", identifier),
+                    message: format!("Undefined: {identifier:?}"),
                     code: None,
                     spans: vec![label],
                 }
@@ -822,7 +822,7 @@ impl<FS: Files> Compiler<FS> {
                     };
                     codemap_diagnostic::Diagnostic {
                         level: codemap_diagnostic::Level::Error,
-                        message: format!("Expected: {}", msg),
+                        message: format!("Expected: {msg}"),
                         code: None,
                         spans: vec![label],
                     }
@@ -835,7 +835,7 @@ impl<FS: Files> Compiler<FS> {
                     };
                     codemap_diagnostic::Diagnostic {
                         level: codemap_diagnostic::Level::Error,
-                        message: format!("Unexpected {}", msg),
+                        message: format!("Unexpected {msg}"),
                         code: None,
                         spans: vec![label],
                     }
@@ -848,12 +848,12 @@ impl<FS: Files> Compiler<FS> {
                     };
                     codemap_diagnostic::Diagnostic {
                         level: codemap_diagnostic::Level::Error,
-                        message: format!("XML parsing error: {}", msg),
+                        message: format!("XML parsing error: {msg}"),
                         code: None,
                         spans: vec![label],
                     }
                 }
-                _ => panic!("{:?}", err),
+                _ => panic!("{err:?}"),
             },
             RelaxError::UndefinedNamespacePrefix { span, prefix } => {
                 let label = codemap_diagnostic::SpanLabel {
@@ -863,7 +863,7 @@ impl<FS: Files> Compiler<FS> {
                 };
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("Undefined namespace prefix {:?}", prefix),
+                    message: format!("Undefined namespace prefix {prefix:?}"),
                     code: None,
                     spans: vec![label],
                 }
@@ -877,7 +877,7 @@ impl<FS: Files> Compiler<FS> {
                     };
                     codemap_diagnostic::Diagnostic {
                         level: codemap_diagnostic::Level::Error,
-                        message: format!("Unsupported datatype library namespace {:?}", namespace),
+                        message: format!("Unsupported datatype library namespace {namespace:?}"),
                         code: None,
                         spans: vec![label],
                     }
@@ -905,8 +905,7 @@ impl<FS: Files> Compiler<FS> {
                         codemap_diagnostic::Diagnostic {
                             level: codemap_diagnostic::Level::Error,
                             message: format!(
-                                "The relaxng build-in datatype bibrary does not support the type {:?}",
-                                name
+                                "The relaxng build-in datatype bibrary does not support the type {name:?}"
                             ),
                             code: None,
                             spans: vec![label],
@@ -924,34 +923,34 @@ impl<FS: Files> Compiler<FS> {
                                 labels.push(codemap_diagnostic::SpanLabel {
                                     span: *span,
                                     style: codemap_diagnostic::SpanStyle::Primary,
-                                    label: Some(format!("Invalid integer value: {}", msg)),
+                                    label: Some(format!("Invalid integer value: {msg}")),
                                 })
                             }
                             FacetError::InvalidFloat(span, msg) => {
                                 labels.push(codemap_diagnostic::SpanLabel {
                                     span: *span,
                                     style: codemap_diagnostic::SpanStyle::Primary,
-                                    label: Some(format!("Invalid floating-point value: {}", msg)),
+                                    label: Some(format!("Invalid floating-point value: {msg}")),
                                 })
                             }
                             FacetError::InvalidPattern(span, err) => {
                                 labels.push(codemap_diagnostic::SpanLabel {
                                     span: *span,
                                     style: codemap_diagnostic::SpanStyle::Primary,
-                                    label: Some(format!("Invalid pattern value: {}", err)),
+                                    label: Some(format!("Invalid pattern value: {err}")),
                                 })
                             }
                             FacetError::InvalidFacet(span, name) => {
                                 labels.push(codemap_diagnostic::SpanLabel {
                                     span: *span,
                                     style: codemap_diagnostic::SpanStyle::Primary,
-                                    label: Some(format!("Invalid facet for type: {}", name)),
+                                    label: Some(format!("Invalid facet for type: {name}")),
                                 })
                             }
                         }
                         codemap_diagnostic::Diagnostic {
                             level: codemap_diagnostic::Level::Error,
-                            message: format!("Problematic facet for {} type", type_name),
+                            message: format!("Problematic facet for {type_name} type"),
                             code: None,
                             spans: labels,
                         }
@@ -965,8 +964,7 @@ impl<FS: Files> Compiler<FS> {
                         codemap_diagnostic::Diagnostic {
                             level: codemap_diagnostic::Level::Error,
                             message: format!(
-                                "Unsupported datatype {:?} for XML Schema datatype library",
-                                name
+                                "Unsupported datatype {name:?} for XML Schema datatype library"
                             ),
                             code: None,
                             spans: vec![label],
@@ -980,7 +978,7 @@ impl<FS: Files> Compiler<FS> {
                         };
                         codemap_diagnostic::Diagnostic {
                             level: codemap_diagnostic::Level::Error,
-                            message: format!("Invalid value of type {:?}", type_name),
+                            message: format!("Invalid value of type {type_name:?}"),
                             code: None,
                             spans: vec![label],
                         }
@@ -1005,7 +1003,7 @@ impl<FS: Files> Compiler<FS> {
                 };
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("Recursive reference to {:?}", ref_id),
+                    message: format!("Recursive reference to {ref_id:?}"),
                     code: None,
                     spans: vec![label, definition],
                 }
@@ -1018,7 +1016,7 @@ impl<FS: Files> Compiler<FS> {
                 };
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("The datatype prefix {:?} is not defined", prefix),
+                    message: format!("The datatype prefix {prefix:?} is not defined"),
                     code: None,
                     spans: vec![label],
                 }
@@ -1040,7 +1038,7 @@ impl<FS: Files> Compiler<FS> {
                 };
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("Duplicate definition of {:?}", name),
+                    message: format!("Duplicate definition of {name:?}"),
                     code: None,
                     spans: vec![dup, orig],
                 }
@@ -1111,7 +1109,7 @@ impl<FS: Files> Compiler<FS> {
                 };
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("The resource {:?} refers to itself recursively", name),
+                    message: format!("The resource {name:?} refers to itself recursively"),
                     code: None,
                     spans: vec![label],
                 }
@@ -1143,15 +1141,13 @@ impl<FS: Files> Compiler<FS> {
                     span: *include_span,
                     style: codemap_diagnostic::SpanStyle::Secondary,
                     label: Some(format!(
-                        "...or add a definition for {:?} to this grammar",
-                        name
+                        "...or add a definition for {name:?} to this grammar"
                     )),
                 };
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
                     message: format!(
-                        "Override {:?} has no corresponding definition in included grammar",
-                        name
+                        "Override {name:?} has no corresponding definition in included grammar"
                     ),
                     code: None,
                     spans: vec![override_label, include_label],
@@ -1170,7 +1166,7 @@ impl<FS: Files> Compiler<FS> {
                     spans: vec![label],
                 }
             }
-            _ => panic!("{:?}", err),
+            _ => panic!("{err:?}"),
         }
     }
 
@@ -1235,7 +1231,7 @@ impl<FS: Files> Compiler<FS> {
                 this.push(c)
             }
         } else {
-            panic!("Not a Choice pattern {:?}", choice);
+            panic!("Not a Choice pattern {choice:?}");
         }
     }
     fn append_interleave(interleave: &mut Pattern, c: Pattern) {
@@ -1246,7 +1242,7 @@ impl<FS: Files> Compiler<FS> {
                 this.push(c)
             }
         } else {
-            panic!("Not an Interleave pattern {:?}", interleave);
+            panic!("Not an Interleave pattern {interleave:?}");
         }
     }
     fn compile_define(
@@ -1843,8 +1839,7 @@ impl<FS: Files> Compiler<FS> {
                 match uri {
                     NamespaceUriLiteral::Inherit => {
                         panic!(
-                            "Can't inherit namespace {:?} at top level, I think?",
-                            prefix
+                            "Can't inherit namespace {prefix:?} at top level, I think?"
                         )
                     }
                     NamespaceUriLiteral::Uri(uri) => {
@@ -1859,8 +1854,7 @@ impl<FS: Files> Compiler<FS> {
             types::Decl::Namespace(types::NamespaceDeclaration { prefix, uri }) => match uri {
                 NamespaceUriLiteral::Inherit => {
                     panic!(
-                        "Can't inherit namespace {:?} at top level, I think?",
-                        prefix
+                        "Can't inherit namespace {prefix:?} at top level, I think?"
                     )
                 }
                 NamespaceUriLiteral::Uri(uri) => {
@@ -1960,7 +1954,7 @@ mod tests {
                         foo = element x { foo | empty }
                     "
                     }
-                    other => panic!("No {:?}", other),
+                    other => panic!("No {other:?}"),
                 };
                 Ok(t.to_string())
             }
@@ -1971,7 +1965,7 @@ mod tests {
             Err(e) => {
                 c.dump_diagnostic(&e);
                 std::thread::sleep(std::time::Duration::from_secs(1));
-                panic!("{:?}", e);
+                panic!("{e:?}");
             }
             Ok(s) => s,
         };
@@ -1983,7 +1977,7 @@ mod tests {
                 assert_matches!(patt, Pattern::Element(_name, content_patt) => {
                     assert_matches!(**content_patt, Pattern::Choice(ref seq) => {
                         assert_matches!(seq[0], Pattern::Ref(_, _, model::PatRef(ref ref2)) => {
-                            assert!(Rc::ptr_eq(&ref1, &ref2));
+                            assert!(Rc::ptr_eq(ref1, ref2));
                         })
                     })
                 })
@@ -2015,7 +2009,7 @@ mod tests {
             Ok(s) => s,
             Err(e) => {
                 c.dump_diagnostic(&e);
-                panic!("{:?}", e);
+                panic!("{e:?}");
             }
         };
         let s = schema.borrow();
@@ -2025,7 +2019,7 @@ mod tests {
                 assert_matches!(patt, Pattern::Element(_name, content_patt) => {
                     assert_matches!(**content_patt, Pattern::Optional(ref patt) => {
                         assert_matches!(**patt, Pattern::Ref(_, _, model::PatRef(ref ref2)) => {
-                            assert!(Rc::ptr_eq(&ref1, &ref2));
+                            assert!(Rc::ptr_eq(ref1, ref2));
                         })
                     })
                 })

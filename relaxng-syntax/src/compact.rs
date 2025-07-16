@@ -342,8 +342,7 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
     let (mut input, follow_annotations) = follow_annotation_list(input)?;
     if !follow_annotations.is_empty() {
         println!(
-            "pattern follow annotation found but ignored! {:?}",
-            follow_annotations
+            "pattern follow annotation found but ignored! {follow_annotations:?}"
         );
     }
 
@@ -1003,7 +1002,7 @@ mod test {
         T: PartialEq + fmt::Debug,
     {
         let (remaining, result) =
-            f(LocatedSpan::new(input)).unwrap_or_else(|_| panic!("failed to parse {:#?}", input));
+            f(LocatedSpan::new(input)).unwrap_or_else(|_| panic!("failed to parse {input:#?}"));
         assert_eq!(result, expected);
         assert_eq!(remaining.fragment(), &"");
     }

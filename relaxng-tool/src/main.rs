@@ -36,7 +36,7 @@ fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
         let reader = xmlparser::Tokenizer::from(&src[..]);
         let mut v = Validator::new(model.clone(), reader);
         //v.assert_health();
-        eprintln!("Validating {:?}", xml);
+        eprintln!("Validating {xml:?}");
         loop {
             match v.validate_next() {
                 Some(Ok(())) => {}

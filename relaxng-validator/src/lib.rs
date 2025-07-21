@@ -1462,7 +1462,10 @@ enum Txt<'a> {
     Char(usize, char),
 }
 
-fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, ValidatorError>> {
+fn parse_entities(
+    pos: usize,
+    text: &str,
+) -> impl Iterator<Item = Result<Txt<'_>, ValidatorError<'_>>> {
     struct Entities<'a> {
         text: &'a str,
         pos: usize,
@@ -1510,7 +1513,7 @@ fn parse_entities(pos: usize, text: &str) -> impl Iterator<Item = Result<Txt, Va
             }
         }
     }
-    fn numeric_entity(pos: usize, text: &str) -> Result<Txt, ValidatorError> {
+    fn numeric_entity(pos: usize, text: &str) -> Result<Txt<'_>, ValidatorError<'_>> {
         if text.is_empty() {
             return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos });
         }

@@ -1,5 +1,5 @@
-use crate::datatype::relax::normalize_whitespace;
 use crate::Context;
+use crate::datatype::relax::normalize_whitespace;
 use lazy_static::lazy_static;
 use relaxng_syntax::types;
 use relaxng_syntax::types::DatatypeName;
@@ -223,7 +223,7 @@ impl LengthFacet {
             LengthFacet::MinLength(min) => match other {
                 LengthFacet::Unbounded | LengthFacet::MinMaxLength(_, _) => unreachable!(),
                 LengthFacet::MinLength(_min) => {
-                    return Err(FacetError::ConflictingFacet("minLength"))
+                    return Err(FacetError::ConflictingFacet("minLength"));
                 }
                 LengthFacet::MaxLength(max) => {
                     if *min > max {
@@ -320,7 +320,7 @@ where
             Min::Exclusive(_) => {
                 return Err(FacetError::ConflictingFacet(
                     "minInclusive conflicts with minExclusive",
-                ))
+                ));
             }
         };
         Ok(())
@@ -348,7 +348,7 @@ where
             Min::Inclusive(_) => {
                 return Err(FacetError::ConflictingFacet(
                     "minExclusive conflicts with minInclusive",
-                ))
+                ));
             }
             Min::Exclusive(_) => unreachable!(),
         };
@@ -378,7 +378,7 @@ where
             Max::Exclusive(_) => {
                 return Err(FacetError::ConflictingFacet(
                     "maxInclusive conflicts with maxExclusive",
-                ))
+                ));
             }
         };
         Ok(())
@@ -406,7 +406,7 @@ where
             Max::Inclusive(_) => {
                 return Err(FacetError::ConflictingFacet(
                     "maxExclusive conflicts with maxInclusive",
-                ))
+                ));
             }
             Max::Exclusive(_) => unreachable!(),
         };
@@ -654,7 +654,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -678,7 +678,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -700,7 +700,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -726,7 +726,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -753,7 +753,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -773,7 +773,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -793,7 +793,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -813,7 +813,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -833,7 +833,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -851,7 +851,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -869,7 +869,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -887,7 +887,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -905,7 +905,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -923,7 +923,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -941,7 +941,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -968,7 +968,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -995,7 +995,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1013,7 +1013,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -1031,7 +1031,7 @@ impl Compiler {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.0),
                         param.2.to_string(),
-                    ))
+                    ));
                 }
             }
         }

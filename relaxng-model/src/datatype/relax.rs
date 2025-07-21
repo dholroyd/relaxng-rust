@@ -87,13 +87,13 @@ impl super::DatatypeCompiler for Compiler {
                 return Err(Error::DatataypeNameUnknown {
                     span: ctx.convert_span(&localname.0),
                     name: localname.1.clone(),
-                })
+                });
             }
             DatatypeName::NamespacedName(NamespacedName { localname, .. }) => {
                 return Err(Error::DatataypeNameUnknown {
                     span: ctx.convert_span(&localname.0),
                     name: localname.1.clone(),
-                })
+                });
             }
         })
     }
@@ -123,13 +123,13 @@ impl super::DatatypeCompiler for Compiler {
                 return Err(Error::DatataypeNameUnknown {
                     span: ctx.convert_span(&localname.0),
                     name: localname.1.clone(),
-                })
+                });
             }
             DatatypeName::NamespacedName(NamespacedName { localname, .. }) => {
                 return Err(Error::DatataypeNameUnknown {
                     span: ctx.convert_span(&localname.0),
                     name: localname.1.clone(),
-                })
+                });
             }
         })
     }

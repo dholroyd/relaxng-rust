@@ -239,7 +239,7 @@ impl<'a> Context<'a> {
         &self,
         span: codemap::Span,
         file: Arc<codemap::File>,
-    ) -> Result<Context, RelaxError> {
+    ) -> Result<Context<'_>, RelaxError> {
         self.check_include(span, file.clone())?;
         let mut namespaces = HashMap::new();
         namespaces.insert(
@@ -262,7 +262,7 @@ impl<'a> Context<'a> {
     }
 
     /// Creates a new context for the body of an include-overrides block
-    fn new_inc_overrides(&self) -> Context {
+    fn new_inc_overrides(&self) -> Context<'_> {
         match self {
             Context::Include { .. } => Context::IncludeOverrides { parent: self },
             _ => {
@@ -272,7 +272,7 @@ impl<'a> Context<'a> {
     }
 
     /// Creates a new context for the body of a grammar
-    fn new_grammar(&self) -> Context {
+    fn new_grammar(&self) -> Context<'_> {
         Context::Grammar {
             parent: self,
             refs: RefCell::new(HashMap::new()),
@@ -280,7 +280,7 @@ impl<'a> Context<'a> {
     }
 
     /// Creates a new context for the body of a definition
-    fn new_define(&self, id: &types::Identifier) -> Context {
+    fn new_define(&self, id: &types::Identifier) -> Context<'_> {
         Context::Define {
             parent: self,
             id: id.clone(),
@@ -288,7 +288,7 @@ impl<'a> Context<'a> {
     }
 
     /// Creates a new context for the body of an element
-    fn new_element(&self, element_span: codemap::Span) -> Result<Context, RelaxError> {
+    fn new_element(&self, element_span: codemap::Span) -> Result<Context<'_>, RelaxError> {
         if let Some(attribute_span) = self.parent_attribute() {
             return Err(RelaxError::ElementAsChildOfAttribute {
                 attribute_span,
@@ -299,7 +299,7 @@ impl<'a> Context<'a> {
     }
 
     /// Creates a new context for the body of an element
-    fn new_attribute(&self, span: codemap::Span) -> Context {
+    fn new_attribute(&self, span: codemap::Span) -> Context<'_> {
         Context::Attribute { parent: self, span }
     }
 

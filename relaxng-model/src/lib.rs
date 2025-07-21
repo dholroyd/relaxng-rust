@@ -1838,9 +1838,7 @@ impl<FS: Files> Compiler<FS> {
             types::Decl::DefaultNamespace(types::DefaultNamespaceDeclaration { prefix, uri }) => {
                 match uri {
                     NamespaceUriLiteral::Inherit => {
-                        panic!(
-                            "Can't inherit namespace {prefix:?} at top level, I think?"
-                        )
+                        panic!("Can't inherit namespace {prefix:?} at top level, I think?")
                     }
                     NamespaceUriLiteral::Uri(uri) => {
                         if let Some(p) = prefix {
@@ -1853,9 +1851,7 @@ impl<FS: Files> Compiler<FS> {
             }
             types::Decl::Namespace(types::NamespaceDeclaration { prefix, uri }) => match uri {
                 NamespaceUriLiteral::Inherit => {
-                    panic!(
-                        "Can't inherit namespace {prefix:?} at top level, I think?"
-                    )
+                    panic!("Can't inherit namespace {prefix:?} at top level, I think?")
                 }
                 NamespaceUriLiteral::Uri(uri) => {
                     ctx.declare_namespace(prefix.clone(), uri.as_string_value())

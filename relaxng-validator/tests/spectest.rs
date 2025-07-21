@@ -29,7 +29,10 @@ fn spectest() {
     let file = map.add_file(src.to_string(), s.clone());
     let mut emitter =
         codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Auto, Some(&map));
-    let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    let opts = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
     let doc = roxmltree::Document::parse_with_options(&s, opts).unwrap();
     assert_eq!(
         doc.root_element().tag_name(),

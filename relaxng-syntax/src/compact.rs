@@ -341,9 +341,7 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
 
     let (mut input, follow_annotations) = follow_annotation_list(input)?;
     if !follow_annotations.is_empty() {
-        println!(
-            "pattern follow annotation found but ignored! {follow_annotations:?}"
-        );
+        println!("pattern follow annotation found but ignored! {follow_annotations:?}");
     }
 
     loop {

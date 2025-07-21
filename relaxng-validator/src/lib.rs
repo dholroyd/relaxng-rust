@@ -230,7 +230,10 @@ impl Schema {
         let mut inner = self.inner.borrow_mut();
         match &inner.patterns[placeholder_id.0 as usize] {
             Pat::Placeholder(_) => (),
-            p => panic!("expected placeholder but got {:?}, with id {} while trying to resolve it to {}, for definition {:?}", p, placeholder_id.0, id.0, name)
+            p => panic!(
+                "expected placeholder but got {:?}, with id {} while trying to resolve it to {}, for definition {:?}",
+                p, placeholder_id.0, id.0, name
+            ),
         }
         inner.patterns[placeholder_id.0 as usize] = target;
     }
@@ -598,9 +601,7 @@ impl<'a> Validator<'a> {
                         s.resolve_ref(placeholder_id, id, name);
                         placeholder_id
                     } else {
-                        panic!(
-                            "Somehow definition for {name:#?} is missing, used in {whence:?}"
-                        )
+                        panic!("Somehow definition for {name:#?} is missing, used in {whence:?}")
                     }
                 }
             }
@@ -831,7 +832,7 @@ impl<'a> Validator<'a> {
                     prefix: name.namespace_uri.unwrap_or_else(|| StrSpan::from("")),
                     local: name.local_name,
                     span: name.local_name,
-                }))
+                }));
             }
             _p => {
                 let attributes: Vec<_> = stack.current_attributes()?;
@@ -1065,16 +1066,18 @@ impl<'a> Validator<'a> {
             Pat::After(p1, p2) => {
                 let p2 = f(p2, schema);
                 schema.after(p1, p2)
-            },
+            }
             Pat::Choice(p1, p2, _) => {
                 let p1 = schema.patt(p1);
                 let p2 = schema.patt(p2);
                 let c1 = Self::apply_after(p1, schema, f.clone());
                 let c2 = Self::apply_after(p2, schema, f);
                 schema.choice(c1, c2)
-            },
+            }
             Pat::NotAllowed => schema.not_allowed(),
-            _ => panic!("Only 'Choice', 'Interleave' or 'NotAllowed' patterns may be passed to apply_after(): {pat:?}")
+            _ => panic!(
+                "Only 'Choice', 'Interleave' or 'NotAllowed' patterns may be passed to apply_after(): {pat:?}"
+            ),
         }
     }
 
@@ -1691,7 +1694,7 @@ mod tests {
                             return Err(RelaxError::Io(
                                 name.to_path_buf(),
                                 io::Error::from(io::ErrorKind::NotFound),
-                            ))
+                            ));
                         }
                     };
                     Ok(t)
@@ -1747,7 +1750,7 @@ mod tests {
                         return Err(RelaxError::Io(
                             name.to_path_buf(),
                             io::Error::from(io::ErrorKind::NotFound),
-                        ))
+                        ));
                     }
                 };
                 Ok(t)

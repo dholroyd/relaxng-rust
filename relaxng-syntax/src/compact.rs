@@ -313,11 +313,8 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
 //    | "(" pattern ")"
 fn pattern(input: Span) -> IResult<Span, Pattern> {
     let (input, annotation) = maybe_initial_annotation(input)?;
-    if annotation.is_some() {
-        println!(
-            "pattern annotation found but ignored! {:?}",
-            annotation.unwrap()
-        );
+    if let Some(annotation) = annotation {
+        println!("pattern annotation found but ignored! {:?}", annotation);
     }
     let (input, mut result) = alt((
         map(element_pattern, Pattern::Element),

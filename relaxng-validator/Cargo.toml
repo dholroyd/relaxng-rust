@@ -10,7 +10,7 @@ edition = "2024"
 relaxng-model = { path = "../relaxng-model" }
 relaxng-syntax = { path = "../relaxng-syntax" }
 xmlparser = "0.13.3"
-xml-rs = "0.8.3"
+xml-rs = "1.0"
 codemap = "0.1.3"
 codemap-diagnostic = "0.1.1"
 fnv = "1.0.7"

@@ -9,7 +9,7 @@ edition = "2024"
 [dependencies]
 nom = "8.0"
 nom_locate = "5.0"
-roxmltree = "0.20.0"
+roxmltree = "0.21.1"
 fluent-uri = "0.4.1"
 
 [dev-dependencies]

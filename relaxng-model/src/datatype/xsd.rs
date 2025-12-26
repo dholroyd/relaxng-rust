@@ -379,6 +379,34 @@ where
 
 impl<T> MinMaxFacet<T>
 where
+    T: PartialOrd + Clone + std::ops::Add<Output = T> + From<u8>,
+{
+    /// Return the min inclusive value (for types that implement Clone but not Copy)
+    pub fn min_cloned(&self) -> Option<T> {
+        match &self.min {
+            Min::Unbounded => None,
+            Min::Inclusive(min) => Some(min.clone()),
+            Min::Exclusive(min) => Some(min.clone() + T::from(1)),
+        }
+    }
+}
+
+impl<T> MinMaxFacet<T>
+where
+    T: PartialOrd + Clone + std::ops::Sub<Output = T> + From<u8>,
+{
+    /// Return the max inclusive value (for types that implement Clone but not Copy)
+    pub fn max_cloned(&self) -> Option<T> {
+        match &self.max {
+            Max::Unbounded => None,
+            Max::Inclusive(max) => Some(max.clone()),
+            Max::Exclusive(max) => Some(max.clone() - T::from(1)),
+        }
+    }
+}
+
+impl<T> MinMaxFacet<T>
+where
     T: PartialOrd,
 {
     pub fn bounded(&self) -> bool {

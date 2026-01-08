@@ -199,6 +199,34 @@ impl StringFacets {
                 true
             }
     }
+
+    pub fn bounded(&self) -> bool {
+        !matches!(self.len, LengthFacet::Unbounded)
+    }
+
+    pub fn min_len(&self) -> Option<usize> {
+        match self.len {
+            LengthFacet::Unbounded => None,
+            LengthFacet::MinLength(min) => Some(min),
+            LengthFacet::MaxLength(_) => None,
+            LengthFacet::MinMaxLength(min, _) => Some(min),
+            LengthFacet::Length(len) => Some(len),
+        }
+    }
+
+    pub fn max_len(&self) -> Option<usize> {
+        match self.len {
+            LengthFacet::Unbounded => None,
+            LengthFacet::MinLength(_) => None,
+            LengthFacet::MaxLength(max) => Some(max),
+            LengthFacet::MinMaxLength(_, max) => Some(max),
+            LengthFacet::Length(len) => Some(len),
+        }
+    }
+
+    pub fn regex(&self) -> Option<&regex::Regex> {
+        self.pattern.as_ref().map(|pat| &pat.1)
+    }
 }
 
 #[derive(Debug)]

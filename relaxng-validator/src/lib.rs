@@ -30,8 +30,6 @@ struct PatId(u16);
 //       1) includes 'Placeholder, but doesn't include nullability flags or 'After'
 //       2) excludes 'Placeholder', and includes nullability flags and 'After'
 
-// TODO: instances of Pat are currently 208 bytes, and are cloned regularly; shrink this for
-//       better performance
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Pat {
     Choice(PatId, PatId, bool),
@@ -41,12 +39,11 @@ enum Pat {
     Empty,
     Text,
     NotAllowed,
-    Attribute(model::NameClass, PatId),
-    Element(model::NameClass, PatId),
-    // the Datatypes and DatatypeValues types are quite large, so we
-    Datatype(datatype::Datatypes),
-    DatatypeValue(datatype::DatatypeValues),
-    DatatypeExcept(datatype::Datatypes, PatId),
+    Attribute(Box<model::NameClass>, PatId),
+    Element(Box<model::NameClass>, PatId),
+    Datatype(Box<datatype::Datatypes>),
+    DatatypeValue(Box<datatype::DatatypeValues>),
+    DatatypeExcept(Box<datatype::Datatypes>, PatId),
     List(PatId),
     Placeholder(*const Option<relaxng_model::model::DefineRule>),
     After(PatId, PatId),
@@ -176,19 +173,19 @@ impl Schema {
         self.push(Pat::OneOrMore(pattern, p.is_nullable()))
     }
     fn attribute(&self, name: model::NameClass, p: PatId) -> PatId {
-        self.push(Pat::Attribute(name, p))
+        self.push(Pat::Attribute(Box::new(name), p))
     }
     fn element(&self, name: model::NameClass, p: PatId) -> PatId {
-        self.push(Pat::Element(name, p))
+        self.push(Pat::Element(Box::new(name), p))
     }
     fn datatype_value(&self, dt: datatype::DatatypeValues) -> PatId {
-        self.push(Pat::DatatypeValue(dt))
+        self.push(Pat::DatatypeValue(Box::new(dt)))
     }
     fn datatype_name(&self, dt: datatype::Datatypes, except: Option<PatId>) -> PatId {
         if let Some(except) = except {
-            self.push(Pat::DatatypeExcept(dt, except))
+            self.push(Pat::DatatypeExcept(Box::new(dt), except))
         } else {
-            self.push(Pat::Datatype(dt))
+            self.push(Pat::Datatype(Box::new(dt)))
         }
     }
     fn list(&self, p: PatId) -> PatId {

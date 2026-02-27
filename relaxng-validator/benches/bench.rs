@@ -7,14 +7,13 @@ use std::path::Path;
 use std::rc::Rc;
 use xmlparser::Tokenizer;
 
-/// A schema that exercises choices, optional attributes, interleave-style optionals,
-/// and repetition — representative of the derivative algorithm's hot paths.
 const SCHEMA: &str = r#"
 start = element catalog {
     attribute version { text },
     element item {
-        attribute id { text },
-        attribute type { text }?,
+        (attribute id { text } | attribute ref { text }) &
+        (attribute id { text } | attribute type { text }) &
+        (attribute id { text } | attribute category { text }),
         element name { text },
         element description { text }?,
         (element tag { text }
@@ -26,17 +25,24 @@ start = element catalog {
 }
 "#;
 
+/// Generate a document with `items` catalog entries.
 fn make_document(items: usize) -> String {
     let mut doc = String::from(r#"<catalog version="1.0">"#);
     for i in 0..items {
-        let type_attr = if i % 2 == 0 {
-            format!(r#" type="kind-{}""#, i % 5)
+        let attrs = if i % 2 == 0 {
+            format!(
+                r#" id="item-{i}" type="kind-{}" category="cat-{}""#,
+                i % 5,
+                i % 3
+            )
         } else {
-            String::new()
+            format!(
+                r#" ref="ref-{i}" type="kind-{}" category="cat-{}""#,
+                i % 5,
+                i % 3
+            )
         };
-        doc.push_str(&format!(
-            r#"<item id="item-{i}"{type_attr}><name>Item {i}</name>"#
-        ));
+        doc.push_str(&format!(r#"<item{attrs}><name>Item {i}</name>"#));
         if i % 3 == 0 {
             doc.push_str(&format!(
                 "<description>Description for item {i}</description>"

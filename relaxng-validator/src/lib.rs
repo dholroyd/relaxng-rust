@@ -97,32 +97,69 @@ impl Schema {
         }
     }
     pub fn choice(&self, left: PatId, right: PatId) -> PatId {
-        // TODO:
-        //       "In order to avoid exponential blowup with some patterns, it is essential
-        //        for the choice function to eliminate redundant choices. Define the
-        //        choice-leaves of a pattern to be the concatenation of the choice-leaves of
-        //        its operands if the the pattern is a Choice pattern and the empty-list
-        //        otherwise. Eliminating redundant choices means ensuring that the list of
-        //        choice-leaves of the constructed pattern contains no duplicates. One way
-        //        to do this is to for choice to walk the choice-leaves of one operand building
-        //        a hash-table of the set of choice-leaves of that operand; then walk the other
-        //        operand using this hash-table to eliminate any choice-leaf that has occurred
-        //        in the other operand."
         match (self.patt(left), self.patt(right)) {
             (Pat::NotAllowed, _) => right,
             (_, Pat::NotAllowed) => left,
             (l, r) => {
                 if left == right {
-                    //println!("Choices are identical: left=right={:?} - {}", l, left.0);
                     return left;
                 }
-                if l.is_nullable() {
-                    //println!("**redundant choice construction? l => nullable");
+                if !matches!(l, Pat::Choice(..)) && !matches!(r, Pat::Choice(..)) {
+                    // Both are single non-Choice leaves and are already distinct —
+                    // no deduplication is possible, take the fast path.
+                    return self.push(Pat::Choice(left, right, l.is_nullable() || r.is_nullable()));
                 }
-                if r.is_nullable() {
-                    //println!("**redundant choice construction? r => nullable");
+                // At least one side is a Choice tree: eliminate duplicate leaves to
+                // prevent polynomial growth when the same sub-pattern appears via
+                // multiple derivative paths (e.g. interleaved alternatives sharing a
+                // common attribute).
+                let inner = self.inner.borrow();
+                let mut left_set = HashSet::new();
+                Self::collect_leaves_into_set(left, &inner, &mut left_set);
+                let mut new_right = Vec::new();
+                Self::collect_new_leaves(right, &inner, &left_set, &mut new_right);
+                drop(inner);
+                if new_right.is_empty() {
+                    return left;
                 }
-                self.push(Pat::Choice(left, right, l.is_nullable() || r.is_nullable()))
+                new_right.into_iter().fold(left, |acc, r| {
+                    let nullable = self.patt(acc).is_nullable() || self.patt(r).is_nullable();
+                    self.push(Pat::Choice(acc, r, nullable))
+                })
+            }
+        }
+    }
+
+    // Traverses a Choice tree and inserts every leaf PatId into `set`.
+    // Using an accumulator avoids the O(N²) Vec allocations of a naive recursive approach.
+    fn collect_leaves_into_set(id: PatId, inner: &Inner, set: &mut HashSet<PatId>) {
+        match &inner.patterns[id.0 as usize] {
+            Pat::Choice(l, r, _) => {
+                Self::collect_leaves_into_set(*l, inner, set);
+                Self::collect_leaves_into_set(*r, inner, set);
+            }
+            _ => {
+                set.insert(id);
+            }
+        }
+    }
+
+    // Traverses a Choice tree and appends to `out` any leaf PatId not present in `left_set`.
+    fn collect_new_leaves(
+        id: PatId,
+        inner: &Inner,
+        left_set: &HashSet<PatId>,
+        out: &mut Vec<PatId>,
+    ) {
+        match &inner.patterns[id.0 as usize] {
+            Pat::Choice(l, r, _) => {
+                Self::collect_new_leaves(*l, inner, left_set, out);
+                Self::collect_new_leaves(*r, inner, left_set, out);
+            }
+            _ => {
+                if !left_set.contains(&id) {
+                    out.push(id);
+                }
             }
         }
     }
@@ -1916,7 +1953,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "we need some optimisations in place to avoid exponential blow-up"]
     fn blowup() {
         // https://relaxng.org/jclark/derivative.html#Avoiding_exponential_blowup
         Fixture::correct(

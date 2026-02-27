@@ -20,7 +20,12 @@ assert_matches = "1.3.0"
 roxmltree = "0.21.1"
 codemap = "0.1"
 codemap-diagnostic = "0.1"
+criterion = "0.5"
 
 [[test]]
 harness = false
 name = "spectest"
+
+[[bench]]
+name = "bench"
+harness = false

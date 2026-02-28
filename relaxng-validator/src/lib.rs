@@ -76,6 +76,17 @@ struct Inner {
     memo: HashMap<Pat, PatId>,
     patterns: Vec<Pat>,
     refs: HashMap<*const Option<relaxng_model::model::DefineRule>, PatId>,
+
+    // Our implementation of https://relaxng.org/jclark/derivative.html#Memoization
+
+    // Persistent cross-call memo: (input PatId, local-name, namespace-uri) -> result PatId
+    start_tag_open_cache: HashMap<(PatId, Box<str>, Option<Box<str>>), PatId>,
+    // Persistent cross-call memo: input PatId -> result PatId
+    start_tag_close_cache: HashMap<PatId, PatId>,
+    // Persistent cross-call memo: input PatId -> result PatId (Vec indexed by PatId.0)
+    mixed_text_cache: Vec<Option<PatId>>,
+    // Persistent cross-call memo: (input PatId, local-name, namespace-uri) -> result PatId
+    start_att_cache: HashMap<(PatId, Box<str>, Option<Box<str>>), PatId>,
 }
 #[derive(Default)]
 struct Schema {
@@ -719,11 +730,14 @@ impl<'a> Validator<'a> {
             }
             Token::ElementEnd { end, span: _ } => {
                 match end {
-                    ElementEnd::Open => {
-                        Self::close_element_start(&self.stack, &mut self.schema, evt, pat)?
-                    }
+                    ElementEnd::Open => Self::close_element_start(
+                        &self.stack,
+                        &mut self.schema,
+                        evt,
+                        self.current_step,
+                    )?,
                     ElementEnd::Close(_, _) => {
-                        let next_pat = if self.last_was_start_element {
+                        let next_pid = if self.last_was_start_element {
                             // The last event was XmlEvent::StartElement with no child elements or child
                             // text nodes.
                             //
@@ -734,16 +748,19 @@ impl<'a> Validator<'a> {
                             //
                             // This fake text node is required for a pattern like 'element foo { token }'
                             // to match the input '<foo/>' or '<foo></foo>'
-                            let p = Self::text_deriv(pat, &mut self.schema, "");
-                            self.schema.patt(p)
+                            Self::text_deriv(pat, &mut self.schema, "")
                         } else {
-                            pat
+                            self.current_step
                         };
-                        Self::end_tag_deriv(next_pat, &mut self.schema)
+                        Self::end_tag_deriv(next_pid, &mut self.schema)
                     }
                     ElementEnd::Empty => {
-                        let next_id =
-                            Self::close_element_start(&self.stack, &mut self.schema, evt, pat)?;
+                        let next_id = Self::close_element_start(
+                            &self.stack,
+                            &mut self.schema,
+                            evt,
+                            self.current_step,
+                        )?;
                         let pat = self.schema.patt(next_id);
                         // The last event was XmlEvent::StartElement with no child elements or child
                         // text nodes.
@@ -756,12 +773,18 @@ impl<'a> Validator<'a> {
                         // This fake text node is required for a pattern like 'element foo { token }'
                         // to match the input '<foo/>' or '<foo></foo>'
                         let p = Self::text_deriv(pat, &mut self.schema, "");
-                        let next_pat = self.schema.patt(p);
-                        Self::end_tag_deriv(next_pat, &mut self.schema)
+                        Self::end_tag_deriv(p, &mut self.schema)
                     }
                 }
             }
-            Token::Cdata { text, span: _ } => Self::text_deriv(pat, &mut self.schema, &text),
+            Token::Cdata { text, span: _ } => {
+                let mixed = Self::mixed_text_deriv(self.current_step, &mut self.schema);
+                if mixed == self.current_step {
+                    self.current_step
+                } else {
+                    Self::text_deriv(pat, &mut self.schema, &text)
+                }
+            }
             Token::Text { text } => {
                 let mut buffer = String::new();
                 for val in parse_entities(text.start(), text.as_str()) {
@@ -803,12 +826,19 @@ impl<'a> Validator<'a> {
                 } else {
                     &buffer[..]
                 };
-                let next_id = Self::text_deriv(pat, &mut self.schema, data);
-                let next_pat = self.schema.patt(next_id);
-                if let Pat::NotAllowed = next_pat {
-                    return Err(ValidatorError::NotAllowed(Token::Text { text }));
+                // Fast path: if mixed_text_deriv returns the same PatId, the pattern is a
+                // text fixed-point (e.g. After(Text, cont)) and text_deriv is a no-op.
+                let mixed = Self::mixed_text_deriv(self.current_step, &mut self.schema);
+                if mixed == self.current_step {
+                    self.current_step
+                } else {
+                    let next_id = Self::text_deriv(pat, &mut self.schema, data);
+                    let next_pat = self.schema.patt(next_id);
+                    if let Pat::NotAllowed = next_pat {
+                        return Err(ValidatorError::NotAllowed(Token::Text { text }));
+                    }
+                    next_id
                 }
-                next_id
             }
             Token::EntityDeclaration {
                 name,
@@ -851,10 +881,10 @@ impl<'a> Validator<'a> {
         stack: &ElementStack<'b>,
         schema: &mut Schema,
         evt: Token<'b>,
-        pat: Pat,
+        pat_id: PatId,
     ) -> Result<PatId, ValidatorError<'b>> {
         let name = stack.current_element()?;
-        let next_pat = Self::start_tag_open_deriv(pat, schema, name);
+        let next_pat = Self::start_tag_open_deriv(pat_id, schema, name);
         // TODO: refactor early-returns
         let next_pat = match schema.patt(next_pat) {
             Pat::NotAllowed => {
@@ -868,8 +898,8 @@ impl<'a> Validator<'a> {
                 let attributes: Vec<_> = stack.current_attributes()?;
                 let mut pat = next_pat;
                 for att in attributes {
-                    let mut memo = HashMap::new();
-                    pat = Self::att_deriv(&mut memo, pat, schema, att);
+                    let mid = Self::start_att_deriv(pat, schema, att.name);
+                    pat = Self::att_value_deriv(mid, schema, att.value.as_str());
                     if let Pat::NotAllowed = schema.patt(pat) {
                         return Err(ValidatorError::NotAllowed(Token::Attribute {
                             prefix: att.name.namespace_uri.unwrap_or_else(|| StrSpan::from("")),
@@ -1013,62 +1043,128 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn start_tag_open_deriv(current: Pat, schema: &mut Schema, name: QualifiedName<'a>) -> PatId {
-        match current {
+    // Per https://relaxng.org/jclark/derivative.html — text nodes in mixed content can only
+    // match Text patterns (RELAX NG spec §7.2).  This lets us memoize on PatId alone, ignoring
+    // the actual text value.  Returns the same PatId for patterns where text is a fixed-point
+    // (e.g. After(Text, cont)), enabling a fast skip of text_deriv at call sites.
+    fn mixed_text_deriv(pid: PatId, schema: &mut Schema) -> PatId {
+        let idx = pid.0 as usize;
+        {
+            let inner = schema.inner.borrow();
+            if let Some(Some(cached)) = inner.mixed_text_cache.get(idx) {
+                return *cached;
+            }
+        }
+        let pat = schema.patt(pid);
+        let result = match pat {
+            Pat::Choice(p1, p2, _) => {
+                let c1 = Self::mixed_text_deriv(p1, schema);
+                let c2 = Self::mixed_text_deriv(p2, schema);
+                schema.choice(c1, c2)
+            }
+            Pat::Interleave(p1, p2, _) => {
+                let d1 = Self::mixed_text_deriv(p1, schema);
+                let c1 = schema.interleave(d1, p2);
+                let d2 = Self::mixed_text_deriv(p2, schema);
+                let c2 = schema.interleave(p1, d2);
+                schema.choice(c1, c2)
+            }
+            Pat::After(p1, p2) => {
+                let d = Self::mixed_text_deriv(p1, schema);
+                schema.after(d, p2)
+            }
+            Pat::Group(p1, p2, _) => {
+                let nullable = schema.patt(p1).is_nullable();
+                let d1 = Self::mixed_text_deriv(p1, schema);
+                let p = schema.group(d1, p2);
+                if nullable {
+                    let d2 = Self::mixed_text_deriv(p2, schema);
+                    schema.choice(p, d2)
+                } else {
+                    p
+                }
+            }
+            Pat::OneOrMore(p, _) => {
+                let d = Self::mixed_text_deriv(p, schema);
+                schema.group(d, schema.choice(schema.one_or_more(p), schema.empty()))
+            }
+            Pat::Text => pid,
+            _ => schema.not_allowed(),
+        };
+        let mut inner = schema.inner.borrow_mut();
+        if idx >= inner.mixed_text_cache.len() {
+            inner.mixed_text_cache.resize(idx + 1, None);
+        }
+        inner.mixed_text_cache[idx] = Some(result);
+        result
+    }
+
+    fn start_tag_open_deriv(pid: PatId, schema: &mut Schema, name: QualifiedName<'a>) -> PatId {
+        let local_key: Box<str> = name.local_name.as_str().into();
+        let ns_key: Option<Box<str>> = name.namespace_uri.map(|s| s.as_str().into());
+
+        // Cache check (borrow released before any mutation)
+        {
+            let inner = schema.inner.borrow();
+            if let Some(&cached) =
+                inner
+                    .start_tag_open_cache
+                    .get(&(pid, local_key.clone(), ns_key.clone()))
+            {
+                return cached;
+            }
+        }
+
+        let current = schema.patt(pid);
+        let result = match current {
             Pat::Choice(l, r, _) => {
-                let left = schema.patt(l);
-                let right = schema.patt(r);
-                let d1 = Self::start_tag_open_deriv(left, schema, name);
-                let d2 = Self::start_tag_open_deriv(right, schema, name);
+                let d1 = Self::start_tag_open_deriv(l, schema, name);
+                let d2 = Self::start_tag_open_deriv(r, schema, name);
                 schema.choice(d1, d2)
             }
-            Pat::OneOrMore(pid, _) => {
-                let p = schema.patt(pid);
-                let deriv = Self::start_tag_open_deriv(p, schema, name);
+            Pat::OneOrMore(inner_pid, _) => {
+                let deriv = Self::start_tag_open_deriv(inner_pid, schema, name);
                 Self::apply_after(schema.patt(deriv), schema, |pat, schema| {
-                    schema.group(pat, schema.choice(schema.one_or_more(pid), schema.empty()))
+                    schema.group(
+                        pat,
+                        schema.choice(schema.one_or_more(inner_pid), schema.empty()),
+                    )
                 })
             }
             Pat::Interleave(pid1, pid2, _) => {
-                let p1 = schema.patt(pid1);
-                let p2 = schema.patt(pid2);
-                let d1 = Self::start_tag_open_deriv(p1, schema, name);
+                let d1 = Self::start_tag_open_deriv(pid1, schema, name);
                 let c1 = Self::apply_after(schema.patt(d1), schema, |pat, schema| {
                     schema.interleave(pat, pid2)
                 });
-                let d2 = Self::start_tag_open_deriv(p2, schema, name);
+                let d2 = Self::start_tag_open_deriv(pid2, schema, name);
                 let c2 = Self::apply_after(schema.patt(d2), schema, |pat, schema| {
                     schema.interleave(pid1, pat)
                 });
                 schema.choice(c1, c2)
             }
             Pat::Group(pid1, pid2, _) => {
-                let p1 = schema.patt(pid1);
-                let nullable = p1.is_nullable();
-                let _p2 = schema.patt(pid2);
-                let d1 = Self::start_tag_open_deriv(p1, schema, name);
+                let nullable = schema.patt(pid1).is_nullable();
+                let d1 = Self::start_tag_open_deriv(pid1, schema, name);
                 let x = Self::apply_after(schema.patt(d1), schema, |pat, schema| {
                     schema.group(pat, pid2)
                 });
                 if nullable {
-                    let p2 = schema.patt(pid2);
-                    let d2 = Self::start_tag_open_deriv(p2, schema, name);
+                    let d2 = Self::start_tag_open_deriv(pid2, schema, name);
                     schema.choice(x, d2)
                 } else {
                     x
                 }
             }
-            Pat::Element(ref nc, pat) => {
+            Pat::Element(ref nc, inner_pat) => {
                 if contains(nc, name) {
                     let empty = schema.empty();
-                    schema.after(pat, empty)
+                    schema.after(inner_pat, empty)
                 } else {
                     schema.not_allowed()
                 }
             }
             Pat::After(pid1, pid2) => {
-                let p1 = schema.patt(pid1);
-                let d = Self::start_tag_open_deriv(p1, schema, name);
+                let d = Self::start_tag_open_deriv(pid1, schema, name);
                 Self::apply_after(schema.patt(d), schema, |pat, schema| {
                     schema.after(pat, pid2)
                 })
@@ -1083,6 +1179,113 @@ impl<'a> Validator<'a> {
             | Pat::DatatypeExcept(_, _)
             | Pat::List(_) => schema.not_allowed(),
             Pat::Placeholder(name) => unreachable!("Placeholder {:?}", name),
+        };
+
+        schema
+            .inner
+            .borrow_mut()
+            .start_tag_open_cache
+            .insert((pid, local_key, ns_key), result);
+        result
+    }
+
+    fn start_att_deriv(pid: PatId, schema: &mut Schema, name: QualifiedName<'a>) -> PatId {
+        let local_key: Box<str> = name.local_name.as_str().into();
+        let ns_key: Option<Box<str>> = name.namespace_uri.map(|s| s.as_str().into());
+
+        {
+            let inner = schema.inner.borrow();
+            if let Some(&cached) =
+                inner
+                    .start_att_cache
+                    .get(&(pid, local_key.clone(), ns_key.clone()))
+            {
+                return cached;
+            }
+        }
+
+        let current = schema.patt(pid);
+        let result = match current {
+            Pat::Choice(l, r, _) => {
+                let d1 = Self::start_att_deriv(l, schema, name);
+                let d2 = Self::start_att_deriv(r, schema, name);
+                schema.choice(d1, d2)
+            }
+            Pat::OneOrMore(inner_pid, _) => {
+                let deriv = Self::start_att_deriv(inner_pid, schema, name);
+                Self::apply_after(schema.patt(deriv), schema, |pat, schema| {
+                    schema.group(
+                        pat,
+                        schema.choice(schema.one_or_more(inner_pid), schema.empty()),
+                    )
+                })
+            }
+            Pat::Interleave(pid1, pid2, _) => {
+                let d1 = Self::start_att_deriv(pid1, schema, name);
+                let c1 = Self::apply_after(schema.patt(d1), schema, |pat, schema| {
+                    schema.interleave(pat, pid2)
+                });
+                let d2 = Self::start_att_deriv(pid2, schema, name);
+                let c2 = Self::apply_after(schema.patt(d2), schema, |pat, schema| {
+                    schema.interleave(pid1, pat)
+                });
+                schema.choice(c1, c2)
+            }
+            Pat::Group(pid1, pid2, _) => {
+                // Attributes may appear in any order, so unlike start_tag_open_deriv
+                // we always try both branches unconditionally.
+                let d1 = Self::start_att_deriv(pid1, schema, name);
+                let x = Self::apply_after(schema.patt(d1), schema, |pat, schema| {
+                    schema.group(pat, pid2)
+                });
+                let d2 = Self::start_att_deriv(pid2, schema, name);
+                let y = Self::apply_after(schema.patt(d2), schema, |pat, schema| {
+                    schema.group(pid1, pat)
+                });
+                schema.choice(x, y)
+            }
+            Pat::Attribute(ref nc, val_pat) => {
+                if contains(nc, name) {
+                    let empty = schema.empty();
+                    schema.after(val_pat, empty)
+                } else {
+                    schema.not_allowed()
+                }
+            }
+            Pat::After(pid1, pid2) => {
+                let d = Self::start_att_deriv(pid1, schema, name);
+                Self::apply_after(schema.patt(d), schema, |pat, schema| {
+                    schema.after(pat, pid2)
+                })
+            }
+            _ => schema.not_allowed(),
+        };
+
+        schema
+            .inner
+            .borrow_mut()
+            .start_att_cache
+            .insert((pid, local_key, ns_key), result);
+        result
+    }
+
+    fn att_value_deriv(pid: PatId, schema: &mut Schema, value: &str) -> PatId {
+        let pat = schema.patt(pid);
+        match pat {
+            Pat::After(val_pat, cont) => {
+                let vp = schema.patt(val_pat);
+                if Self::value_match(vp, schema, value) {
+                    cont
+                } else {
+                    schema.not_allowed()
+                }
+            }
+            Pat::Choice(p1, p2, _) => {
+                let c1 = Self::att_value_deriv(p1, schema, value);
+                let c2 = Self::att_value_deriv(p2, schema, value);
+                schema.choice(c1, c2)
+            }
+            _ => schema.not_allowed(),
         }
     }
 
@@ -1111,61 +1314,6 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn att_deriv(
-        memo: &mut HashMap<PatId, PatId>,
-        pat: PatId,
-        schema: &mut Schema,
-        att: Attr,
-    ) -> PatId {
-        if let Some(result) = memo.get(&pat) {
-            return *result;
-        }
-        //let mut o = io::stdout();
-        //println!("Lets see,");
-        //schema.dumpy(pat, &mut o).unwrap();
-        let v = match schema.patt(pat) {
-            Pat::After(p1, p2) => {
-                let d = Self::att_deriv(memo, p1, schema, att);
-                schema.after(d, p2)
-            }
-            Pat::Choice(p1, p2, _) => {
-                let c1 = Self::att_deriv(memo, p1, schema, att);
-                let c2 = Self::att_deriv(memo, p2, schema, att);
-                schema.choice(c1, c2)
-            }
-            Pat::Group(p1, p2, _) => {
-                let d1 = Self::att_deriv(memo, p1, schema, att);
-                let s1 = schema.group(d1, p2);
-                let d2 = Self::att_deriv(memo, p2, schema, att);
-                let s2 = schema.group(p1, d2);
-                schema.choice(s1, s2)
-            }
-            Pat::Interleave(p1, p2, _) => {
-                let d1 = Self::att_deriv(memo, p1, schema, att);
-                let i1 = schema.interleave(d1, p2);
-                let d2 = Self::att_deriv(memo, p2, schema, att);
-                let i2 = schema.interleave(p1, d2);
-                schema.choice(i1, i2)
-            }
-            Pat::OneOrMore(p, _) => {
-                let s1 = Self::att_deriv(memo, p, schema, att);
-                let s2 = schema.choice(pat, schema.empty());
-                schema.group(s1, s2)
-            }
-            Pat::Attribute(ref nc, p) => {
-                let att_pat = schema.patt(p);
-                if contains(nc, att.name) && Self::value_match(att_pat, schema, &att.value) {
-                    schema.empty()
-                } else {
-                    schema.not_allowed()
-                }
-            }
-            _ => schema.not_allowed(),
-        };
-        memo.insert(pat, v);
-        v
-    }
-
     fn value_match(pat: Pat, schema: &mut Schema, val: &str) -> bool {
         if pat.is_nullable() && is_whitespace_str(val) {
             true
@@ -1176,8 +1324,14 @@ impl<'a> Validator<'a> {
     }
 
     fn start_tag_close_deriv(pid: PatId, schema: &mut Schema) -> PatId {
+        {
+            let inner = schema.inner.borrow();
+            if let Some(&cached) = inner.start_tag_close_cache.get(&pid) {
+                return cached;
+            }
+        }
         let pat = schema.patt(pid);
-        match pat {
+        let result = match pat {
             Pat::After(p1, p2) => {
                 let a1 = Self::start_tag_close_deriv(p1, schema);
                 schema.after(a1, p2)
@@ -1203,21 +1357,29 @@ impl<'a> Validator<'a> {
             }
             Pat::Attribute(_, _) => schema.not_allowed(),
             _ => pid,
-        }
+        };
+        schema
+            .inner
+            .borrow_mut()
+            .start_tag_close_cache
+            .insert(pid, result);
+        result
     }
 
-    fn end_tag_deriv(pat: Pat, schema: &mut Schema) -> PatId {
+    // Note: the spec lists endTagDeriv as efficiently memoizable, but benchmarking showed
+    // that both HashMap and Vec caches regressed performance by 7-15%. The function body
+    // is only ~3 ops (RefCell borrow + array index + match), so the RefCell borrow overhead
+    // of any cache lookup exceeds the savings from avoiding recomputation.
+    fn end_tag_deriv(pid: PatId, schema: &mut Schema) -> PatId {
+        let pat = schema.patt(pid);
         match pat {
             Pat::Choice(p1, p2, _) => {
-                let p1 = schema.patt(p1);
-                let p2 = schema.patt(p2);
                 let c1 = Self::end_tag_deriv(p1, schema);
                 let c2 = Self::end_tag_deriv(p2, schema);
                 schema.choice(c1, c2)
             }
             Pat::After(p1, p2) => {
-                let p1 = schema.patt(p1);
-                if p1.is_nullable() {
+                if schema.patt(p1).is_nullable() {
                     p2
                 } else {
                     schema.not_allowed()

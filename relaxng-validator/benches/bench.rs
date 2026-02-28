@@ -20,7 +20,8 @@ start = element catalog {
          | element property {
              attribute key { text },
              text
-           })*
+           })*,
+        element note { attribute lang { text }, attribute priority { text }, text }*
     }+
 }
 "#;
@@ -53,6 +54,12 @@ fn make_document(items: usize) -> String {
         }
         for p in 0..(i % 3) {
             doc.push_str(&format!(r#"<property key="prop-{p}">value-{p}</property>"#));
+        }
+        for n in 0..50usize {
+            doc.push_str(&format!(
+                "<note lang=\"en-{n}\" priority=\"{}\">Note {n} for item {i}</note>",
+                n % 3
+            ));
         }
         doc.push_str("</item>");
     }

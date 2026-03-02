@@ -1808,7 +1808,7 @@ impl<FS: Files> Compiler<FS> {
             DatatypeName::Token => DatatypeName::Token,
             DatatypeName::CName(QName(namespace, name)) => DatatypeName::CName(QName(
                 NcName(
-                    0..0,
+                    namespace.0.clone(),
                     ctx.try_datatype_uri_for_prefix(namespace)?.to_string(),
                 ),
                 NcName(name.0.clone(), name.1.clone()),

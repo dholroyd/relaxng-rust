@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+  <start>
+    <element name="catalog">
+      <attribute name="version"><text/></attribute>
+      <oneOrMore>
+        <element name="item">
+          <attribute name="id"><text/></attribute>
+          <attribute name="type"><text/></attribute>
+          <attribute name="category"><text/></attribute>
+          <element name="name"><text/></element>
+          <optional>
+            <element name="description"><text/></element>
+          </optional>
+          <zeroOrMore>
+            <choice>
+              <element name="tag"><text/></element>
+              <element name="property">
+                <attribute name="key"><text/></attribute>
+                <text/>
+              </element>
+            </choice>
+          </zeroOrMore>
+        </element>
+      </oneOrMore>
+    </element>
+  </start>
+</grammar>

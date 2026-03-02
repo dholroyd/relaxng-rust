@@ -1,0 +1,15 @@
+start = element catalog {
+    attribute version { text },
+    element item {
+        attribute id { text },
+        attribute type { text },
+        attribute category { text },
+        element name { text },
+        element description { text }?,
+        (element tag { text }
+         | element property {
+             attribute key { text },
+             text
+           })*
+    }+
+}

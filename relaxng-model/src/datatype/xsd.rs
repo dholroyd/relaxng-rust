@@ -36,14 +36,36 @@ pub enum XsdDatatypeValues {
     QName(QNameVal),
 }
 
+impl XsdDatatypeValues {
+    /// Validate a value with namespace context for QName resolution.
+    /// `default_ns` is the default namespace for unprefixed names in the document.
+    /// `lookup_ns` resolves prefixes to namespace URIs in the document context.
+    pub fn is_valid_with_ns(
+        &self,
+        value: &str,
+        default_ns: &str,
+        lookup_ns: impl Fn(&str) -> Option<String>,
+    ) -> bool {
+        match self {
+            XsdDatatypeValues::String(s) => s == value,
+            XsdDatatypeValues::Token(s) => s == &normalize_whitespace(value),
+            XsdDatatypeValues::QName(v) => QNameVal::resolve(value, default_ns, lookup_ns)
+                .map(|resolved| &resolved == v)
+                .unwrap_or(false),
+        }
+    }
+}
+
 impl super::Datatype for XsdDatatypeValues {
     fn is_valid(&self, value: &str) -> bool {
         match self {
             XsdDatatypeValues::String(s) => s == value,
             XsdDatatypeValues::Token(s) => s == &normalize_whitespace(value),
-            XsdDatatypeValues::QName(v) => QNameVal::try_from_val(value)
-                .map(|value| &value == v)
-                .unwrap_or(false),
+            XsdDatatypeValues::QName(_) => {
+                // QName comparison requires namespace context; fall back to false
+                // when called without context. Use is_valid_with_ns instead.
+                false
+            }
         }
     }
 }
@@ -750,10 +772,12 @@ impl super::DatatypeCompiler for Compiler {
         ctx: &Context,
         datatype_name: &types::DatatypeName,
         value: &str,
+        ns: Option<&str>,
+        ns_bindings: &[(String, String)],
     ) -> Result<Self::DTValue, Self::Error> {
         match datatype_name {
             DatatypeName::CName(types::QName(_namespace_uri, name)) => {
-                self.compile_value(ctx, &name.0, &name.1, value)
+                self.compile_value(ctx, &name.0, &name.1, value, ns, ns_bindings)
             }
             DatatypeName::NamespacedName(_) => {
                 unimplemented!()
@@ -1061,18 +1085,30 @@ impl Compiler {
         span: &types::Span,
         name: &str,
         value: &str,
+        ns: Option<&str>,
+        ns_bindings: &[(String, String)],
     ) -> Result<XsdDatatypeValues, XsdDatatypeError> {
         match name {
             "string" => Ok(XsdDatatypeValues::String(value.to_string())),
             "token" => Ok(XsdDatatypeValues::Token(normalize_whitespace(value))),
-            "QName" => Ok(XsdDatatypeValues::QName(
-                QNameVal::try_from_val(value).map_err(|_| {
+            "QName" => {
+                // Use the ns attribute from <value> if present, otherwise fall back to context
+                let default_ns = ns.unwrap_or(ctx.default_namespace_uri()).to_string();
+                let qname = QNameVal::resolve(value, &default_ns, |prefix| {
+                    // First check ns_bindings from the schema element (XML syntax),
+                    // then fall back to context namespace declarations (compact syntax)
+                    ns_bindings.iter()
+                        .find(|(p, _)| p == prefix)
+                        .map(|(_, uri)| uri.clone())
+                        .or_else(|| ctx.namespace_uri_for_prefix_str(prefix).map(|s| s.to_string()))
+                }).map_err(|_| {
                     XsdDatatypeError::InvalidValueOfType {
                         span: ctx.convert_span(span),
                         type_name: "QName",
                     }
-                })?,
-            )),
+                })?;
+                Ok(XsdDatatypeValues::QName(qname))
+            }
             _ => unimplemented!("{:?} not yet supported", name),
         }
     }
@@ -2177,25 +2213,28 @@ impl Compiler {
     }
 }
 
-trait TryFromVal: Sized {
-    fn try_from_val(value: &str) -> Result<Self, ()>;
+/// A resolved QName: (namespace_uri, localname)
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct QNameVal {
+    pub namespace_uri: String,
+    pub localname: String,
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub struct QNameVal(String);
-impl TryFromVal for QNameVal {
-    fn try_from_val(val: &str) -> Result<Self, ()> {
+impl QNameVal {
+    /// Parse a QName string and resolve its prefix using the given namespace lookup.
+    /// For unprefixed names, `default_ns` is used as the namespace URI.
+    pub fn resolve(val: &str, default_ns: &str, lookup_ns: impl Fn(&str) -> Option<String>) -> Result<Self, ()> {
         if let Some(pos) = val.find(':') {
             let prefix = &val[0..pos];
             let localname = &val[pos + 1..];
             if is_valid_ncname(prefix) && is_valid_ncname(localname) {
-                unimplemented!("Need to be able to look up prefix {:?}", prefix);
-            //Ok(QNameVal(val.to_string()))
+                let ns = lookup_ns(prefix).ok_or(())?;
+                Ok(QNameVal { namespace_uri: ns, localname: localname.to_string() })
             } else {
                 Err(())
             }
         } else if is_valid_ncname(val) {
-            Ok(QNameVal(val.to_string()))
+            Ok(QNameVal { namespace_uri: default_ns.to_string(), localname: val.to_string() })
         } else {
             Err(())
         }

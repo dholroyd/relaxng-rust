@@ -488,6 +488,11 @@ fn value(node: Node) -> Result<DatatypeValuePattern> {
         };
         Literal(node.range(), vec![seg])
     };
+    let ns = get_ns_att(node).map(|a| a.value().to_string());
+    // Capture in-scope namespace prefix bindings for resolving prefixed values (e.g., QNames)
+    let ns_bindings: Vec<(String, String)> = node.namespaces()
+        .filter_map(|n| n.name().map(|prefix| (prefix.to_string(), n.uri().to_string())))
+        .collect();
     Ok(DatatypeValuePattern(
         node.range(),
         type_name.map(|name| {
@@ -497,6 +502,8 @@ fn value(node: Node) -> Result<DatatypeValuePattern> {
             })
         }),
         val,
+        ns,
+        ns_bindings,
     ))
 }
 

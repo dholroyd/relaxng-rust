@@ -1843,7 +1843,7 @@ impl<FS: Files> Compiler<FS> {
         let span = Some(ctx.convert_span(&datatype_value.0));
         let datatype = self
             .datatype_compiler
-            .datatype_value(ctx, &name, &datatype_value.2.as_string_value())
+            .datatype_value(ctx, &name, &datatype_value.2.as_string_value(), datatype_value.3.as_deref(), &datatype_value.4)
             .map_err(RelaxError::DatatypeError)?;
         Ok(Pattern::DatatypeValue { datatype, span })
     }

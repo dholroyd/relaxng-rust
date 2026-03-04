@@ -26,6 +26,8 @@ pub(crate) trait DatatypeCompiler {
         ctx: &Context,
         name: &types::DatatypeName,
         value: &str,
+        ns: Option<&str>,
+        ns_bindings: &[(String, String)],
     ) -> Result<Self::DTValue, Self::Error>;
     fn datatype_name(
         &self,
@@ -39,6 +41,19 @@ pub(crate) trait DatatypeCompiler {
 pub enum DatatypeValues {
     Relax(relax::BuiltinDatatypeValue),
     Xsd(xsd::XsdDatatypeValues),
+}
+impl DatatypeValues {
+    pub fn is_valid_with_ns(
+        &self,
+        value: &str,
+        default_ns: &str,
+        lookup_ns: impl Fn(&str) -> Option<String>,
+    ) -> bool {
+        match self {
+            DatatypeValues::Relax(relax) => relax.is_valid(value),
+            DatatypeValues::Xsd(xsd) => xsd.is_valid_with_ns(value, default_ns, lookup_ns),
+        }
+    }
 }
 impl Datatype for DatatypeValues {
     fn is_valid(&self, value: &str) -> bool {
@@ -87,11 +102,13 @@ impl DatatypeCompiler for Compiler {
         ctx: &Context,
         datatype_name: &types::DatatypeName,
         value: &str,
+        ns: Option<&str>,
+        ns_bindings: &[(String, String)],
     ) -> Result<Self::DTValue, Self::Error> {
         match datatype_name {
             types::DatatypeName::String | types::DatatypeName::Token => self
                 .relax
-                .datatype_value(ctx, datatype_name, value)
+                .datatype_value(ctx, datatype_name, value, ns, ns_bindings)
                 .map(DatatypeValues::Relax)
                 .map_err(Errors::Relax),
             types::DatatypeName::CName(types::QName(namespace_uri, _)) => self.dt_value(
@@ -100,10 +117,12 @@ impl DatatypeCompiler for Compiler {
                 value,
                 &namespace_uri.0,
                 &namespace_uri.1,
+                ns,
+                ns_bindings,
             ),
             DatatypeName::NamespacedName(NamespacedName { namespace_uri, .. }) => {
-                let ns = &namespace_uri.as_string_value()[..];
-                self.dt_value(ctx, datatype_name, value, &namespace_uri.0, ns)
+                let ns_str = &namespace_uri.as_string_value()[..];
+                self.dt_value(ctx, datatype_name, value, &namespace_uri.0, ns_str, ns, ns_bindings)
             }
         }
     }
@@ -165,16 +184,18 @@ impl Compiler {
         value: &str,
         ns_span: &types::Span,
         ns: &str,
+        value_ns: Option<&str>,
+        ns_bindings: &[(String, String)],
     ) -> Result<DatatypeValues, Errors> {
         match ns {
             "" => self
                 .relax
-                .datatype_value(ctx, datatype_name, value)
+                .datatype_value(ctx, datatype_name, value, value_ns, ns_bindings)
                 .map(DatatypeValues::Relax)
                 .map_err(Errors::Relax),
             xsd::NAMESPACE_URI => self
                 .xsd
-                .datatype_value(ctx, datatype_name, value)
+                .datatype_value(ctx, datatype_name, value, value_ns, ns_bindings)
                 .map(DatatypeValues::Xsd)
                 .map_err(Errors::Xsd),
             _ => Err(Errors::UnsupportedDatatypeLibrary {

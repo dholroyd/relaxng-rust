@@ -114,6 +114,26 @@ struct Schema {
     inner: RefCell<Inner>,
     coverage: Option<Box<[u64]>>,
     compile_time_count: u16,
+    /// Namespace context for QName resolution during text_deriv.
+    /// Set by the validator before calls to text_deriv.
+    ns_context: Option<NsContext>,
+}
+
+/// Captured namespace context for resolving prefixes in document text.
+#[derive(Clone)]
+struct NsContext {
+    default_ns: String,
+    bindings: Vec<(String, String)>,
+}
+impl NsContext {
+    fn lookup(&self, prefix: &str) -> Option<String> {
+        if prefix == "xml" {
+            return Some("http://www.w3.org/XML/1998/namespace".to_string());
+        }
+        self.bindings.iter().rev()
+            .find(|(p, _)| p == prefix)
+            .map(|(_, uri)| uri.clone())
+    }
 }
 /// Build-time state for compiling a relaxng-model schema into the internal
 /// pattern representation.  Uses `Vec<Option<Pat>>` so that recursive `Ref`
@@ -1138,6 +1158,11 @@ impl<'a> Validator<'a> {
     }
 
     fn validate(&mut self, evt: Token<'a>) -> Result<(), ValidatorError<'a>> {
+        self.schema.ns_context = if self.stack.elements.is_empty() {
+            None
+        } else {
+            Some(self.stack.capture_ns_context())
+        };
         let new = match evt {
             Token::EmptyDtd { .. }
             | Token::Comment { .. }
@@ -1421,7 +1446,13 @@ impl<'a> Validator<'a> {
                 }
             }
             Pat::DatatypeValue(dt) => {
-                if dt.is_valid(text) {
+                let valid = if let Some(ref ns_ctx) = schema.ns_context {
+                    let ns_ctx = ns_ctx.clone();
+                    dt.is_valid_with_ns(text, &ns_ctx.default_ns, |p| ns_ctx.lookup(p))
+                } else {
+                    dt.is_valid(text)
+                };
+                if valid {
                     schema.mark_covered(pid);
                     schema.empty()
                 } else {
@@ -2173,6 +2204,23 @@ impl<'a> ElementStack<'a> {
             .iter()
             .rev()
             .find_map(|elem| elem.lookup_namespace_uri(prefix))
+    }
+
+    fn capture_ns_context(&self) -> NsContext {
+        let mut default_ns = String::new();
+        let mut bindings = Vec::new();
+        for elem in &self.elements {
+            for ns in &elem.namespaces {
+                if ns.prefix.as_str().is_empty() {
+                    // Default namespace (xmlns="...")
+                    default_ns = ns.namespace_uri.as_str().to_string();
+                } else {
+                    // Prefixed namespace (xmlns:prefix="...")
+                    bindings.push((ns.prefix.as_str().to_string(), ns.namespace_uri.as_str().to_string()));
+                }
+            }
+        }
+        NsContext { default_ns, bindings }
     }
 
     fn resolve_element_namespace(

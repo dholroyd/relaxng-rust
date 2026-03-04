@@ -563,7 +563,7 @@ fn datatype_value_pattern(input: Span) -> IResult<Span, DatatypeValuePattern> {
     );
 
     let mut parser = map(parse, |(start, name, _, value, end)| {
-        DatatypeValuePattern(span(start, end), name, value)
+        DatatypeValuePattern(span(start, end), name, value, None, vec![])
     });
 
     parser.parse(input)
@@ -1571,6 +1571,8 @@ mod test {
                         body: "preserve".to_string(),
                     }],
                 ),
+                None,
+                vec![],
             )),
         )
     }

@@ -1,11 +1,38 @@
 use relaxng_model::datatype::Datatype;
-use relaxng_model::model::NameClass;
+use relaxng_model::model::{NameClass, PatRef};
 use relaxng_model::{datatype, model};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::rc::Rc;
 use xmlparser::{ElementEnd, EntityDefinition, StrSpan, Token, Tokenizer};
+
+/// Identity key for a schema definition, used to deduplicate recursive `Ref`
+/// patterns during compilation.  Holds a clone of the model's `Rc` so that the
+/// heap allocation (and therefore its address) is guaranteed to remain stable.
+#[derive(Clone)]
+struct DefineId(Rc<RefCell<Option<model::DefineRule>>>);
+
+impl DefineId {
+    fn of(r: &PatRef) -> Self {
+        Self(r.0.clone())
+    }
+}
+
+impl PartialEq for DefineId {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for DefineId {}
+
+impl Hash for DefineId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.0).hash(state)
+    }
+}
 
 #[derive(Debug)]
 pub enum ValidatorError<'a> {
@@ -26,10 +53,6 @@ pub enum ValidatorError<'a> {
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 struct PatId(u16);
 
-// TODO: separate representations?
-//       1) includes 'Placeholder, but doesn't include nullability flags or 'After'
-//       2) excludes 'Placeholder', and includes nullability flags and 'After'
-
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Pat {
     Choice(PatId, PatId, bool),
@@ -45,7 +68,6 @@ enum Pat {
     DatatypeValue(Box<datatype::DatatypeValues>),
     DatatypeExcept(Box<datatype::Datatypes>, PatId),
     List(PatId),
-    Placeholder(*const Option<relaxng_model::model::DefineRule>),
     After(PatId, PatId),
 }
 
@@ -65,7 +87,6 @@ impl Pat {
             Pat::DatatypeValue(_) => false,
             Pat::DatatypeExcept(_, _) => false,
             Pat::List(_) => false,
-            Pat::Placeholder(_name) => false, //unreachable!("Placeholder {:?}", name),
             Pat::After(_, _) => false,
         }
     }
@@ -75,7 +96,6 @@ impl Pat {
 struct Inner {
     memo: HashMap<Pat, PatId>,
     patterns: Vec<Pat>,
-    refs: HashMap<*const Option<relaxng_model::model::DefineRule>, PatId>,
     span_map: HashMap<u16, Vec<codemap::Span>>,
 
     // Our implementation of https://relaxng.org/jclark/derivative.html#Memoization
@@ -95,6 +115,188 @@ struct Schema {
     coverage: Option<Box<[u64]>>,
     compile_time_count: u16,
 }
+/// Build-time state for compiling a relaxng-model schema into the internal
+/// pattern representation.  Uses `Vec<Option<Pat>>` so that recursive `Ref`
+/// patterns can reserve a slot (`None`) before the referenced definition has
+/// been compiled.  After compilation, `finalize()` converts to `Vec<Pat>`.
+struct SchemaBuilder {
+    memo: HashMap<Pat, PatId>,
+    patterns: Vec<Option<Pat>>,
+    refs: HashMap<DefineId, PatId>,
+    span_map: HashMap<u16, Vec<codemap::Span>>,
+}
+
+impl SchemaBuilder {
+    fn new() -> Self {
+        SchemaBuilder {
+            memo: HashMap::new(),
+            patterns: Vec::new(),
+            refs: HashMap::new(),
+            span_map: HashMap::new(),
+        }
+    }
+
+    fn push(&mut self, p: Pat) -> PatId {
+        if self.patterns.len() > 0xffff {
+            panic!("Only up to 2^16 rules supported in one schema")
+        }
+        if let Some(id) = self.memo.get(&p) {
+            *id
+        } else {
+            let id = PatId(self.patterns.len() as u16);
+            self.memo.insert(p.clone(), id);
+            self.patterns.push(Some(p));
+            id
+        }
+    }
+
+    fn try_patt(&self, id: PatId) -> Option<&Pat> {
+        self.patterns[id.0 as usize].as_ref()
+    }
+
+    fn is_nullable_id(&self, id: PatId) -> bool {
+        self.try_patt(id).is_some_and(|p| p.is_nullable())
+    }
+
+    fn record_source_span(&mut self, id: PatId, span: codemap::Span) {
+        self.span_map
+            .entry(id.0)
+            .or_default()
+            .push(span);
+    }
+
+    fn choice(&mut self, left: PatId, right: PatId) -> PatId {
+        match (self.try_patt(left), self.try_patt(right)) {
+            (Some(Pat::NotAllowed), _) => right,
+            (_, Some(Pat::NotAllowed)) => left,
+            (Some(_), Some(_)) if left == right => left,
+            (l, r) => {
+                let nullable = l.is_some_and(|p| p.is_nullable())
+                    || r.is_some_and(|p| p.is_nullable());
+                self.push(Pat::Choice(left, right, nullable))
+            }
+        }
+    }
+
+    fn interleave(&mut self, left: PatId, right: PatId) -> PatId {
+        match (self.try_patt(left), self.try_patt(right)) {
+            (Some(Pat::NotAllowed), _) | (_, Some(Pat::NotAllowed)) => self.not_allowed(),
+            (Some(Pat::Empty), _) => right,
+            (_, Some(Pat::Empty)) => left,
+            (l, r) => {
+                let nullable = l.is_some_and(|p| p.is_nullable())
+                    && r.is_some_and(|p| p.is_nullable());
+                self.push(Pat::Interleave(left, right, nullable))
+            }
+        }
+    }
+
+    fn group(&mut self, left: PatId, right: PatId) -> PatId {
+        match (self.try_patt(left), self.try_patt(right)) {
+            (Some(Pat::NotAllowed), _) | (_, Some(Pat::NotAllowed)) => self.not_allowed(),
+            (Some(Pat::Empty), _) => right,
+            (_, Some(Pat::Empty)) => left,
+            (l, r) => {
+                let nullable = l.is_some_and(|p| p.is_nullable())
+                    && r.is_some_and(|p| p.is_nullable());
+                self.push(Pat::Group(left, right, nullable))
+            }
+        }
+    }
+
+    fn one_or_more(&mut self, pattern: PatId) -> PatId {
+        let nullable = self.is_nullable_id(pattern);
+        self.push(Pat::OneOrMore(pattern, nullable))
+    }
+
+    fn mixed(&mut self, pattern: PatId) -> PatId {
+        let text = self.text();
+        self.interleave(pattern, text)
+    }
+
+    fn empty(&mut self) -> PatId {
+        self.push(Pat::Empty)
+    }
+
+    fn text(&mut self) -> PatId {
+        self.push(Pat::Text)
+    }
+
+    fn not_allowed(&mut self) -> PatId {
+        self.push(Pat::NotAllowed)
+    }
+
+    fn attribute(&mut self, name: model::NameClass, p: PatId) -> PatId {
+        self.push(Pat::Attribute(Box::new(name), p))
+    }
+
+    fn element(&mut self, name: model::NameClass, p: PatId) -> PatId {
+        self.push(Pat::Element(Box::new(name), p))
+    }
+
+    fn datatype_value(&mut self, dt: datatype::DatatypeValues) -> PatId {
+        self.push(Pat::DatatypeValue(Box::new(dt)))
+    }
+
+    fn datatype_name(&mut self, dt: datatype::Datatypes, except: Option<PatId>) -> PatId {
+        if let Some(except) = except {
+            self.push(Pat::DatatypeExcept(Box::new(dt), except))
+        } else {
+            self.push(Pat::Datatype(Box::new(dt)))
+        }
+    }
+
+    fn list(&mut self, p: PatId) -> PatId {
+        self.push(Pat::List(p))
+    }
+
+    fn get_ref(&self, id: &DefineId) -> Option<PatId> {
+        self.refs.get(id).copied()
+    }
+
+    fn reserve_slot(&mut self, define_id: DefineId, _name: &str) -> PatId {
+        if self.patterns.len() > 0xffff {
+            panic!("Only up to 2^16 rules supported in one schema")
+        }
+        let pat_id = PatId(self.patterns.len() as u16);
+        self.patterns.push(None);
+        self.refs.insert(define_id, pat_id);
+        pat_id
+    }
+
+    fn resolve_ref(&mut self, placeholder_id: PatId, id: PatId, name: &str) {
+        if placeholder_id == id {
+            return;
+        }
+        let target = self.patterns[id.0 as usize]
+            .clone()
+            .expect("can't resolve with another reserved slot");
+        match &self.patterns[placeholder_id.0 as usize] {
+            None => (),
+            Some(p) => panic!(
+                "expected reserved slot but got {:?}, with id {} while trying to resolve it to {}, for definition {:?}",
+                p, placeholder_id.0, id.0, name
+            ),
+        }
+        self.patterns[placeholder_id.0 as usize] = Some(target);
+    }
+
+    fn finalize(self) -> Inner {
+        let patterns: Vec<Pat> = self
+            .patterns
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| p.unwrap_or_else(|| panic!("unresolved slot at index {}", i)))
+            .collect();
+        Inner {
+            memo: self.memo,
+            patterns,
+            span_map: self.span_map,
+            ..Default::default()
+        }
+    }
+}
+
 impl Schema {
     fn push(&self, p: Pat) -> PatId {
         let mut inner = self.inner.borrow_mut();
@@ -109,14 +311,6 @@ impl Schema {
             inner.patterns.push(p);
             id
         }
-    }
-    fn record_source_span(&self, id: PatId, span: codemap::Span) {
-        self.inner
-            .borrow_mut()
-            .span_map
-            .entry(id.0 as u16)
-            .or_default()
-            .push(span);
     }
     #[inline(always)]
     fn mark_covered(&mut self, id: PatId) {
@@ -229,16 +423,12 @@ impl Schema {
         }
     }
     fn after(&self, p1: PatId, p2: PatId) -> PatId {
-        match (self.patt(p1), self.patt(p1)) {
-            (_, Pat::NotAllowed) => self.not_allowed(),
-            (Pat::NotAllowed, _) => self.not_allowed(),
+        match (self.patt(p1), self.patt(p2)) {
+            (Pat::NotAllowed, _) | (_, Pat::NotAllowed) => self.not_allowed(),
             (_, _) => self.push(Pat::After(p1, p2)),
         }
     }
 
-    pub fn mixed(&self, pattern: PatId) -> PatId {
-        self.interleave(pattern, self.text())
-    }
     pub fn empty(&self) -> PatId {
         self.push(Pat::Empty)
     }
@@ -252,67 +442,8 @@ impl Schema {
         let p = self.patt(pattern);
         self.push(Pat::OneOrMore(pattern, p.is_nullable()))
     }
-    fn attribute(&self, name: model::NameClass, p: PatId) -> PatId {
-        self.push(Pat::Attribute(Box::new(name), p))
-    }
-    fn element(&self, name: model::NameClass, p: PatId) -> PatId {
-        self.push(Pat::Element(Box::new(name), p))
-    }
-    fn datatype_value(&self, dt: datatype::DatatypeValues) -> PatId {
-        self.push(Pat::DatatypeValue(Box::new(dt)))
-    }
-    fn datatype_name(&self, dt: datatype::Datatypes, except: Option<PatId>) -> PatId {
-        if let Some(except) = except {
-            self.push(Pat::DatatypeExcept(Box::new(dt), except))
-        } else {
-            self.push(Pat::Datatype(Box::new(dt)))
-        }
-    }
     fn list(&self, p: PatId) -> PatId {
         self.push(Pat::List(p))
-    }
-    fn get_ref(&self, p: *const Option<relaxng_model::model::DefineRule>) -> Option<PatId> {
-        let inner = self.inner.borrow_mut();
-        inner.refs.get(&p).copied()
-    }
-    /*
-    fn set_ref(&self, p: *const Option<relaxng_model::model::DefineRule>, id: PatId) {
-        let mut inner = self.inner.borrow_mut();
-        inner.refs.insert(p, id);
-    }
-    */
-    fn ref_placeholder(
-        &self,
-        p: *const Option<relaxng_model::model::DefineRule>,
-        _name: &str,
-    ) -> PatId {
-        let pl = Pat::Placeholder(p);
-        let id = self.push(pl);
-        let mut inner = self.inner.borrow_mut();
-        inner.refs.insert(p, id);
-        id
-    }
-    fn resolve_ref(&self, placeholder_id: PatId, id: PatId, name: &str) {
-        if placeholder_id == id {
-            // we already resolved this placeholder
-            return;
-        }
-        let target = self.patt(id);
-        if let Pat::Placeholder(_) = target {
-            panic!(
-                "can't resolve placeholder {} with another placeholder {}",
-                placeholder_id.0, id.0
-            );
-        }
-        let mut inner = self.inner.borrow_mut();
-        match &inner.patterns[placeholder_id.0 as usize] {
-            Pat::Placeholder(_) => (),
-            p => panic!(
-                "expected placeholder but got {:?}, with id {} while trying to resolve it to {}, for definition {:?}",
-                p, placeholder_id.0, id.0, name
-            ),
-        }
-        inner.patterns[placeholder_id.0 as usize] = target;
     }
     fn patt(&self, id: PatId) -> Pat {
         self.inner.borrow().patterns[id.0 as usize].clone()
@@ -350,7 +481,7 @@ impl Schema {
             Pat::Datatype(_) => {}
             Pat::DatatypeValue(_) => {}
             Pat::DatatypeExcept(_, _) => {}
-            Pat::Placeholder(_) | Pat::After(_, _) => unreachable!(),
+            Pat::After(_, _) => unreachable!(),
         }
         false
     }
@@ -374,7 +505,7 @@ impl Schema {
             Pat::Empty | Pat::Text | Pat::NotAllowed | Pat::Datatype(_) | Pat::DatatypeValue(_) => {
             }
             Pat::DatatypeExcept(_, p) => self.check_choices(p, seen),
-            Pat::Placeholder(_) | Pat::After(_, _) => unreachable!(),
+            Pat::After(_, _) => unreachable!(),
         }
     }
 
@@ -478,9 +609,6 @@ impl Schema {
                     }
                     writeln!(w, ")")
                 }
-                Pat::Placeholder(_) => {
-                    writeln!(w, "Placeholder{}", pat.0)
-                }
                 Pat::After(p1, p2) => {
                     writeln!(w, "After{}(", pat.0)?;
                     self.dumpy_dump(depth + 1, p1, w, seen)?;
@@ -532,7 +660,6 @@ impl Schema {
                 Pat::List(_p) => {
                     writeln!(w, "List{}!", pat.0)
                 }
-                Pat::Placeholder(_) => unreachable!(),
                 Pat::After(_p1, _p2) => {
                     writeln!(w, "After{}!", pat.0)
                 }
@@ -776,11 +903,15 @@ impl<'a> Validator<'a> {
         model: Rc<RefCell<Option<model::DefineRule>>>,
         tokenizer: Tokenizer<'a>,
     ) -> Validator<'a> {
-        let schema = Schema::default();
+        let mut builder = SchemaBuilder::new();
         let start = Self::compile(
-            &schema,
+            &mut builder,
             Rc::as_ref(&model).borrow().as_ref().unwrap().pattern(),
         );
+        let schema = Schema {
+            inner: RefCell::new(builder.finalize()),
+            ..Default::default()
+        };
         let mut entity_definitions = HashMap::default();
         entity_definitions.insert("lt".to_string(), "<".to_string());
         entity_definitions.insert("gt".to_string(), ">".to_string());
@@ -853,13 +984,14 @@ impl<'a> Validator<'a> {
         Some(CoverageReport { covered, patterns })
     }
 
-    fn compile(s: &Schema, p: &model::Pattern) -> PatId {
+    fn compile(s: &mut SchemaBuilder, p: &model::Pattern) -> PatId {
         match p {
             model::Pattern::Choice(v) => {
                 let mut iter = v.iter().rev();
                 let mut right = Self::compile(s, iter.next().unwrap());
                 for left in iter {
-                    right = s.choice(Self::compile(s, left), right)
+                    let l = Self::compile(s, left);
+                    right = s.choice(l, right);
                 }
                 right
             }
@@ -867,7 +999,8 @@ impl<'a> Validator<'a> {
                 let mut iter = v.iter().rev();
                 let mut right = Self::compile(s, iter.next().unwrap());
                 for left in iter {
-                    right = s.interleave(Self::compile(s, left), right)
+                    let l = Self::compile(s, left);
+                    right = s.interleave(l, right);
                 }
                 right
             }
@@ -875,11 +1008,15 @@ impl<'a> Validator<'a> {
                 let mut iter = v.iter().rev();
                 let mut right = Self::compile(s, iter.next().unwrap());
                 for left in iter {
-                    right = s.group(Self::compile(s, left), right)
+                    let l = Self::compile(s, left);
+                    right = s.group(l, right);
                 }
                 right
             }
-            model::Pattern::Mixed(p) => s.mixed(Self::compile(s, p)),
+            model::Pattern::Mixed(p) => {
+                let inner = Self::compile(s, p);
+                s.mixed(inner)
+            }
             model::Pattern::Empty => s.empty(),
             model::Pattern::Text(span) => {
                 let id = s.text();
@@ -889,31 +1026,43 @@ impl<'a> Validator<'a> {
                 id
             }
             model::Pattern::NotAllowed => s.not_allowed(),
-            model::Pattern::Optional(p) => s.choice(Self::compile(s, p), s.empty()),
-            model::Pattern::ZeroOrMore(p) => {
-                s.choice(s.one_or_more(Self::compile(s, p)), s.empty())
+            model::Pattern::Optional(p) => {
+                let inner = Self::compile(s, p);
+                let empty = s.empty();
+                s.choice(inner, empty)
             }
-            model::Pattern::OneOrMore(p) => s.one_or_more(Self::compile(s, p)),
+            model::Pattern::ZeroOrMore(p) => {
+                let inner = Self::compile(s, p);
+                let one = s.one_or_more(inner);
+                let empty = s.empty();
+                s.choice(one, empty)
+            }
+            model::Pattern::OneOrMore(p) => {
+                let inner = Self::compile(s, p);
+                s.one_or_more(inner)
+            }
             model::Pattern::Attribute(name, p, span, _) => {
-                let id = s.attribute(name.clone(), Self::compile(s, p));
+                let content = Self::compile(s, p);
+                let id = s.attribute(name.clone(), content);
                 if let Some(span) = span {
                     s.record_source_span(id, *span);
                 }
                 id
             }
             model::Pattern::Element(name, p, span, _) => {
-                let id = s.element(name.clone(), Self::compile(s, p));
+                let content = Self::compile(s, p);
+                let id = s.element(name.clone(), content);
                 if let Some(span) = span {
                     s.record_source_span(id, *span);
                 }
                 id
             }
             model::Pattern::Ref(whence, name, r) => {
-                let ptr = r.0.as_ptr();
-                if let Some(id) = s.get_ref(ptr) {
+                let define_id = DefineId::of(r);
+                if let Some(id) = s.get_ref(&define_id) {
                     id
                 } else {
-                    let placeholder_id = s.ref_placeholder(ptr, name);
+                    let placeholder_id = s.reserve_slot(define_id, name);
                     if let Some(thing) = Rc::as_ref(&r.0).borrow().as_ref() {
                         let id = Self::compile(s, thing.pattern());
                         s.resolve_ref(placeholder_id, id, name);
@@ -935,16 +1084,17 @@ impl<'a> Validator<'a> {
                 except,
                 span,
             } => {
-                let id = s.datatype_name(
-                    datatype.clone(),
-                    except.as_ref().map(|e| Self::compile(s, e)),
-                );
+                let except_id = except.as_ref().map(|e| Self::compile(s, e));
+                let id = s.datatype_name(datatype.clone(), except_id);
                 if let Some(span) = span {
                     s.record_source_span(id, *span);
                 }
                 id
             }
-            model::Pattern::List(p) => s.list(Self::compile(s, p)),
+            model::Pattern::List(p) => {
+                let inner = Self::compile(s, p);
+                s.list(inner)
+            }
         }
     }
 
@@ -958,17 +1108,6 @@ impl<'a> Validator<'a> {
 
     #[allow(unused)]
     fn assert_health(&self) {
-        let mut fail = false;
-        for v in self.schema.inner.borrow().refs.values() {
-            if let Pat::Placeholder(_p) = self.schema.patt(*v) {
-                println!("Still a placeholder: {v:?}");
-                fail = true;
-            }
-        }
-        if fail {
-            panic!();
-        }
-
         let mut seen = vec![];
         self.schema.check_choices(self.current_step, &mut seen);
     }
@@ -1321,7 +1460,6 @@ impl<'a> Validator<'a> {
                     schema.not_allowed()
                 }
             }
-            Pat::Placeholder(name) => unreachable!("Placeholder {:?}", name),
         }
     }
 
@@ -1464,7 +1602,6 @@ impl<'a> Validator<'a> {
             | Pat::DatatypeValue(_)
             | Pat::DatatypeExcept(_, _)
             | Pat::List(_) => schema.not_allowed(),
-            Pat::Placeholder(name) => unreachable!("Placeholder {:?}", name),
         };
 
         schema
@@ -1723,7 +1860,6 @@ impl<'a> Validator<'a> {
                 result.insert(pat);
             }
             Pat::List(p) => self.head(result, p),
-            Pat::Placeholder(_) => panic!("Unexpected {pat:?}"),
             Pat::After(p, _) => self.head(result, p),
         }
     }

@@ -587,12 +587,12 @@ fn param(node: Node) -> Result<Param> {
     };
     let val = Literal(child.range(), vec![seg]);
 
-    Ok(Param(
-        node.range(),
-        None,
-        IdentifierOrKeyword::Identifier(name),
-        val,
-    ))
+    Ok(Param {
+        span: node.range(),
+        annotations: None,
+        name: IdentifierOrKeyword::Identifier(name),
+        value: val,
+    })
 }
 
 fn not_allowed(node: Node) -> Result<Pattern> {
@@ -686,7 +686,13 @@ fn start(node: Node) -> Result<Define> {
     if let Some(rest) = next_rng_sibling(child) {
         return Err(Error::Unexpected(rest.range(), "Unexpected element"));
     }
-    Ok(Define(node.range(), name, combine, patt))
+    Ok(Define {
+        span: node.range(),
+        identifier: name,
+        assign_method: combine,
+        pattern: patt,
+        annotations: None,
+    })
 }
 
 fn define(node: Node) -> Result<Define> {
@@ -713,7 +719,13 @@ fn define(node: Node) -> Result<Define> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "Child pattern element"))?,
     )?;
-    Ok(Define(node.range(), name, combine, patt))
+    Ok(Define {
+        span: node.range(),
+        identifier: name,
+        assign_method: combine,
+        pattern: patt,
+        annotations: None,
+    })
 }
 
 fn div_grammar_content(node: Node) -> Result<GrammarContent> {
@@ -784,7 +796,12 @@ fn include(node: Node) -> Result<Include> {
         next = next_rng_sibling(child);
     }
 
-    Ok(Include(val, None, Some(content)))
+    Ok(Include {
+        uri: val,
+        inherit: None,
+        content: Some(content),
+        annotations: None,
+    })
 }
 
 fn include_content(node: Node) -> Result<IncludeContent> {

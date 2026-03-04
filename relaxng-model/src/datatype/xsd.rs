@@ -794,15 +794,15 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -819,15 +819,15 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -841,7 +841,7 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::i16(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::i16(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::i16(ctx, param)?)?,
@@ -849,8 +849,8 @@ impl Compiler {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -868,7 +868,7 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::u16(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::u16(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::u16(ctx, param)?)?,
@@ -876,8 +876,8 @@ impl Compiler {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -891,7 +891,7 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::i64(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::i64(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::i64(ctx, param)?)?,
@@ -899,8 +899,8 @@ impl Compiler {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -914,7 +914,7 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::i32(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::i32(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::i32(ctx, param)?)?,
@@ -922,8 +922,8 @@ impl Compiler {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -936,7 +936,7 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::bigint(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::bigint(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::bigint(ctx, param)?)?,
@@ -944,8 +944,8 @@ impl Compiler {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -963,7 +963,7 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::biguint(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::biguint(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::biguint(ctx, param)?)?,
@@ -971,8 +971,8 @@ impl Compiler {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -988,7 +988,7 @@ impl Compiler {
         let mut total_digits = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::bigdecimal(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::bigdecimal(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::bigdecimal(ctx, param)?)?,
@@ -998,8 +998,8 @@ impl Compiler {
                 "totalDigits" => total_digits = Some(Self::u16(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1017,7 +1017,7 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::f64(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::f64(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::f64(ctx, param)?)?,
@@ -1025,8 +1025,8 @@ impl Compiler {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1039,14 +1039,14 @@ impl Compiler {
         let mut len = LengthFacet::Unbounded;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1059,14 +1059,14 @@ impl Compiler {
         let mut len = LengthFacet::Unbounded;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1079,14 +1079,14 @@ impl Compiler {
         let mut len = LengthFacet::Unbounded;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1099,14 +1099,14 @@ impl Compiler {
         let mut len = LengthFacet::Unbounded;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1119,12 +1119,12 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1137,12 +1137,12 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1155,12 +1155,12 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1173,12 +1173,12 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1191,12 +1191,12 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1209,12 +1209,12 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1232,7 +1232,7 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::u32(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::u32(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::u32(ctx, param)?)?,
@@ -1240,8 +1240,8 @@ impl Compiler {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1259,7 +1259,7 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "minInclusive" => min_max.min_inclusive(Self::u64(ctx, param)?)?,
                 "minExclusive" => min_max.min_exclusive(Self::u64(ctx, param)?)?,
                 "maxInclusive" => min_max.max_inclusive(Self::u64(ctx, param)?)?,
@@ -1267,8 +1267,8 @@ impl Compiler {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1281,12 +1281,12 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1299,12 +1299,12 @@ impl Compiler {
         let mut pattern = None;
 
         for param in params {
-            match &param.2.to_string()[..] {
+            match &param.name.to_string()[..] {
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.0),
-                        param.2.to_string(),
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
                     ));
                 }
             }
@@ -1315,78 +1315,78 @@ impl Compiler {
 
     fn i16(ctx: &Context, param: &types::Param) -> Result<i16, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
     fn i32(ctx: &Context, param: &types::Param) -> Result<i32, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
     fn i64(ctx: &Context, param: &types::Param) -> Result<i64, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
     fn u32(ctx: &Context, param: &types::Param) -> Result<u32, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
     fn u64(ctx: &Context, param: &types::Param) -> Result<u64, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
     fn u16(ctx: &Context, param: &types::Param) -> Result<u16, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
     fn f64(ctx: &Context, param: &types::Param) -> Result<f64, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: std::num::ParseFloatError| {
-                FacetError::InvalidFloat(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidFloat(ctx.convert_span(&param.span), e.to_string())
             })
             .and_then(|v: f64| {
                 if v.is_finite() {
                     Ok(v)
                 } else {
                     Err(FacetError::InvalidFloat(
-                        ctx.convert_span(&param.0),
+                        ctx.convert_span(&param.span),
                         "Only finite values allowed".to_string(),
                     ))
                 }
@@ -1395,21 +1395,21 @@ impl Compiler {
 
     fn bigint(ctx: &Context, param: &types::Param) -> Result<num_bigint::BigInt, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: num_bigint::ParseBigIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
     fn biguint(ctx: &Context, param: &types::Param) -> Result<num_bigint::BigUint, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: num_bigint::ParseBigIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
@@ -1418,28 +1418,28 @@ impl Compiler {
         param: &types::Param,
     ) -> Result<bigdecimal::BigDecimal, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: bigdecimal::ParseBigDecimalError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
     fn usize(ctx: &Context, param: &types::Param) -> Result<usize, FacetError> {
         param
-            .3
+            .value
             .as_string_value()
             .parse()
             .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.0), e.to_string())
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
             })
     }
 
     fn pattern(&self, ctx: &Context, param: &types::Param) -> Result<PatternFacet, FacetError> {
-        regex::Regex::new(&param.3.as_string_value())
-            .map(|re| PatternFacet(param.3.as_string_value(), re))
-            .map_err(|e| FacetError::InvalidPattern(ctx.convert_span(&param.0), e))
+        regex::Regex::new(&param.value.as_string_value())
+            .map(|re| PatternFacet(param.value.as_string_value(), re))
+            .map_err(|e| FacetError::InvalidPattern(ctx.convert_span(&param.span), e))
     }
 }
 
@@ -1489,7 +1489,12 @@ mod test {
                 body: "1".to_string(),
             }],
         );
-        let param = types::Param(0..0, None, name, value);
+        let param = types::Param {
+            span: 0..0,
+            annotations: None,
+            name,
+            value,
+        };
         let res = c.compile(&ctx, &(0..0), "normalizedString", &[param]);
         assert_matches!(
             res,

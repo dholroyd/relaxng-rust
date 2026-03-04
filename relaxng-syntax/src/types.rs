@@ -60,6 +60,7 @@ pub enum Pattern {
     OneOrMore(Box<Pattern>),
     DatatypeValue(DatatypeValuePattern),
     DatatypeName(DatatypeNamePattern),
+    Annotated(Annotations, Box<Pattern>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -139,12 +140,12 @@ impl NamespacedName {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Param(
-    pub Span,
-    pub Option<InitialAnnotation>,
-    pub IdentifierOrKeyword,
-    pub Literal,
-);
+pub struct Param {
+    pub span: Span,
+    pub annotations: Option<Annotations>,
+    pub name: IdentifierOrKeyword,
+    pub value: Literal,
+}
 
 // TODO: remove this; Pattern can be a grammar anyway
 #[derive(Debug, PartialEq)]
@@ -169,14 +170,21 @@ pub enum AssignMethod {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Define(pub Span, pub Identifier, pub AssignMethod, pub Pattern);
+pub struct Define {
+    pub span: Span,
+    pub identifier: Identifier,
+    pub assign_method: AssignMethod,
+    pub pattern: Pattern,
+    pub annotations: Option<Annotations>,
+}
 
 #[derive(Debug, PartialEq)]
-pub struct Include(
-    pub Literal,
-    pub Option<Inherit>,
-    pub Option<Vec<IncludeContent>>,
-);
+pub struct Include {
+    pub uri: Literal,
+    pub inherit: Option<Inherit>,
+    pub content: Option<Vec<IncludeContent>>,
+    pub annotations: Option<Annotations>,
+}
 
 #[derive(Debug, PartialEq)]
 pub struct Inherit(pub IdentifierOrKeyword);
@@ -258,6 +266,7 @@ pub enum NameClass {
     AnyName(AnyName),
     Alt(AltName),
     Paren(ParenName),
+    Annotated(Annotations, Box<NameClass>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -310,6 +319,19 @@ impl QName {
             end: self.1.0.end,
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Annotations {
+    pub documentation: Vec<Documentation>,
+    pub initial: Option<InitialAnnotation>,
+    pub follow_elements: Vec<AnnotationElement>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Documentation {
+    pub span: Span,
+    pub content: String,
 }
 
 #[derive(Debug, PartialEq)]

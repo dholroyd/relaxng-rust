@@ -44,8 +44,8 @@ pub enum Pattern {
     Optional(Box<Pattern>),
     ZeroOrMore(Box<Pattern>),
     OneOrMore(Box<Pattern>),
-    Attribute(NameClass, Box<Pattern>, Option<codemap::Span>),
-    Element(NameClass, Box<Pattern>, Option<codemap::Span>),
+    Attribute(NameClass, Box<Pattern>, Option<codemap::Span>, Option<Annotation>),
+    Element(NameClass, Box<Pattern>, Option<codemap::Span>, Option<Annotation>),
     Ref(codemap::Span, String, PatRef),
     DatatypeValue {
         datatype: crate::datatype::DatatypeValues,
@@ -125,4 +125,41 @@ pub struct Param {
     pub span: Span,
     pub name: String,
     pub value: String,
+}
+
+/// A fully-resolved annotation (namespace prefixes resolved to URIs)
+#[derive(Debug)]
+pub struct Annotation {
+    pub documentation: Vec<AnnotationDocumentation>,
+    pub attributes: Vec<AnnotationAttribute>,
+    pub elements: Vec<AnnotationElement>,
+}
+
+#[derive(Debug)]
+pub struct AnnotationDocumentation {
+    pub content: String,
+    pub span: Option<codemap::Span>,
+}
+
+#[derive(Debug)]
+pub struct AnnotationAttribute {
+    pub namespace_uri: String,
+    pub local_name: String,
+    pub value: String,
+    pub span: Option<codemap::Span>,
+}
+
+#[derive(Debug)]
+pub struct AnnotationElement {
+    pub namespace_uri: String,
+    pub local_name: String,
+    pub attributes: Vec<AnnotationAttribute>,
+    pub children: Vec<AnnotationContent>,
+    pub span: Option<codemap::Span>,
+}
+
+#[derive(Debug)]
+pub enum AnnotationContent {
+    Element(AnnotationElement),
+    Text(String),
 }

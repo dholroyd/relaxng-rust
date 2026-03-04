@@ -735,8 +735,8 @@ impl<FS: Files> Compiler<FS> {
             | Pattern::Optional(p)
             | Pattern::ZeroOrMore(p)
             | Pattern::OneOrMore(p)
-            | Pattern::Attribute(_, p, _)
-            | Pattern::Element(_, p, _)
+            | Pattern::Attribute(_, p, _, _)
+            | Pattern::Element(_, p, _, _)
             | Pattern::List(p) => self.check(seen, p)?,
             Pattern::Empty
             | Pattern::Text(_)
@@ -1261,11 +1261,11 @@ impl<FS: Files> Compiler<FS> {
         ctx: &mut Context,
         define: &types::Define,
     ) -> Result<(), RelaxError> {
-        let mut def_ctx = ctx.new_define(&define.1);
-        let id = (define.1).1.clone();
-        let rule = self.compile_pattern(&mut def_ctx, &define.3)?;
-        let span = ctx.convert_span(&(define.1).0);
-        let new_rule = match define.2 {
+        let mut def_ctx = ctx.new_define(&define.identifier);
+        let id = define.identifier.1.clone();
+        let rule = self.compile_pattern(&mut def_ctx, &define.pattern)?;
+        let span = ctx.convert_span(&define.identifier.0);
+        let new_rule = match define.assign_method {
             types::AssignMethod::Assign => model::DefineRule::AssignCombine(span, None, rule),
             types::AssignMethod::Choice => model::DefineRule::CombineOnly(
                 span,
@@ -1306,11 +1306,11 @@ impl<FS: Files> Compiler<FS> {
         let path = Path::new(ctx.file().name())
             .parent()
             .expect("TODO: no parent?")
-            .join(inc.0.as_string_value());
+            .join(inc.uri.as_string_value());
         let span = ctx
             .file()
             .span
-            .subspan((inc.0).0.start as u64, (inc.0).0.end as u64);
+            .subspan(inc.uri.0.start as u64, inc.uri.0.end as u64);
         let (file, s) = self
             .get_schema(&path)
             .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?;
@@ -1319,7 +1319,7 @@ impl<FS: Files> Compiler<FS> {
 
         let mut inc_ctx = ctx.new_include(span, file)?;
 
-        if let Some(ref inherit) = inc.1 {
+        if let Some(ref inherit) = inc.inherit {
             let prefix = inherit.0.to_string();
             let namespace_uri = ctx
                 .namespace_uri_for_prefix_str(&prefix)
@@ -1332,7 +1332,7 @@ impl<FS: Files> Compiler<FS> {
         }
 
         // replace any definitions for which the including file provides an override
-        if let Some(ref overrides) = inc.2 {
+        if let Some(ref overrides) = inc.content {
             let mut override_ctx = inc_ctx.new_inc_overrides();
             for o in overrides.iter() {
                 match o {
@@ -1541,6 +1541,22 @@ impl<FS: Files> Compiler<FS> {
             ))),
             types::Pattern::DatatypeValue(d) => self.compile_datatype_value_pattern(ctx, d),
             types::Pattern::DatatypeName(d) => self.compile_datatype_name_pattern(ctx, d),
+            types::Pattern::Annotated(annos, inner) => {
+                let compiled_annos = Self::compile_annotations(ctx, annos);
+                let mut result = self.compile_pattern(ctx, inner)?;
+                // Attach annotations to Element/Attribute patterns if possible
+                match &mut result {
+                    model::Pattern::Element(_, _, _, a)
+                    | model::Pattern::Attribute(_, _, _, a) => {
+                        *a = Some(compiled_annos);
+                    }
+                    _ => {
+                        // For other patterns, annotations are metadata-only; we note them but
+                        // they don't change the pattern structure
+                    }
+                }
+                Ok(result)
+            }
         }
     }
     fn compile_element(
@@ -1555,6 +1571,7 @@ impl<FS: Files> Compiler<FS> {
             name_class,
             Box::new(self.compile_pattern(&mut el_ctx, &element.pattern)?),
             Some(span),
+            None,
         ))
     }
     fn compile_attribute(
@@ -1569,6 +1586,7 @@ impl<FS: Files> Compiler<FS> {
             name_class,
             Box::new(self.compile_pattern(&mut att_ctx, &attribute.pattern)?),
             Some(span),
+            None,
         ))
     }
     fn compile_list(
@@ -1942,7 +1960,115 @@ impl<FS: Files> Compiler<FS> {
             types::NameClass::Paren(types::ParenName(n)) => {
                 self.compile_nameclass(ctx, elem_attr, n)
             }
+            types::NameClass::Annotated(_annos, inner) => {
+                // Annotations on name classes are metadata-only; compile the inner name class
+                self.compile_nameclass(ctx, elem_attr, inner)
+            }
         }
+    }
+
+    fn compile_annotations(
+        ctx: &Context,
+        annos: &relaxng_syntax::types::Annotations,
+    ) -> model::Annotation {
+        let documentation = annos
+            .documentation
+            .iter()
+            .map(|d| model::AnnotationDocumentation {
+                content: d.content.clone(),
+                span: Some(ctx.convert_span(&d.span)),
+            })
+            .collect();
+
+        let attributes = if let Some(ref initial) = annos.initial {
+            initial
+                .attribute_annotations
+                .iter()
+                .filter_map(|a| Self::compile_annotation_name(ctx, &a.name).map(|(ns, local)| {
+                    model::AnnotationAttribute {
+                        namespace_uri: ns,
+                        local_name: local,
+                        value: a.value.as_string_value(),
+                        span: Some(ctx.convert_span(&a.span)),
+                    }
+                }))
+                .collect()
+        } else {
+            vec![]
+        };
+
+        let mut elements: Vec<model::AnnotationElement> = if let Some(ref initial) = annos.initial {
+            initial
+                .element_annotations
+                .iter()
+                .filter_map(|e| Self::compile_annotation_element(ctx, e))
+                .collect()
+        } else {
+            vec![]
+        };
+
+        for e in &annos.follow_elements {
+            if let Some(compiled) = Self::compile_annotation_element(ctx, e) {
+                elements.push(compiled);
+            }
+        }
+
+        model::Annotation {
+            documentation,
+            attributes,
+            elements,
+        }
+    }
+
+    fn compile_annotation_name(ctx: &Context, name: &types::Name) -> Option<(String, String)> {
+        match name {
+            types::Name::CName(cname) => {
+                let ns = ctx.namespace_uri_for_prefix_str(&cname.0 .1)?;
+                Some((ns.to_string(), cname.1 .1.clone()))
+            }
+            types::Name::Identifier(id) => Some(("".to_string(), id.to_string())),
+            types::Name::NamespacedName(nn) => {
+                Some((nn.namespace_uri.as_string_value(), nn.localname.1.clone()))
+            }
+        }
+    }
+
+    fn compile_annotation_element(
+        ctx: &Context,
+        elem: &types::AnnotationElement,
+    ) -> Option<model::AnnotationElement> {
+        let (ns, local) = Self::compile_annotation_name(ctx, &elem.name)?;
+        let attributes = elem
+            .annotation_attributes
+            .iter()
+            .filter_map(|a| Self::compile_annotation_name(ctx, &a.name).map(|(ns, local)| {
+                model::AnnotationAttribute {
+                    namespace_uri: ns,
+                    local_name: local,
+                    value: a.value.as_string_value(),
+                    span: Some(ctx.convert_span(&a.span)),
+                }
+            }))
+            .collect();
+        let children = elem
+            .annotation_elements_or_literals
+            .iter()
+            .filter_map(|c| match c {
+                types::AnnotationElementOrLiteral::Element(e) => {
+                    Self::compile_annotation_element(ctx, e).map(model::AnnotationContent::Element)
+                }
+                types::AnnotationElementOrLiteral::Literal(l) => {
+                    Some(model::AnnotationContent::Text(l.as_string_value()))
+                }
+            })
+            .collect();
+        Some(model::AnnotationElement {
+            namespace_uri: ns,
+            local_name: local,
+            attributes,
+            children,
+            span: Some(ctx.convert_span(&elem.span)),
+        })
     }
 }
 
@@ -1990,7 +2116,7 @@ mod tests {
         let start = s.as_ref().unwrap().pattern();
         assert_matches!(start, Pattern::Ref(_whence, _name, model::PatRef(ref1)) => {
             assert_matches!(ref1.borrow().as_ref(), Some(model::DefineRule::AssignCombine(_, _, patt)) => {
-                assert_matches!(patt, Pattern::Element(_name, content_patt, _) => {
+                assert_matches!(patt, Pattern::Element(_name, content_patt, _, _) => {
                     assert_matches!(**content_patt, Pattern::Choice(ref seq) => {
                         assert_matches!(seq[0], Pattern::Ref(_, _, model::PatRef(ref ref2)) => {
                             assert!(Rc::ptr_eq(ref1, ref2));
@@ -2032,7 +2158,7 @@ mod tests {
         let start = s.as_ref().unwrap().pattern();
         assert_matches!(start, Pattern::Ref(_whence, _name, model::PatRef(ref1)) => {
             assert_matches!(ref1.borrow().as_ref(), Some(model::DefineRule::AssignCombine(_, _, patt)) => {
-                assert_matches!(patt, Pattern::Element(_name, content_patt, _) => {
+                assert_matches!(patt, Pattern::Element(_name, content_patt, _, _) => {
                     assert_matches!(**content_patt, Pattern::Optional(ref patt) => {
                         assert_matches!(**patt, Pattern::Ref(_, _, model::PatRef(ref ref2)) => {
                             assert!(Rc::ptr_eq(ref1, ref2));

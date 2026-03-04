@@ -880,14 +880,14 @@ impl<'a> Validator<'a> {
                 s.choice(s.one_or_more(Self::compile(s, p)), s.empty())
             }
             model::Pattern::OneOrMore(p) => s.one_or_more(Self::compile(s, p)),
-            model::Pattern::Attribute(name, p, span) => {
+            model::Pattern::Attribute(name, p, span, _) => {
                 let id = s.attribute(name.clone(), Self::compile(s, p));
                 if let Some(span) = span {
                     s.record_source_span(id, *span);
                 }
                 id
             }
-            model::Pattern::Element(name, p, span) => {
+            model::Pattern::Element(name, p, span, _) => {
                 let id = s.element(name.clone(), Self::compile(s, p));
                 if let Some(span) = span {
                     s.record_source_span(id, *span);

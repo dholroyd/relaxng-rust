@@ -312,10 +312,8 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
 //    | "grammar" "{" grammarContent* "}"
 //    | "(" pattern ")"
 fn pattern(input: Span) -> IResult<Span, Pattern> {
-    let (input, annotation) = maybe_initial_annotation(input)?;
-    if let Some(annotation) = annotation {
-        println!("pattern annotation found but ignored! {:?}", annotation);
-    }
+    let (input, annotations) = maybe_annotations(input)?;
+    let (input, _) = ws0(input)?;
     let (input, mut result) = alt((
         map(element_pattern, Pattern::Element),
         map(attribute_pattern, Pattern::Attribute),
@@ -337,8 +335,16 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
     .parse(input)?;
 
     let (mut input, follow_annotations) = follow_annotation_list(input)?;
-    if !follow_annotations.is_empty() {
-        println!("pattern follow annotation found but ignored! {follow_annotations:?}");
+
+    // Wrap in Annotated if there are any annotations
+    if annotations.is_some() || !follow_annotations.is_empty() {
+        let mut annos = annotations.unwrap_or(Annotations {
+            documentation: vec![],
+            initial: None,
+            follow_elements: vec![],
+        });
+        annos.follow_elements = follow_annotations;
+        result = Pattern::Annotated(annos, Box::new(result));
     }
 
     loop {
@@ -558,8 +564,8 @@ fn datatype_value(input: Span) -> IResult<Span, Literal> {
 fn param(input: Span) -> IResult<Span, Param> {
     let parse = (
         position,
-        maybe_initial_annotation,
-        space_comment0,
+        maybe_annotations,
+        ws0,
         identifier_or_keyword,
         space_comment0,
         tag("="),
@@ -570,8 +576,11 @@ fn param(input: Span) -> IResult<Span, Param> {
 
     let mut parser = map(
         parse,
-        |(start, initial_annotation, _, name, _, _, _, val, end)| {
-            Param(span(start, end), initial_annotation, name, val)
+        |(start, annotations, _, name, _, _, _, value, end)| Param {
+            span: span(start, end),
+            annotations,
+            name,
+            value,
         },
     );
 
@@ -600,10 +609,8 @@ fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
 }
 
 fn name_class(input: Span) -> IResult<Span, NameClass> {
-    let (input, annotation) = maybe_initial_annotation(input)?;
-    if annotation.is_some() {
-        println!("name-class annotation found but ignored!")
-    }
+    let (input, annotations) = maybe_annotations(input)?;
+    let (input, _) = ws0(input)?;
     let (input, left) = alt((
         map(ns_name_nc, NameClass::NsName),
         map(name, NameClass::Name),
@@ -614,12 +621,19 @@ fn name_class(input: Span) -> IResult<Span, NameClass> {
     .parse(input)?;
 
     let (input, follow_annotations) = follow_annotation_list(input)?;
-    if !follow_annotations.is_empty() {
-        println!(
-            "name-class follow annotation found but ignored! {:?}",
-            annotation.unwrap()
-        );
-    }
+
+    // Wrap in Annotated if there are any annotations
+    let left = if annotations.is_some() || !follow_annotations.is_empty() {
+        let mut annos = annotations.unwrap_or(Annotations {
+            documentation: vec![],
+            initial: None,
+            follow_elements: vec![],
+        });
+        annos.follow_elements = follow_annotations;
+        NameClass::Annotated(annos, Box::new(left))
+    } else {
+        left
+    };
 
     if let Ok((input, right)) = alt_nc(input) {
         return Ok((
@@ -716,14 +730,32 @@ where
 //                        | "div" "{" grammarContent* "}"
 //                        | "include" anyURILiteral [inherit] ["{" includeContent* "}"]
 fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
-    alt((
+    let (input, annotations) = maybe_annotations(input)?;
+    let (input, _) = ws0(input)?;
+    let (input, mut item) = alt((
         map(start, GrammarContent::Define),
         map(define, GrammarContent::Define),
         map(div_grammar_content, GrammarContent::Div),
         map(include, GrammarContent::Include),
         map(annotation_element, GrammarContent::Annotation),
     ))
-    .parse(input)
+    .parse(input)?;
+
+    // Attach annotations to the parsed item
+    if let Some(annotations) = annotations {
+        match &mut item {
+            GrammarContent::Define(d) => {
+                d.annotations = Some(annotations);
+            }
+            GrammarContent::Include(i) => {
+                i.annotations = Some(annotations);
+            }
+            // For Div and Annotation, annotations are not currently stored
+            _ => {}
+        }
+    }
+
+    Ok((input, item))
 }
 
 // start	  ::=  	"start" assignMethod pattern
@@ -743,13 +775,12 @@ fn start(input: Span) -> IResult<Span, Define> {
 
     let mut parser = map(
         parser,
-        |(start, start_tag, _, assign_method, _, pattern, end)| {
-            Define(
-                span(start, end),
-                Identifier(span(start_tag, start_tag), "start".to_string()),
-                assign_method,
-                pattern,
-            )
+        |(start, start_tag, _, assign_method, _, pattern, end)| Define {
+            span: span(start, end),
+            identifier: Identifier(span(start_tag, start_tag), "start".to_string()),
+            assign_method,
+            pattern,
+            annotations: None,
         },
     );
 
@@ -770,8 +801,12 @@ fn define(input: Span) -> IResult<Span, Define> {
 
     let mut parser = map(
         parse,
-        |(start, identifier, _, assign_method, _, pattern, end)| {
-            Define(span(start, end), identifier, assign_method, pattern)
+        |(start, identifier, _, assign_method, _, pattern, end)| Define {
+            span: span(start, end),
+            identifier,
+            assign_method,
+            pattern,
+            annotations: None,
         },
     );
 
@@ -824,8 +859,11 @@ fn include(input: Span) -> IResult<Span, Include> {
         )),
     );
 
-    let mut parser = map(parse, |(_, _, uri, inherit, include)| {
-        Include(uri, inherit, include)
+    let mut parser = map(parse, |(_, _, uri, inherit, content)| Include {
+        uri,
+        inherit,
+        content,
+        annotations: None,
     });
 
     parser.parse(input)
@@ -855,17 +893,26 @@ fn inherit(input: Span) -> IResult<Span, Inherit> {
 //                    | start
 //                    | "div" "{" includeContent* "}"
 fn include_content(input: Span) -> IResult<Span, IncludeContent> {
-    let (input, annotation) = maybe_initial_annotation(input)?;
-    if annotation.is_some() {
-        println!("include-content annotation found but ignored!")
-    }
-    alt((
+    let (input, annotations) = maybe_annotations(input)?;
+    let (input, _) = ws0(input)?;
+    let (input, mut item) = alt((
         map(annotation_element, IncludeContent::Annotation),
         map(define, IncludeContent::Define),
         map(start, IncludeContent::Define),
         map(div_include_content, IncludeContent::Div),
     ))
-    .parse(input)
+    .parse(input)?;
+
+    if let Some(annotations) = annotations {
+        match &mut item {
+            IncludeContent::Define(d) => {
+                d.annotations = Some(annotations);
+            }
+            _ => {}
+        }
+    }
+
+    Ok((input, item))
 }
 
 // "div" "{" includeContent* "}"
@@ -886,17 +933,88 @@ fn div_include_content(input: Span) -> IResult<Span, Vec<IncludeContent>> {
 }
 
 fn space_comment0(input: Span) -> IResult<Span, Span> {
-    recognize(fold_many0(alt((multispace1, comment)), || (), |_, _| ())).parse(input)
+    recognize(fold_many0(alt((multispace1, any_comment)), || (), |_, _| ())).parse(input)
 }
 fn space_comment1(input: Span) -> IResult<Span, Span> {
-    recognize(fold_many1(alt((multispace1, comment)), || (), |_, _| ())).parse(input)
+    recognize(fold_many1(alt((multispace1, any_comment)), || (), |_, _| ())).parse(input)
 }
-fn comment(input: Span) -> IResult<Span, Span> {
+
+/// Consume whitespace and single-# comments only (not ## documentation comments)
+fn ws0(input: Span) -> IResult<Span, Span> {
+    recognize(fold_many0(
+        alt((multispace1, single_comment)),
+        || (),
+        |_, _| (),
+    ))
+    .parse(input)
+}
+fn ws1(input: Span) -> IResult<Span, Span> {
+    recognize(fold_many1(
+        alt((multispace1, single_comment)),
+        || (),
+        |_, _| (),
+    ))
+    .parse(input)
+}
+
+/// Matches any comment line (both # and ##)
+fn any_comment(input: Span) -> IResult<Span, Span> {
     recognize((tag("#"), not_line_ending)).parse(input)
 }
 
+/// Matches a single-# comment but NOT ## documentation comments
+fn single_comment(input: Span) -> IResult<Span, Span> {
+    recognize((tag("#"), not(peek(tag("#"))), not_line_ending)).parse(input)
+}
+
+/// Parse a single ## documentation line. Returns the content after ##,
+/// with one leading space stripped if present.
+fn documentation(input: Span) -> IResult<Span, Documentation> {
+    use nom::character::complete::not_line_ending as complete_not_line_ending;
+    let (input, start) = position(input)?;
+    let (input, _) = tag("##")(input)?;
+    // Must NOT start with another # (that would be ###, not documentation)
+    let (input, _) = not(peek(tag("#"))).parse(input)?;
+    let (input, content) = complete_not_line_ending(input)?;
+    let (input, end) = position(input)?;
+    let content_str = content.fragment().to_string();
+    // Strip one leading space after ## if present
+    let content_str = content_str.strip_prefix(' ').unwrap_or(&content_str).to_string();
+    Ok((
+        input,
+        Documentation {
+            span: span(start, end),
+            content: content_str,
+        },
+    ))
+}
+
+/// Parse zero or more ## documentation lines (separated by whitespace/single-# comments)
+fn documentations(input: Span) -> IResult<Span, Vec<Documentation>> {
+    separated_list0(ws1, documentation).parse(input)
+}
+
 fn maybe_initial_annotation(input: Span) -> IResult<Span, Option<InitialAnnotation>> {
-    opt(map((initial_annotation, space_comment0), |(anno, _)| anno)).parse(input)
+    opt(map((initial_annotation, ws0), |(anno, _)| anno)).parse(input)
+}
+
+/// Parse optional annotations: zero or more ## doc lines, then optionally [...]
+fn maybe_annotations(input: Span) -> IResult<Span, Option<Annotations>> {
+    let (input, docs) = documentations(input)?;
+    let (input, _) = ws0(input)?;
+    let (input, initial) = maybe_initial_annotation(input)?;
+    if docs.is_empty() && initial.is_none() {
+        Ok((input, None))
+    } else {
+        Ok((
+            input,
+            Some(Annotations {
+                documentation: docs,
+                initial,
+                follow_elements: vec![],
+            }),
+        ))
+    }
 }
 
 fn initial_annotation(input: Span) -> IResult<Span, InitialAnnotation> {
@@ -935,7 +1053,14 @@ fn follow_annotation(input: Span) -> IResult<Span, AnnotationElement> {
 }
 
 fn annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute> {
-    let parse = (name, space_comment0, tag("="), space_comment0, literal);
+    // Per spec, annotation attributes must use foreignAttributeName which is always a CName
+    let parse = (
+        map(cname, Name::CName),
+        space_comment0,
+        tag("="),
+        space_comment0,
+        literal,
+    );
 
     let mut parser = map(parse, |(name, _, _, _, value)| AnnotationAttribute {
         span: Range {
@@ -1011,12 +1136,13 @@ mod test {
         ck(
             start,
             "start = pattern",
-            Define(
-                0..15,
-                Identifier(0..0, "start".to_string()),
-                AssignMethod::Assign,
-                Pattern::Identifier(Identifier(8..15, "pattern".to_string())),
-            ),
+            Define {
+                span: 0..15,
+                identifier: Identifier(0..0, "start".to_string()),
+                assign_method: AssignMethod::Assign,
+                pattern: Pattern::Identifier(Identifier(8..15, "pattern".to_string())),
+                annotations: None,
+            },
         )
     }
 
@@ -1225,29 +1351,32 @@ mod test {
         ck(
             include,
             "include \"foo.rnc\" { a = b  c=d }",
-            Include(
-                Literal(
+            Include {
+                uri: Literal(
                     8..17,
                     vec![LiteralSegment {
                         body: "foo.rnc".to_string(),
                     }],
                 ),
-                None,
-                Some(vec![
-                    IncludeContent::Define(Define(
-                        20..25,
-                        Identifier(20..21, "a".to_string()),
-                        AssignMethod::Assign,
-                        Pattern::Identifier(Identifier(24..25, "b".to_string())),
-                    )),
-                    IncludeContent::Define(Define(
-                        27..30,
-                        Identifier(27..28, "c".to_string()),
-                        AssignMethod::Assign,
-                        Pattern::Identifier(Identifier(29..30, "d".to_string())),
-                    )),
+                inherit: None,
+                content: Some(vec![
+                    IncludeContent::Define(Define {
+                        span: 20..25,
+                        identifier: Identifier(20..21, "a".to_string()),
+                        assign_method: AssignMethod::Assign,
+                        pattern: Pattern::Identifier(Identifier(24..25, "b".to_string())),
+                        annotations: None,
+                    }),
+                    IncludeContent::Define(Define {
+                        span: 27..30,
+                        identifier: Identifier(27..28, "c".to_string()),
+                        assign_method: AssignMethod::Assign,
+                        pattern: Pattern::Identifier(Identifier(29..30, "d".to_string())),
+                        annotations: None,
+                    }),
                 ]),
-            ),
+                annotations: None,
+            },
         )
     }
 
@@ -1271,17 +1400,17 @@ mod test {
                     NcName(0..2, "ns".to_string()),
                     NcName(3..6, "foo".to_string()),
                 )),
-                Some(vec![Param(
-                    9..24,
-                    None,
-                    IdentifierOrKeyword::Identifier(Identifier(9..16, "pattern".to_string())),
-                    Literal(
+                Some(vec![Param {
+                    span: 9..24,
+                    annotations: None,
+                    name: IdentifierOrKeyword::Identifier(Identifier(9..16, "pattern".to_string())),
+                    value: Literal(
                         19..24,
                         vec![LiteralSegment {
                             body: "bar".to_string(),
                         }],
                     ),
-                )]),
+                }]),
                 None,
             )),
         )
@@ -1296,11 +1425,11 @@ mod test {
                 decls: vec![],
                 pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
                     span: 0..0,
-                    content: vec![GrammarContent::Define(Define(
-                        0..30,
-                        Identifier(0..16, "integer.datatype".to_string()),
-                        AssignMethod::Assign,
-                        Pattern::DatatypeName(DatatypeNamePattern(
+                    content: vec![GrammarContent::Define(Define {
+                        span: 0..30,
+                        identifier: Identifier(0..16, "integer.datatype".to_string()),
+                        assign_method: AssignMethod::Assign,
+                        pattern: Pattern::DatatypeName(DatatypeNamePattern(
                             19..30,
                             DatatypeName::CName(QName(
                                 NcName(19..22, "xsd".to_string()),
@@ -1309,7 +1438,8 @@ mod test {
                             None,
                             None,
                         )),
-                    ))],
+                        annotations: None,
+                    })],
                 }),
             },
         )
@@ -1326,11 +1456,11 @@ mod test {
                 decls: vec![],
                 pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
                     span: 0..0,
-                    content: vec![GrammarContent::Define(Define(
-                        0..30,
-                        Identifier(0..16, "integer.datatype".to_string()),
-                        AssignMethod::Assign,
-                        Pattern::DatatypeName(DatatypeNamePattern(
+                    content: vec![GrammarContent::Define(Define {
+                        span: 0..30,
+                        identifier: Identifier(0..16, "integer.datatype".to_string()),
+                        assign_method: AssignMethod::Assign,
+                        pattern: Pattern::DatatypeName(DatatypeNamePattern(
                             19..30,
                             DatatypeName::CName(QName(
                                 NcName(19..22, "xsd".to_string()),
@@ -1339,7 +1469,8 @@ mod test {
                             None,
                             None,
                         )),
-                    ))],
+                        annotations: None,
+                    })],
                 }),
             },
         )
@@ -1401,5 +1532,152 @@ mod test {
                 })),
             },
         )
+    }
+
+    #[test]
+    fn test_documentation_single() {
+        ck(
+            documentation,
+            "## A greeting",
+            Documentation {
+                span: 0..13,
+                content: "A greeting".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_documentation_strips_leading_space() {
+        ck(
+            documentation,
+            "##No space",
+            Documentation {
+                span: 0..10,
+                content: "No space".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_documentations_multiple() {
+        let input = "## Line one\n## Line two";
+        let (remaining, result) =
+            documentations(LocatedSpan::new(input)).expect("failed to parse");
+        assert_eq!(remaining.fragment(), &"");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].content, "Line one");
+        assert_eq!(result[1].content, "Line two");
+    }
+
+    #[test]
+    fn test_maybe_annotations_docs_only() {
+        let input = "## A doc comment\nelement";
+        let (remaining, result) =
+            maybe_annotations(LocatedSpan::new(input)).expect("failed to parse");
+        assert_eq!(remaining.fragment(), &"element");
+        let annos = result.unwrap();
+        assert_eq!(annos.documentation.len(), 1);
+        assert_eq!(annos.documentation[0].content, "A doc comment");
+        assert!(annos.initial.is_none());
+    }
+
+    #[test]
+    fn test_maybe_annotations_bracket_only() {
+        let input = "[ xml:lang=\"en\" ] element";
+        let (remaining, result) =
+            maybe_annotations(LocatedSpan::new(input)).expect("failed to parse");
+        assert_eq!(remaining.fragment(), &"element");
+        let annos = result.unwrap();
+        assert!(annos.documentation.is_empty());
+        assert!(annos.initial.is_some());
+        assert_eq!(annos.initial.unwrap().attribute_annotations.len(), 1);
+    }
+
+    #[test]
+    fn test_maybe_annotations_docs_and_bracket() {
+        let input = "## Some docs\n[ xml:lang=\"en\" ] element";
+        let (remaining, result) =
+            maybe_annotations(LocatedSpan::new(input)).expect("failed to parse");
+        assert_eq!(remaining.fragment(), &"element");
+        let annos = result.unwrap();
+        assert_eq!(annos.documentation.len(), 1);
+        assert_eq!(annos.documentation[0].content, "Some docs");
+        assert!(annos.initial.is_some());
+    }
+
+    #[test]
+    fn test_pattern_with_doc_annotation() {
+        let input = "## A greeting\nelement greeting { text }";
+        let (remaining, result) =
+            pattern(LocatedSpan::new(input)).expect("failed to parse");
+        assert_eq!(remaining.fragment(), &"");
+        match result {
+            Pattern::Annotated(annos, inner) => {
+                assert_eq!(annos.documentation.len(), 1);
+                assert_eq!(annos.documentation[0].content, "A greeting");
+                assert!(matches!(*inner, Pattern::Element(_)));
+            }
+            other => panic!("Expected Annotated pattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_pattern_with_bracket_annotation() {
+        let input = "[ xml:lang=\"en\" ] element foo { text }";
+        let (remaining, result) =
+            pattern(LocatedSpan::new(input)).expect("failed to parse");
+        assert_eq!(remaining.fragment(), &"");
+        match result {
+            Pattern::Annotated(annos, inner) => {
+                assert!(annos.initial.is_some());
+                assert!(matches!(*inner, Pattern::Element(_)));
+            }
+            other => panic!("Expected Annotated pattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unannotated_pattern_no_wrap() {
+        // Unannotated patterns should NOT be wrapped in Annotated
+        ck(
+            pattern,
+            "text",
+            Pattern::Text(Some(0..4)),
+        );
+    }
+
+    #[test]
+    fn test_grammar_content_with_doc_annotation() {
+        let input = "## The start\nstart = element root { empty }";
+        let (remaining, result) =
+            grammar_content(LocatedSpan::new(input)).expect("failed to parse");
+        assert_eq!(remaining.fragment(), &"");
+        match result {
+            GrammarContent::Define(d) => {
+                assert!(d.annotations.is_some());
+                let annos = d.annotations.unwrap();
+                assert_eq!(annos.documentation.len(), 1);
+                assert_eq!(annos.documentation[0].content, "The start");
+            }
+            other => panic!("Expected Define, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_single_comment_not_doc() {
+        // A single # comment should NOT be parsed as documentation
+        let input = "# regular comment\nelement foo { text }";
+        let (remaining, result) =
+            pattern(LocatedSpan::new(input)).expect("failed to parse");
+        assert_eq!(remaining.fragment(), &"");
+        // No annotation wrapping since # comment is consumed as whitespace
+        assert!(matches!(result, Pattern::Element(_)));
+    }
+
+    #[test]
+    fn test_annotation_attribute_requires_cname() {
+        // Unprefixed attribute names should fail
+        let result = annotation_attribute(LocatedSpan::new("lang=\"en\""));
+        assert!(result.is_err());
     }
 }

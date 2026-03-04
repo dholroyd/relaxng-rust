@@ -106,8 +106,8 @@ impl super::DatatypeCompiler for Compiler {
     ) -> Result<Self::DT, Self::Error> {
         if !params.is_empty() {
             return Err(Error::ParamNotAllowed {
-                span: ctx.convert_span(&params[0].0),
-                name: params[0].2.to_string(),
+                span: ctx.convert_span(&params[0].span),
+                name: params[0].name.to_string(),
             });
         }
         Ok(match name {

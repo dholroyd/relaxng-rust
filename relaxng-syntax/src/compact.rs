@@ -76,13 +76,13 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
     } else {
         space_comment1(input)?
     };
+    let start = input.location_offset();
     let (input, pattern_or_grammar) = alt((
-        // TODO: proper span for GrammarPattern
         map(
             separated_list1(space_comment1, grammar_content),
             |content| {
                 PatternOrGrammar::Grammar(GrammarPattern {
-                    span: 0..0,
+                    span: 0..0, // patched below
                     content,
                 })
             },
@@ -90,6 +90,13 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
         map(pattern, PatternOrGrammar::Pattern),
     ))
     .parse(input)?;
+    let pattern_or_grammar = match pattern_or_grammar {
+        PatternOrGrammar::Grammar(mut g) => {
+            g.span = start..input.location_offset();
+            PatternOrGrammar::Grammar(g)
+        }
+        other => other,
+    };
     Ok((
         input,
         Schema {
@@ -1500,7 +1507,7 @@ mod test {
             Schema {
                 decls: vec![],
                 pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
-                    span: 0..0,
+                    span: 0..30,
                     content: vec![GrammarContent::Define(Define {
                         span: 0..30,
                         identifier: Identifier(0..16, "integer.datatype".to_string()),
@@ -1531,7 +1538,7 @@ mod test {
             Schema {
                 decls: vec![],
                 pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
-                    span: 0..0,
+                    span: 0..30,
                     content: vec![GrammarContent::Define(Define {
                         span: 0..30,
                         identifier: Identifier(0..16, "integer.datatype".to_string()),

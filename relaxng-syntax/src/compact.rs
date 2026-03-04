@@ -23,7 +23,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::ops::{Range, RangeBounds};
 
-const MAX_RECURSION_DEPTH: usize = 40;
+const MAX_RECURSION_DEPTH: usize = 30;
 
 thread_local! {
     static RECURSION_DEPTH: Cell<usize> = const { Cell::new(0) };
@@ -474,8 +474,10 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
 //    | "external" anyURILiteral [inherit]
 //    | "grammar" "{" grammarContent* "}"
 //    | "(" pattern ")"
-fn pattern(input: Span) -> IResult<Span, Pattern> {
-    let (input, _guard) = RecursionGuard::enter(input)?;
+// Parse a single atomic pattern with annotations and postfix operators (?, *, +).
+// This does NOT handle binary operators (|, &, ,) — those are handled iteratively
+// in `pattern` to avoid O(n) recursion depth on long chains like `a | b | c | ...`.
+fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = ws0(input)?;
     let (input, mut result) = alt((
@@ -513,29 +515,9 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
         result = Pattern::Annotated(annos, Box::new(result));
     }
 
+    // Postfix operators bind tighter than binary operators
     loop {
         let (i, _) = space_comment0(input)?;
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>(",")(i) {
-            let (i, _) = space_comment0(i)?;
-            let (i, right) = pattern(i)?;
-            result = Pattern::ListPair(Box::new(result), Box::new(right));
-            input = i;
-            continue;
-        }
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("&")(i) {
-            let (i, _) = space_comment0(i)?;
-            let (i, right) = pattern(i)?;
-            result = Pattern::InterleavePair(Box::new(result), Box::new(right));
-            input = i;
-            continue;
-        }
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("|")(i) {
-            let (i, _) = space_comment0(i)?;
-            let (i, right) = pattern(i)?;
-            result = Pattern::ChoicePair(Box::new(result), Box::new(right));
-            input = i;
-            continue;
-        }
         if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("?")(i) {
             result = Pattern::Optional(Box::new(result));
             input = i;
@@ -548,6 +530,38 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
         }
         if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("+")(i) {
             result = Pattern::OneOrMore(Box::new(result));
+            input = i;
+            continue;
+        }
+        break;
+    }
+    IResult::Ok((input, result))
+}
+
+fn pattern(input: Span) -> IResult<Span, Pattern> {
+    let (input, _guard) = RecursionGuard::enter(input)?;
+    let (mut input, mut result) = pattern_primary(input)?;
+
+    loop {
+        let (i, _) = space_comment0(input)?;
+        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>(",")(i) {
+            let (i, _) = space_comment0(i)?;
+            let (i, right) = pattern_primary(i)?;
+            result = Pattern::ListPair(Box::new(result), Box::new(right));
+            input = i;
+            continue;
+        }
+        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("&")(i) {
+            let (i, _) = space_comment0(i)?;
+            let (i, right) = pattern_primary(i)?;
+            result = Pattern::InterleavePair(Box::new(result), Box::new(right));
+            input = i;
+            continue;
+        }
+        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("|")(i) {
+            let (i, _) = space_comment0(i)?;
+            let (i, right) = pattern_primary(i)?;
+            result = Pattern::ChoicePair(Box::new(result), Box::new(right));
             input = i;
             continue;
         }
@@ -782,15 +796,15 @@ fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
     .parse(input)
 }
 
-fn name_class(input: Span) -> IResult<Span, NameClass> {
-    let (input, _guard) = RecursionGuard::enter(input)?;
+// Parse a single atomic name class with annotations.
+// Does NOT handle the binary `|` operator — that is handled iteratively in `name_class`.
+fn name_class_primary(input: Span) -> IResult<Span, NameClass> {
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = ws0(input)?;
     let (input, left) = alt((
         map(ns_name_nc, NameClass::NsName),
         map(name, NameClass::Name),
         map(any_name_nc, NameClass::AnyName),
-        //map(alt_nc, |r| NameClass::Alt(r)),
         map(paren_nc, NameClass::Paren),
     ))
     .parse(input)?;
@@ -810,14 +824,26 @@ fn name_class(input: Span) -> IResult<Span, NameClass> {
         left
     };
 
-    if let Ok((input, right)) = alt_nc(input) {
-        return Ok((
-            input,
-            NameClass::Alt(AltName(Box::new(left), Box::new(right))),
-        ));
+    Ok((input, left))
+}
+
+fn name_class(input: Span) -> IResult<Span, NameClass> {
+    let (input, _guard) = RecursionGuard::enter(input)?;
+    let (mut input, mut result) = name_class_primary(input)?;
+
+    loop {
+        let (i, _) = space_comment0(input)?;
+        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("|")(i) {
+            let (i, _) = space_comment0(i)?;
+            let (i, right) = name_class_primary(i)?;
+            result = NameClass::Alt(AltName(Box::new(result), Box::new(right)));
+            input = i;
+            continue;
+        }
+        break;
     }
 
-    Ok((input, left))
+    Ok((input, result))
 }
 
 // name	  ::=  	identifierOrKeyword
@@ -854,14 +880,6 @@ fn any_name_nc(input: Span) -> IResult<Span, AnyName> {
     let mut parser = map(parse, |(_, except)| {
         AnyName(except.map(|(_, _, _, name_class)| Box::new(name_class)))
     });
-
-    parser.parse(input)
-}
-
-fn alt_nc(input: Span) -> IResult<Span, NameClass> {
-    let parse = (space_comment0, tag("|"), space_comment0, name_class);
-
-    let mut parser = map(parse, |(_, _, _, right)| right);
 
     parser.parse(input)
 }
@@ -1442,11 +1460,11 @@ mod test {
             pattern,
             "a,b , c",
             Pattern::ListPair(
-                Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string()))),
                 Box::new(Pattern::ListPair(
+                    Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string()))),
                     Box::new(Pattern::Identifier(Identifier(2..3, "b".to_string()))),
-                    Box::new(Pattern::Identifier(Identifier(6..7, "c".to_string()))),
                 )),
+                Box::new(Pattern::Identifier(Identifier(6..7, "c".to_string()))),
             ),
         )
     }
@@ -1894,6 +1912,16 @@ mod test {
         let input = format!("start = element {parens} {{ text }}");
         let result = schema(LocatedSpan::new(&input));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn long_choice_chain() {
+        // Regression test: long | chains should not hit the recursion limit
+        // because binary operators are parsed iteratively, not recursively.
+        let names: Vec<String> = (0..50).map(|i| format!("x{i}")).collect();
+        let input = format!("start = {}", names.join(" | "));
+        let result = schema(LocatedSpan::new(&input));
+        assert!(result.is_ok(), "50-way choice should parse: {result:?}");
     }
 
     #[test]

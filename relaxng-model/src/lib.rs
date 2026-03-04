@@ -1186,7 +1186,13 @@ impl<FS: Files> Compiler<FS> {
                 code: None,
                 spans: vec![],
             },
-            RelaxError::Parse(span, _kind) => {
+            RelaxError::Parse(span, kind) => {
+                let message = match kind {
+                    nom::error::ErrorKind::TooLarge => {
+                        "Expression is too deeply nested".to_string()
+                    }
+                    _ => format!("Parse error: {kind:?}"),
+                };
                 let label = codemap_diagnostic::SpanLabel {
                     span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
@@ -1194,7 +1200,7 @@ impl<FS: Files> Compiler<FS> {
                 };
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: "Parse error".to_string(),
+                    message,
                     code: None,
                     spans: vec![label],
                 }

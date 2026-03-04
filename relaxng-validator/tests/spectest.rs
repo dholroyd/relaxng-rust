@@ -108,8 +108,7 @@ fn collect_case(
     // Detect if this test should be ignored (TODO/unimplemented)
     let ignored = is_suppressed(&test_case);
 
-    let trial = Trial::test(name, move || run_test(test_case))
-        .with_ignored_flag(ignored);
+    let trial = Trial::test(name, move || run_test(test_case)).with_ignored_flag(ignored);
     trials.push(trial);
 }
 
@@ -131,10 +130,9 @@ fn is_suppressed(test_case: &TestCase) -> bool {
         c.compile(Path::new(&schema_key))
     });
     match result {
-        Ok(Err(relaxng_model::RelaxError::XmlParse(
-            _,
-            relaxng_syntax::xml::Error::Todo(_),
-        ))) => true,
+        Ok(Err(relaxng_model::RelaxError::XmlParse(_, relaxng_syntax::xml::Error::Todo(_)))) => {
+            true
+        }
         _ => false,
     }
 }
@@ -163,9 +161,7 @@ fn run_test(test_case: TestCase) -> Result<(), Failed> {
                 Ok(r) => r,
                 Err(e) => {
                     let schema = resources.get("correct.rng").unwrap();
-                    return Err(
-                        format!("Correct schema was rejected: {e:?}\n{schema}").into()
-                    );
+                    return Err(format!("Correct schema was rejected: {e:?}\n{schema}").into());
                 }
             };
 

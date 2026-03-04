@@ -133,39 +133,109 @@ pub enum RestrictionKind {
 impl std::fmt::Display for RestrictionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RestrictionKind::AttributeContainsAttribute => write!(f, "attribute must not contain attribute (section 7.1.1)"),
-            RestrictionKind::DuplicateAttribute => write!(f, "duplicate attribute in oneOrMore (section 7.1.2)"),
-            RestrictionKind::ListContainsList => write!(f, "list must not contain list (section 7.1.3)"),
-            RestrictionKind::ListContainsAttribute => write!(f, "list must not contain attribute (section 7.1.3)"),
-            RestrictionKind::ListContainsText => write!(f, "list must not contain text (section 7.1.3)"),
-            RestrictionKind::ListContainsInterleave => write!(f, "list must not contain interleave (section 7.1.3)"),
-            RestrictionKind::ListContainsElement => write!(f, "list must not contain element (section 7.1.3)"),
-            RestrictionKind::DataExceptContainsAttribute => write!(f, "data/except must not contain attribute (section 7.1.4)"),
-            RestrictionKind::DataExceptContainsText => write!(f, "data/except must not contain text (section 7.1.4)"),
-            RestrictionKind::DataExceptContainsList => write!(f, "data/except must not contain list (section 7.1.4)"),
-            RestrictionKind::DataExceptContainsGroup => write!(f, "data/except must not contain group (section 7.1.4)"),
-            RestrictionKind::DataExceptContainsInterleave => write!(f, "data/except must not contain interleave (section 7.1.4)"),
-            RestrictionKind::DataExceptContainsOneOrMore => write!(f, "data/except must not contain oneOrMore (section 7.1.4)"),
-            RestrictionKind::DataExceptContainsEmpty => write!(f, "data/except must not contain empty (section 7.1.4)"),
-            RestrictionKind::DataExceptContainsElement => write!(f, "data/except must not contain element (section 7.1.4)"),
-            RestrictionKind::StartContainsAttribute => write!(f, "start must not contain attribute (section 7.1.5)"),
-            RestrictionKind::StartContainsData => write!(f, "start must not contain data (section 7.1.5)"),
-            RestrictionKind::StartContainsValue => write!(f, "start must not contain value (section 7.1.5)"),
-            RestrictionKind::StartContainsText => write!(f, "start must not contain text (section 7.1.5)"),
-            RestrictionKind::StartContainsList => write!(f, "start must not contain list (section 7.1.5)"),
-            RestrictionKind::StartContainsGroup => write!(f, "start must not contain group (section 7.1.5)"),
-            RestrictionKind::StartContainsInterleave => write!(f, "start must not contain interleave (section 7.1.5)"),
-            RestrictionKind::StartContainsOneOrMore => write!(f, "start must not contain oneOrMore (section 7.1.5)"),
-            RestrictionKind::StartContainsEmpty => write!(f, "start must not contain empty (section 7.1.5)"),
-            RestrictionKind::StringSequence => write!(f, "incompatible content types in group/interleave (section 7.2)"),
-            RestrictionKind::AttributeNameOverlap => write!(f, "overlapping attribute names (section 7.3)"),
-            RestrictionKind::AttributeInfiniteNameClass => write!(f, "attribute with infinite name class (section 7.3)"),
-            RestrictionKind::InterleaveElementOverlap => write!(f, "interleave contains elements with overlapping names (section 7.4)"),
-            RestrictionKind::InterleaveTextOverlap => write!(f, "interleave contains multiple text patterns (section 7.4)"),
-            RestrictionKind::AnyNameExceptContainsAnyName => write!(f, "anyName/except must not contain anyName"),
-            RestrictionKind::NsNameExceptContainsNsNameOrAnyName => write!(f, "nsName/except must not contain nsName or anyName"),
-            RestrictionKind::AttributeNameXmlns => write!(f, "attribute with empty namespace must not be named 'xmlns'"),
-            RestrictionKind::AttributeNamespaceXmlns => write!(f, "attribute name must not use XMLNS namespace"),
+            RestrictionKind::AttributeContainsAttribute => {
+                write!(f, "attribute must not contain attribute (section 7.1.1)")
+            }
+            RestrictionKind::DuplicateAttribute => {
+                write!(f, "duplicate attribute in oneOrMore (section 7.1.2)")
+            }
+            RestrictionKind::ListContainsList => {
+                write!(f, "list must not contain list (section 7.1.3)")
+            }
+            RestrictionKind::ListContainsAttribute => {
+                write!(f, "list must not contain attribute (section 7.1.3)")
+            }
+            RestrictionKind::ListContainsText => {
+                write!(f, "list must not contain text (section 7.1.3)")
+            }
+            RestrictionKind::ListContainsInterleave => {
+                write!(f, "list must not contain interleave (section 7.1.3)")
+            }
+            RestrictionKind::ListContainsElement => {
+                write!(f, "list must not contain element (section 7.1.3)")
+            }
+            RestrictionKind::DataExceptContainsAttribute => {
+                write!(f, "data/except must not contain attribute (section 7.1.4)")
+            }
+            RestrictionKind::DataExceptContainsText => {
+                write!(f, "data/except must not contain text (section 7.1.4)")
+            }
+            RestrictionKind::DataExceptContainsList => {
+                write!(f, "data/except must not contain list (section 7.1.4)")
+            }
+            RestrictionKind::DataExceptContainsGroup => {
+                write!(f, "data/except must not contain group (section 7.1.4)")
+            }
+            RestrictionKind::DataExceptContainsInterleave => {
+                write!(f, "data/except must not contain interleave (section 7.1.4)")
+            }
+            RestrictionKind::DataExceptContainsOneOrMore => {
+                write!(f, "data/except must not contain oneOrMore (section 7.1.4)")
+            }
+            RestrictionKind::DataExceptContainsEmpty => {
+                write!(f, "data/except must not contain empty (section 7.1.4)")
+            }
+            RestrictionKind::DataExceptContainsElement => {
+                write!(f, "data/except must not contain element (section 7.1.4)")
+            }
+            RestrictionKind::StartContainsAttribute => {
+                write!(f, "start must not contain attribute (section 7.1.5)")
+            }
+            RestrictionKind::StartContainsData => {
+                write!(f, "start must not contain data (section 7.1.5)")
+            }
+            RestrictionKind::StartContainsValue => {
+                write!(f, "start must not contain value (section 7.1.5)")
+            }
+            RestrictionKind::StartContainsText => {
+                write!(f, "start must not contain text (section 7.1.5)")
+            }
+            RestrictionKind::StartContainsList => {
+                write!(f, "start must not contain list (section 7.1.5)")
+            }
+            RestrictionKind::StartContainsGroup => {
+                write!(f, "start must not contain group (section 7.1.5)")
+            }
+            RestrictionKind::StartContainsInterleave => {
+                write!(f, "start must not contain interleave (section 7.1.5)")
+            }
+            RestrictionKind::StartContainsOneOrMore => {
+                write!(f, "start must not contain oneOrMore (section 7.1.5)")
+            }
+            RestrictionKind::StartContainsEmpty => {
+                write!(f, "start must not contain empty (section 7.1.5)")
+            }
+            RestrictionKind::StringSequence => write!(
+                f,
+                "incompatible content types in group/interleave (section 7.2)"
+            ),
+            RestrictionKind::AttributeNameOverlap => {
+                write!(f, "overlapping attribute names (section 7.3)")
+            }
+            RestrictionKind::AttributeInfiniteNameClass => {
+                write!(f, "attribute with infinite name class (section 7.3)")
+            }
+            RestrictionKind::InterleaveElementOverlap => write!(
+                f,
+                "interleave contains elements with overlapping names (section 7.4)"
+            ),
+            RestrictionKind::InterleaveTextOverlap => write!(
+                f,
+                "interleave contains multiple text patterns (section 7.4)"
+            ),
+            RestrictionKind::AnyNameExceptContainsAnyName => {
+                write!(f, "anyName/except must not contain anyName")
+            }
+            RestrictionKind::NsNameExceptContainsNsNameOrAnyName => {
+                write!(f, "nsName/except must not contain nsName or anyName")
+            }
+            RestrictionKind::AttributeNameXmlns => write!(
+                f,
+                "attribute with empty namespace must not be named 'xmlns'"
+            ),
+            RestrictionKind::AttributeNamespaceXmlns => {
+                write!(f, "attribute name must not use XMLNS namespace")
+            }
         }
     }
 }
@@ -355,9 +425,7 @@ fn walk(
             walk(seen, inner_flags, body)
         }
 
-        Pattern::Optional(body) => {
-            walk(seen, flags, body)
-        }
+        Pattern::Optional(body) => walk(seen, flags, body),
 
         Pattern::Mixed(body) => {
             // Mixed = interleave(text, body)
@@ -474,7 +542,10 @@ fn walk_group_or_interleave(
     }
 
     // Content type is max of children
-    Ok(content_types.into_iter().max().unwrap_or(ContentType::Empty))
+    Ok(content_types
+        .into_iter()
+        .max()
+        .unwrap_or(ContentType::Empty))
 }
 
 /// Section 7.3: check that attributes from different branches don't have overlapping names
@@ -573,11 +644,7 @@ fn collect_attributes(
 }
 
 /// Collect element name-classes from a pattern tree, stopping at Element body boundaries.
-fn collect_elements(
-    pattern: &Pattern,
-    elems: &mut Vec<NameClass>,
-    seen_refs: &mut HashSet<usize>,
-) {
+fn collect_elements(pattern: &Pattern, elems: &mut Vec<NameClass>, seen_refs: &mut HashSet<usize>) {
     match pattern {
         Pattern::Element(nc, _, _, _) => {
             elems.push(nc.clone());
@@ -661,10 +728,16 @@ fn name_class_overlaps(a: &NameClass, b: &NameClass) -> bool {
                 namespace_uri,
                 name,
             },
-            NameClass::NsName { namespace_uri: ns, except },
+            NameClass::NsName {
+                namespace_uri: ns,
+                except,
+            },
         )
         | (
-            NameClass::NsName { namespace_uri: ns, except },
+            NameClass::NsName {
+                namespace_uri: ns,
+                except,
+            },
             NameClass::Named {
                 namespace_uri,
                 name,
@@ -734,7 +807,9 @@ fn name_class_contains(nc: &NameClass, ns: &str, name: &str) -> bool {
         NameClass::AnyName { except } => !except
             .as_ref()
             .is_some_and(|e| name_class_contains(e, ns, name)),
-        NameClass::Alt { a, b } => name_class_contains(a, ns, name) || name_class_contains(b, ns, name),
+        NameClass::Alt { a, b } => {
+            name_class_contains(a, ns, name) || name_class_contains(b, ns, name)
+        }
     }
 }
 
@@ -784,13 +859,18 @@ fn check_attribute_name_class(nc: &NameClass) -> Result<(), RestrictionKind> {
 /// - nsName/except must not contain nsName or anyName descendants
 pub fn check_name_class_restrictions(nc: &NameClass) -> Result<(), RestrictionKind> {
     match nc {
-        NameClass::AnyName { except: Some(except) } => {
+        NameClass::AnyName {
+            except: Some(except),
+        } => {
             if contains_any_name(except) {
                 return Err(RestrictionKind::AnyNameExceptContainsAnyName);
             }
             check_name_class_restrictions(except)
         }
-        NameClass::NsName { except: Some(except), .. } => {
+        NameClass::NsName {
+            except: Some(except),
+            ..
+        } => {
             if contains_ns_name_or_any_name(except) {
                 return Err(RestrictionKind::NsNameExceptContainsNsNameOrAnyName);
             }

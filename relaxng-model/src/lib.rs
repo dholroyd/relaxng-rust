@@ -691,7 +691,12 @@ impl<FS: Files> Compiler<FS> {
             let mut seen = HashSet::new();
             let mut expanding = HashSet::new();
             // Check for undefined references and recursive references without element
-            self.check(&mut seen, &mut expanding, false, start.borrow().as_ref().unwrap().pattern())?;
+            self.check(
+                &mut seen,
+                &mut expanding,
+                false,
+                start.borrow().as_ref().unwrap().pattern(),
+            )?;
             // Section 7 restrictions (must run after simplification/normalization)
             restrictions::check_restrictions(start.borrow().as_ref().unwrap().pattern())
                 .map_err(RelaxError::RestrictionViolation)?;
@@ -1279,16 +1284,12 @@ impl<FS: Files> Compiler<FS> {
         let span = ctx.convert_span(&define.identifier.0);
         let new_rule = match define.assign_method {
             types::AssignMethod::Assign => model::DefineRule::AssignCombine(span, None, rule),
-            types::AssignMethod::Choice => model::DefineRule::CombineOnly(
-                span,
-                model::CombineRule::Choice,
-                rule,
-            ),
-            types::AssignMethod::Interleave => model::DefineRule::CombineOnly(
-                span,
-                model::CombineRule::Interleave,
-                rule,
-            ),
+            types::AssignMethod::Choice => {
+                model::DefineRule::CombineOnly(span, model::CombineRule::Choice, rule)
+            }
+            types::AssignMethod::Interleave => {
+                model::DefineRule::CombineOnly(span, model::CombineRule::Interleave, rule)
+            }
         };
         ctx.define(&id, new_rule)?;
         Ok(())
@@ -1659,7 +1660,11 @@ impl<FS: Files> Compiler<FS> {
         }
         let ns_override: Option<String> = external.2.clone().or_else(|| {
             let ns = ctx.default_namespace_uri();
-            if ns.is_empty() { None } else { Some(ns.to_string()) }
+            if ns.is_empty() {
+                None
+            } else {
+                Some(ns.to_string())
+            }
         });
         let path = Path::new(ctx.file().name())
             .parent()
@@ -1843,7 +1848,13 @@ impl<FS: Files> Compiler<FS> {
         let span = Some(ctx.convert_span(&datatype_value.0));
         let datatype = self
             .datatype_compiler
-            .datatype_value(ctx, &name, &datatype_value.2.as_string_value(), datatype_value.3.as_deref(), &datatype_value.4)
+            .datatype_value(
+                ctx,
+                &name,
+                &datatype_value.2.as_string_value(),
+                datatype_value.3.as_deref(),
+                &datatype_value.4,
+            )
             .map_err(RelaxError::DatatypeError)?;
         Ok(Pattern::DatatypeValue { datatype, span })
     }
@@ -1955,7 +1966,11 @@ impl<FS: Files> Compiler<FS> {
                     let ns = namespace_uri.as_string_value();
                     let ns = if ns.is_empty() && elem_attr == ElemAttr::Element {
                         let default = ctx.default_namespace_uri();
-                        if default.is_empty() { ns } else { default.to_string() }
+                        if default.is_empty() {
+                            ns
+                        } else {
+                            default.to_string()
+                        }
                     } else {
                         ns
                     };
@@ -2208,4 +2223,3 @@ mod tests {
         })
     }
 }
-

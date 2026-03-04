@@ -516,7 +516,9 @@ fn external_pattern(input: Span) -> IResult<Span, ExternalPattern> {
         opt(map((space_comment1, inherit), |(_, inherit)| inherit)),
     );
 
-    let mut parser = map(parse, |(_, _, uri, inherit)| ExternalPattern(uri, inherit, None));
+    let mut parser = map(parse, |(_, _, uri, inherit)| {
+        ExternalPattern(uri, inherit, None)
+    });
 
     parser.parse(input)
 }
@@ -1133,13 +1135,7 @@ fn annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute> {
 
 /// Per spec, nestedAnnotationAttributes use anyAttributeName (identifierOrKeyword | prefixedName)
 fn nested_annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute> {
-    let parse = (
-        name,
-        space_comment0,
-        tag("="),
-        space_comment0,
-        literal,
-    );
+    let parse = (name, space_comment0, tag("="), space_comment0, literal);
 
     let mut parser = map(parse, |(name, _, _, _, value)| AnnotationAttribute {
         span: Range {

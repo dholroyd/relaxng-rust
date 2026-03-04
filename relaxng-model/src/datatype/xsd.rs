@@ -1097,15 +1097,18 @@ impl Compiler {
                 let qname = QNameVal::resolve(value, &default_ns, |prefix| {
                     // First check ns_bindings from the schema element (XML syntax),
                     // then fall back to context namespace declarations (compact syntax)
-                    ns_bindings.iter()
+                    ns_bindings
+                        .iter()
                         .find(|(p, _)| p == prefix)
                         .map(|(_, uri)| uri.clone())
-                        .or_else(|| ctx.namespace_uri_for_prefix_str(prefix).map(|s| s.to_string()))
-                }).map_err(|_| {
-                    XsdDatatypeError::InvalidValueOfType {
-                        span: ctx.convert_span(span),
-                        type_name: "QName",
-                    }
+                        .or_else(|| {
+                            ctx.namespace_uri_for_prefix_str(prefix)
+                                .map(|s| s.to_string())
+                        })
+                })
+                .map_err(|_| XsdDatatypeError::InvalidValueOfType {
+                    span: ctx.convert_span(span),
+                    type_name: "QName",
                 })?;
                 Ok(XsdDatatypeValues::QName(qname))
             }
@@ -2128,9 +2131,7 @@ impl Compiler {
             .value
             .as_string_value()
             .parse::<f32>()
-            .map_err(|e| {
-                FacetError::InvalidFloat(ctx.convert_span(&param.span), e.to_string())
-            })
+            .map_err(|e| FacetError::InvalidFloat(ctx.convert_span(&param.span), e.to_string()))
             .and_then(|v| {
                 if v.is_finite() {
                     Ok(FiniteF32(v))
@@ -2148,9 +2149,7 @@ impl Compiler {
             .value
             .as_string_value()
             .parse::<f64>()
-            .map_err(|e| {
-                FacetError::InvalidFloat(ctx.convert_span(&param.span), e.to_string())
-            })
+            .map_err(|e| FacetError::InvalidFloat(ctx.convert_span(&param.span), e.to_string()))
             .and_then(|v| {
                 if v.is_finite() {
                     Ok(FiniteF64(v))
@@ -2223,18 +2222,28 @@ pub struct QNameVal {
 impl QNameVal {
     /// Parse a QName string and resolve its prefix using the given namespace lookup.
     /// For unprefixed names, `default_ns` is used as the namespace URI.
-    pub fn resolve(val: &str, default_ns: &str, lookup_ns: impl Fn(&str) -> Option<String>) -> Result<Self, ()> {
+    pub fn resolve(
+        val: &str,
+        default_ns: &str,
+        lookup_ns: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, ()> {
         if let Some(pos) = val.find(':') {
             let prefix = &val[0..pos];
             let localname = &val[pos + 1..];
             if is_valid_ncname(prefix) && is_valid_ncname(localname) {
                 let ns = lookup_ns(prefix).ok_or(())?;
-                Ok(QNameVal { namespace_uri: ns, localname: localname.to_string() })
+                Ok(QNameVal {
+                    namespace_uri: ns,
+                    localname: localname.to_string(),
+                })
             } else {
                 Err(())
             }
         } else if is_valid_ncname(val) {
-            Ok(QNameVal { namespace_uri: default_ns.to_string(), localname: val.to_string() })
+            Ok(QNameVal {
+                namespace_uri: default_ns.to_string(),
+                localname: val.to_string(),
+            })
         } else {
             Err(())
         }

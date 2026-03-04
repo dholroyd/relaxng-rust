@@ -130,7 +130,9 @@ impl NsContext {
         if prefix == "xml" {
             return Some("http://www.w3.org/XML/1998/namespace".to_string());
         }
-        self.bindings.iter().rev()
+        self.bindings
+            .iter()
+            .rev()
             .find(|(p, _)| p == prefix)
             .map(|(_, uri)| uri.clone())
     }
@@ -183,10 +185,7 @@ impl SchemaBuilder {
     }
 
     fn record_source_span(&mut self, id: PatId, span: codemap::Span) {
-        self.span_map
-            .entry(id.0)
-            .or_default()
-            .push(span);
+        self.span_map.entry(id.0).or_default().push(span);
     }
 
     fn choice(&mut self, left: PatId, right: PatId) -> PatId {
@@ -195,8 +194,8 @@ impl SchemaBuilder {
             (_, Some(Pat::NotAllowed)) => left,
             (Some(_), Some(_)) if left == right => left,
             (l, r) => {
-                let nullable = l.is_some_and(|p| p.is_nullable())
-                    || r.is_some_and(|p| p.is_nullable());
+                let nullable =
+                    l.is_some_and(|p| p.is_nullable()) || r.is_some_and(|p| p.is_nullable());
                 self.push(Pat::Choice(left, right, nullable))
             }
         }
@@ -208,8 +207,8 @@ impl SchemaBuilder {
             (Some(Pat::Empty), _) => right,
             (_, Some(Pat::Empty)) => left,
             (l, r) => {
-                let nullable = l.is_some_and(|p| p.is_nullable())
-                    && r.is_some_and(|p| p.is_nullable());
+                let nullable =
+                    l.is_some_and(|p| p.is_nullable()) && r.is_some_and(|p| p.is_nullable());
                 self.push(Pat::Interleave(left, right, nullable))
             }
         }
@@ -221,8 +220,8 @@ impl SchemaBuilder {
             (Some(Pat::Empty), _) => right,
             (_, Some(Pat::Empty)) => left,
             (l, r) => {
-                let nullable = l.is_some_and(|p| p.is_nullable())
-                    && r.is_some_and(|p| p.is_nullable());
+                let nullable =
+                    l.is_some_and(|p| p.is_nullable()) && r.is_some_and(|p| p.is_nullable());
                 self.push(Pat::Group(left, right, nullable))
             }
         }
@@ -2216,11 +2215,17 @@ impl<'a> ElementStack<'a> {
                     default_ns = ns.namespace_uri.as_str().to_string();
                 } else {
                     // Prefixed namespace (xmlns:prefix="...")
-                    bindings.push((ns.prefix.as_str().to_string(), ns.namespace_uri.as_str().to_string()));
+                    bindings.push((
+                        ns.prefix.as_str().to_string(),
+                        ns.namespace_uri.as_str().to_string(),
+                    ));
                 }
             }
         }
-        NsContext { default_ns, bindings }
+        NsContext {
+            default_ns,
+            bindings,
+        }
     }
 
     fn resolve_element_namespace(

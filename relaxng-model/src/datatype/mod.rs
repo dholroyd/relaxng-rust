@@ -122,7 +122,15 @@ impl DatatypeCompiler for Compiler {
             ),
             DatatypeName::NamespacedName(NamespacedName { namespace_uri, .. }) => {
                 let ns_str = &namespace_uri.as_string_value()[..];
-                self.dt_value(ctx, datatype_name, value, &namespace_uri.0, ns_str, ns, ns_bindings)
+                self.dt_value(
+                    ctx,
+                    datatype_name,
+                    value,
+                    &namespace_uri.0,
+                    ns_str,
+                    ns,
+                    ns_bindings,
+                )
             }
         }
     }

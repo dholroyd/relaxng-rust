@@ -50,8 +50,7 @@ impl XsdDatatypeValues {
             XsdDatatypeValues::String(s) => s == value,
             XsdDatatypeValues::Token(s) => s == &normalize_whitespace(value),
             XsdDatatypeValues::QName(v) => QNameVal::resolve(value, default_ns, lookup_ns)
-                .map(|resolved| &resolved == v)
-                .unwrap_or(false),
+                .is_some_and(|resolved| &resolved == v),
         }
     }
 }
@@ -1106,7 +1105,7 @@ impl Compiler {
                                 .map(|s| s.to_string())
                         })
                 })
-                .map_err(|_| XsdDatatypeError::InvalidValueOfType {
+                .ok_or(XsdDatatypeError::InvalidValueOfType {
                     span: ctx.convert_span(span),
                     type_name: "QName",
                 })?;
@@ -2226,26 +2225,26 @@ impl QNameVal {
         val: &str,
         default_ns: &str,
         lookup_ns: impl Fn(&str) -> Option<String>,
-    ) -> Result<Self, ()> {
+    ) -> Option<Self> {
         if let Some(pos) = val.find(':') {
             let prefix = &val[0..pos];
             let localname = &val[pos + 1..];
             if is_valid_ncname(prefix) && is_valid_ncname(localname) {
-                let ns = lookup_ns(prefix).ok_or(())?;
-                Ok(QNameVal {
+                let ns = lookup_ns(prefix)?;
+                Some(QNameVal {
                     namespace_uri: ns,
                     localname: localname.to_string(),
                 })
             } else {
-                Err(())
+                None
             }
         } else if is_valid_ncname(val) {
-            Ok(QNameVal {
+            Some(QNameVal {
                 namespace_uri: default_ns.to_string(),
                 localname: val.to_string(),
             })
         } else {
-            Err(())
+            None
         }
     }
 }

@@ -949,13 +949,8 @@ fn include_content(input: Span) -> IResult<Span, IncludeContent> {
     ))
     .parse(input)?;
 
-    if let Some(annotations) = annotations {
-        match &mut item {
-            IncludeContent::Define(d) => {
-                d.annotations = Some(annotations);
-            }
-            _ => {}
-        }
+    if let (Some(annotations), IncludeContent::Define(d)) = (annotations, &mut item) {
+        d.annotations = Some(annotations);
     }
 
     Ok((input, item))

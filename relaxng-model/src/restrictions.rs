@@ -256,7 +256,7 @@ fn is_effectively_not_allowed(pattern: &Pattern) -> bool {
         Pattern::NotAllowed => true,
         Pattern::Attribute(_, body, _, _) => is_effectively_not_allowed(body),
         Pattern::Group(children) | Pattern::Interleave(children) => {
-            children.iter().any(|c| is_effectively_not_allowed(c))
+            children.iter().any(is_effectively_not_allowed)
         }
         Pattern::OneOrMore(body) | Pattern::ZeroOrMore(body) | Pattern::Optional(body) => {
             is_effectively_not_allowed(body)
@@ -523,7 +523,7 @@ fn walk_group_or_interleave(
 
     // 7.2: check content type compatibility (does not apply inside list)
     if !flags.in_list {
-        let has_simple = content_types.iter().any(|ct| *ct == ContentType::Simple);
+        let has_simple = content_types.contains(&ContentType::Simple);
         let non_empty_count = content_types
             .iter()
             .filter(|ct| **ct != ContentType::Empty)

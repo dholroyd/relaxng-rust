@@ -115,8 +115,7 @@ impl DatatypeCompiler for Compiler {
                 ctx,
                 datatype_name,
                 value,
-                &namespace_uri.0,
-                &namespace_uri.1,
+                (&namespace_uri.0, &namespace_uri.1),
                 ns,
                 ns_bindings,
             ),
@@ -126,8 +125,7 @@ impl DatatypeCompiler for Compiler {
                     ctx,
                     datatype_name,
                     value,
-                    &namespace_uri.0,
-                    ns_str,
+                    (&namespace_uri.0, ns_str),
                     ns,
                     ns_bindings,
                 )
@@ -190,12 +188,11 @@ impl Compiler {
         ctx: &Context,
         datatype_name: &DatatypeName,
         value: &str,
-        ns_span: &types::Span,
-        ns: &str,
+        ns: (&types::Span, &str),
         value_ns: Option<&str>,
         ns_bindings: &[(String, String)],
     ) -> Result<DatatypeValues, Errors> {
-        match ns {
+        match ns.1 {
             "" => self
                 .relax
                 .datatype_value(ctx, datatype_name, value, value_ns, ns_bindings)
@@ -207,8 +204,8 @@ impl Compiler {
                 .map(DatatypeValues::Xsd)
                 .map_err(Errors::Xsd),
             _ => Err(Errors::UnsupportedDatatypeLibrary {
-                span: ctx.convert_span(ns_span),
-                namespace: ns.to_string(),
+                span: ctx.convert_span(ns.0),
+                namespace: ns.1.to_string(),
             }),
         }
     }

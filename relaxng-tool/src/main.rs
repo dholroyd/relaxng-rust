@@ -4,7 +4,7 @@ use relaxng_validator::{CoverageReport, Validator};
 
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 
 use structopt::StructOpt;
@@ -34,7 +34,7 @@ fn main() {
 }
 
 fn compile_schema(
-    schema: &PathBuf,
+    schema: &Path,
 ) -> std::rc::Rc<std::cell::RefCell<Option<relaxng_model::model::DefineRule>>> {
     let mut compiler = Compiler::default();
     match compiler.compile(schema) {
@@ -46,7 +46,7 @@ fn compile_schema(
     }
 }
 
-fn run_validation<'a>(v: &mut Validator<'a>, xml: &PathBuf, doc: String) {
+fn run_validation<'a>(v: &mut Validator<'a>, xml: &Path, doc: String) {
     loop {
         match v.validate_next() {
             Some(Ok(())) => {}

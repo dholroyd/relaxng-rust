@@ -93,6 +93,8 @@ impl Pat {
     }
 }
 
+type NameCache = HashMap<(PatId, Box<str>, Option<Box<str>>), PatId>;
+
 #[derive(Default)]
 struct Inner {
     memo: HashMap<Pat, PatId>,
@@ -102,13 +104,13 @@ struct Inner {
     // Our implementation of https://relaxng.org/jclark/derivative.html#Memoization
 
     // Persistent cross-call memo: (input PatId, local-name, namespace-uri) -> result PatId
-    start_tag_open_cache: HashMap<(PatId, Box<str>, Option<Box<str>>), PatId>,
+    start_tag_open_cache: NameCache,
     // Persistent cross-call memo: input PatId -> result PatId
     start_tag_close_cache: HashMap<PatId, PatId>,
     // Persistent cross-call memo: input PatId -> result PatId (Vec indexed by PatId.0)
     mixed_text_cache: Vec<Option<PatId>>,
     // Persistent cross-call memo: (input PatId, local-name, namespace-uri) -> result PatId
-    start_att_cache: HashMap<(PatId, Box<str>, Option<Box<str>>), PatId>,
+    start_att_cache: NameCache,
 }
 #[derive(Default)]
 struct Schema {
@@ -984,7 +986,7 @@ impl<'a> Validator<'a> {
     ) -> Validator<'a> {
         let mut v = Self::new(model, tokenizer);
         let compile_time_count = v.schema.inner.borrow().patterns.len() as u16;
-        let word_count = (compile_time_count as usize + 63) / 64;
+        let word_count = (compile_time_count as usize).div_ceil(64);
         v.schema.compile_time_count = compile_time_count;
         v.schema.coverage = Some(vec![0u64; word_count].into_boxed_slice());
         v
@@ -1000,10 +1002,8 @@ impl<'a> Validator<'a> {
             let pat = &inner.patterns[i];
             // Skip resolved-Ref duplicates: if the memo maps this pattern to
             // a different (canonical) PatId, this slot is a placeholder copy.
-            if let Some(&canonical) = inner.memo.get(pat) {
-                if canonical.0 as usize != i {
-                    continue;
-                }
+            if inner.memo.get(pat).is_some_and(|c| c.0 as usize != i) {
+                continue;
             }
             let (kind, name) = match pat {
                 Pat::Element(nc, _) => {

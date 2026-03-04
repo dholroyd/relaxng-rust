@@ -1095,13 +1095,35 @@ fn annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute> {
     parser.parse(input)
 }
 
+/// Per spec, nestedAnnotationAttributes use anyAttributeName (identifierOrKeyword | prefixedName)
+fn nested_annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute> {
+    let parse = (
+        name,
+        space_comment0,
+        tag("="),
+        space_comment0,
+        literal,
+    );
+
+    let mut parser = map(parse, |(name, _, _, _, value)| AnnotationAttribute {
+        span: Range {
+            start: name.span().start,
+            end: value.0.end,
+        },
+        name,
+        value,
+    });
+
+    parser.parse(input)
+}
+
 fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
     let parse = (
         name,
         space_comment0,
         tag("["),
         space_comment0,
-        separated_list0(space_comment1, annotation_attribute),
+        separated_list0(space_comment1, nested_annotation_attribute),
         space_comment0,
         separated_list0(space_comment1, annotation_element_or_literal),
         space_comment0,

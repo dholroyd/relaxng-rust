@@ -70,29 +70,33 @@ pub fn schema(input: Span) -> Result<Schema, nom::Err<Error<Span>>> {
 
 // topLevel	  ::=  	decl* (pattern | grammarContent*)
 fn top_level(input: Span) -> IResult<Span, Schema> {
-    let parse = (
-        separated_list0(space_comment1, decl),
-        space_comment0, // TODO: should be space_comment1, and only required if there are decls
-        alt((
-            // TODO: proper span for GrammarPattern
-            map(
-                separated_list1(space_comment1, grammar_content),
-                |content| {
-                    PatternOrGrammar::Grammar(GrammarPattern {
-                        span: 0..0,
-                        content,
-                    })
-                },
-            ),
-            map(pattern, PatternOrGrammar::Pattern),
-        )),
-    );
-    let mut parser = map(parse, |(decls, _, pattern_or_grammar)| Schema {
-        decls,
-        pattern_or_grammar,
-    });
-
-    parser.parse(input)
+    let (input, decls) = separated_list0(space_comment1, decl).parse(input)?;
+    let (input, _) = if decls.is_empty() {
+        space_comment0(input)?
+    } else {
+        space_comment1(input)?
+    };
+    let (input, pattern_or_grammar) = alt((
+        // TODO: proper span for GrammarPattern
+        map(
+            separated_list1(space_comment1, grammar_content),
+            |content| {
+                PatternOrGrammar::Grammar(GrammarPattern {
+                    span: 0..0,
+                    content,
+                })
+            },
+        ),
+        map(pattern, PatternOrGrammar::Pattern),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        Schema {
+            decls,
+            pattern_or_grammar,
+        },
+    ))
 }
 
 // decl      ::=  	"namespace" identifierOrKeyword "=" namespaceURILiteral

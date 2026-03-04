@@ -57,7 +57,6 @@ pub type Span<'a> = LocatedSpan<&'a str>;
 // per https://www.oasis-open.org/committees/relax-ng/compact-20021121.html
 
 // TODO:
-//  - annotations
 //  - utf8 escape sequences
 //  - check rules are left-factored as required to avoid inefficiently rematching the same sub-rule
 //    in multiple alternatives

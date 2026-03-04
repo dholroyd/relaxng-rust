@@ -1546,8 +1546,7 @@ impl<FS: Files> Compiler<FS> {
                 let mut result = self.compile_pattern(ctx, inner)?;
                 // Attach annotations to Element/Attribute patterns if possible
                 match &mut result {
-                    model::Pattern::Element(_, _, _, a)
-                    | model::Pattern::Attribute(_, _, _, a) => {
+                    model::Pattern::Element(_, _, _, a) | model::Pattern::Attribute(_, _, _, a) => {
                         *a = Some(compiled_annos);
                     }
                     _ => {
@@ -1984,14 +1983,16 @@ impl<FS: Files> Compiler<FS> {
             initial
                 .attribute_annotations
                 .iter()
-                .filter_map(|a| Self::compile_annotation_name(ctx, &a.name).map(|(ns, local)| {
-                    model::AnnotationAttribute {
-                        namespace_uri: ns,
-                        local_name: local,
-                        value: a.value.as_string_value(),
-                        span: Some(ctx.convert_span(&a.span)),
-                    }
-                }))
+                .filter_map(|a| {
+                    Self::compile_annotation_name(ctx, &a.name).map(|(ns, local)| {
+                        model::AnnotationAttribute {
+                            namespace_uri: ns,
+                            local_name: local,
+                            value: a.value.as_string_value(),
+                            span: Some(ctx.convert_span(&a.span)),
+                        }
+                    })
+                })
                 .collect()
         } else {
             vec![]
@@ -2023,8 +2024,8 @@ impl<FS: Files> Compiler<FS> {
     fn compile_annotation_name(ctx: &Context, name: &types::Name) -> Option<(String, String)> {
         match name {
             types::Name::CName(cname) => {
-                let ns = ctx.namespace_uri_for_prefix_str(&cname.0 .1)?;
-                Some((ns.to_string(), cname.1 .1.clone()))
+                let ns = ctx.namespace_uri_for_prefix_str(&cname.0.1)?;
+                Some((ns.to_string(), cname.1.1.clone()))
             }
             types::Name::Identifier(id) => Some(("".to_string(), id.to_string())),
             types::Name::NamespacedName(nn) => {
@@ -2041,14 +2042,16 @@ impl<FS: Files> Compiler<FS> {
         let attributes = elem
             .annotation_attributes
             .iter()
-            .filter_map(|a| Self::compile_annotation_name(ctx, &a.name).map(|(ns, local)| {
-                model::AnnotationAttribute {
-                    namespace_uri: ns,
-                    local_name: local,
-                    value: a.value.as_string_value(),
-                    span: Some(ctx.convert_span(&a.span)),
-                }
-            }))
+            .filter_map(|a| {
+                Self::compile_annotation_name(ctx, &a.name).map(|(ns, local)| {
+                    model::AnnotationAttribute {
+                        namespace_uri: ns,
+                        local_name: local,
+                        value: a.value.as_string_value(),
+                        span: Some(ctx.convert_span(&a.span)),
+                    }
+                })
+            })
             .collect();
         let children = elem
             .annotation_elements_or_literals

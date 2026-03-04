@@ -824,11 +824,7 @@ impl<'a> Validator<'a> {
                 Pat::Text => ("Text", "text".to_string()),
                 _ => continue,
             };
-            let spans = inner
-                .span_map
-                .get(&(i as u16))
-                .cloned()
-                .unwrap_or_default();
+            let spans = inner.span_map.get(&(i as u16)).cloned().unwrap_or_default();
             patterns.push(TrackablePattern {
                 pat_id: i as u16,
                 kind,
@@ -2419,9 +2415,7 @@ mod tests {
 
     #[test]
     fn coverage_element_choice() {
-        let f = Fixture::correct(
-            "start = element a { element b { empty } | element c { empty } }",
-        );
+        let f = Fixture::correct("start = element a { element b { empty } | element c { empty } }");
         let report = f.valid_with_coverage("<a><b/></a>");
         // Element 'a' and 'b' covered, 'c' not covered
         assert!(report.covered_count() > 0);
@@ -2429,9 +2423,14 @@ mod tests {
         assert!(report.covered_count() < report.total_trackable());
         let uncovered: Vec<_> = report.uncovered_patterns().collect();
         assert!(
-            uncovered.iter().any(|p| p.kind == "Element" && p.name == "c"),
+            uncovered
+                .iter()
+                .any(|p| p.kind == "Element" && p.name == "c"),
             "Element 'c' should be uncovered, got: {:?}",
-            uncovered.iter().map(|p| format!("{}:{}", p.kind, p.name)).collect::<Vec<_>>()
+            uncovered
+                .iter()
+                .map(|p| format!("{}:{}", p.kind, p.name))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2445,16 +2444,18 @@ mod tests {
 
     #[test]
     fn coverage_attribute() {
-        let f = Fixture::correct(
-            "start = element a { attribute x { text }, attribute y { text } }",
-        );
+        let f =
+            Fixture::correct("start = element a { attribute x { text }, attribute y { text } }");
         let report = f.valid_with_coverage("<a x=\"1\" y=\"2\"/>");
         let uncovered: Vec<_> = report.uncovered_patterns().collect();
         // Both attributes should be covered
         assert!(
             !uncovered.iter().any(|p| p.kind == "Attribute"),
             "All attributes should be covered, uncovered: {:?}",
-            uncovered.iter().map(|p| format!("{}:{}", p.kind, p.name)).collect::<Vec<_>>()
+            uncovered
+                .iter()
+                .map(|p| format!("{}:{}", p.kind, p.name))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2484,9 +2485,7 @@ mod tests {
 
     #[test]
     fn coverage_merge() {
-        let f = Fixture::correct(
-            "start = element a { element b { empty } | element c { empty } }",
-        );
+        let f = Fixture::correct("start = element a { element b { empty } | element c { empty } }");
         let mut report1 = f.valid_with_coverage("<a><b/></a>");
         let report2 = f.valid_with_coverage("<a><c/></a>");
         let before = report1.covered_count();

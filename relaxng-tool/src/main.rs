@@ -12,10 +12,7 @@ use structopt::StructOpt;
 #[derive(Debug, StructOpt)]
 enum Cli {
     /// Validate XML documents against a RELAX NG schema
-    Validate {
-        schema: PathBuf,
-        xml: Vec<PathBuf>,
-    },
+    Validate { schema: PathBuf, xml: Vec<PathBuf> },
     /// Validate XML documents and report schema coverage
     Coverage {
         schema: PathBuf,
@@ -28,11 +25,17 @@ enum Cli {
 fn main() {
     match Cli::from_args() {
         Cli::Validate { schema, xml } => validate(schema, xml),
-        Cli::Coverage { schema, xml, format } => coverage(schema, xml, &format),
+        Cli::Coverage {
+            schema,
+            xml,
+            format,
+        } => coverage(schema, xml, &format),
     }
 }
 
-fn compile_schema(schema: &PathBuf) -> std::rc::Rc<std::cell::RefCell<Option<relaxng_model::model::DefineRule>>> {
+fn compile_schema(
+    schema: &PathBuf,
+) -> std::rc::Rc<std::cell::RefCell<Option<relaxng_model::model::DefineRule>>> {
     let mut compiler = Compiler::default();
     match compiler.compile(schema) {
         Ok(m) => m,
@@ -43,11 +46,7 @@ fn compile_schema(schema: &PathBuf) -> std::rc::Rc<std::cell::RefCell<Option<rel
     }
 }
 
-fn run_validation<'a>(
-    v: &mut Validator<'a>,
-    xml: &PathBuf,
-    doc: String,
-) {
+fn run_validation<'a>(v: &mut Validator<'a>, xml: &PathBuf, doc: String) {
     loop {
         match v.validate_next() {
             Some(Ok(())) => {}
@@ -165,11 +164,7 @@ fn print_coverage_text(report: &CoverageReport, code_map: &CodeMap) {
 
 fn resolve_location(span: &codemap::Span, code_map: &CodeMap) -> String {
     let loc = code_map.look_up_span(*span);
-    format!(
-        "{}:{}",
-        loc.file.name(),
-        loc.begin.line + 1,
-    )
+    format!("{}:{}", loc.file.name(), loc.begin.line + 1,)
 }
 
 fn print_coverage_html(report: &CoverageReport, code_map: &CodeMap) {
@@ -181,7 +176,8 @@ fn print_coverage_html(report: &CoverageReport, code_map: &CodeMap) {
         100.0
     };
 
-    println!(r#"<!DOCTYPE html>
+    println!(
+        r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -208,7 +204,8 @@ fn print_coverage_html(report: &CoverageReport, code_map: &CodeMap) {
 </div>
 <table>
 <thead><tr><th>Status</th><th>Name</th><th>Kind</th><th>Location</th></tr></thead>
-<tbody>"#);
+<tbody>"#
+    );
 
     for p in report.patterns() {
         let is_covered = report.is_covered(p.pat_id);

@@ -44,8 +44,18 @@ pub enum Pattern {
     Optional(Box<Pattern>),
     ZeroOrMore(Box<Pattern>),
     OneOrMore(Box<Pattern>),
-    Attribute(NameClass, Box<Pattern>, Option<codemap::Span>, Option<Annotation>),
-    Element(NameClass, Box<Pattern>, Option<codemap::Span>, Option<Annotation>),
+    Attribute(
+        NameClass,
+        Box<Pattern>,
+        Option<codemap::Span>,
+        Option<Annotation>,
+    ),
+    Element(
+        NameClass,
+        Box<Pattern>,
+        Option<codemap::Span>,
+        Option<Annotation>,
+    ),
     Ref(codemap::Span, String, PatRef),
     DatatypeValue {
         datatype: crate::datatype::DatatypeValues,

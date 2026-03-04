@@ -326,7 +326,9 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
             Pattern::Parent(p)
         }),
         map(tag("empty"), |_| Pattern::Empty),
-        map((position, tag("text"), position), |(s, _, e)| Pattern::Text(Some(span(s, e)))),
+        map((position, tag("text"), position), |(s, _, e)| {
+            Pattern::Text(Some(span(s, e)))
+        }),
         map(tag("notAllowed"), |_| Pattern::NotAllowed),
         map(external_pattern, Pattern::External),
         map(grammar_pattern, Pattern::Grammar),
@@ -520,7 +522,13 @@ fn group_pattern(input: Span) -> IResult<Span, Pattern> {
 
 // [datatypeName] datatypeValue
 fn datatype_value_pattern(input: Span) -> IResult<Span, DatatypeValuePattern> {
-    let parse = (position, opt(datatype_name), space_comment0, datatype_value, position);
+    let parse = (
+        position,
+        opt(datatype_name),
+        space_comment0,
+        datatype_value,
+        position,
+    );
 
     let mut parser = map(parse, |(start, name, _, value, end)| {
         DatatypeValuePattern(span(start, end), name, value)
@@ -933,10 +941,20 @@ fn div_include_content(input: Span) -> IResult<Span, Vec<IncludeContent>> {
 }
 
 fn space_comment0(input: Span) -> IResult<Span, Span> {
-    recognize(fold_many0(alt((multispace1, any_comment)), || (), |_, _| ())).parse(input)
+    recognize(fold_many0(
+        alt((multispace1, any_comment)),
+        || (),
+        |_, _| (),
+    ))
+    .parse(input)
 }
 fn space_comment1(input: Span) -> IResult<Span, Span> {
-    recognize(fold_many1(alt((multispace1, any_comment)), || (), |_, _| ())).parse(input)
+    recognize(fold_many1(
+        alt((multispace1, any_comment)),
+        || (),
+        |_, _| (),
+    ))
+    .parse(input)
 }
 
 /// Consume whitespace and single-# comments only (not ## documentation comments)
@@ -979,7 +997,10 @@ fn documentation(input: Span) -> IResult<Span, Documentation> {
     let (input, end) = position(input)?;
     let content_str = content.fragment().to_string();
     // Strip one leading space after ## if present
-    let content_str = content_str.strip_prefix(' ').unwrap_or(&content_str).to_string();
+    let content_str = content_str
+        .strip_prefix(' ')
+        .unwrap_or(&content_str)
+        .to_string();
     Ok((
         input,
         Documentation {
@@ -1561,8 +1582,7 @@ mod test {
     #[test]
     fn test_documentations_multiple() {
         let input = "## Line one\n## Line two";
-        let (remaining, result) =
-            documentations(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = documentations(LocatedSpan::new(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].content, "Line one");
@@ -1608,8 +1628,7 @@ mod test {
     #[test]
     fn test_pattern_with_doc_annotation() {
         let input = "## A greeting\nelement greeting { text }";
-        let (remaining, result) =
-            pattern(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = pattern(LocatedSpan::new(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
         match result {
             Pattern::Annotated(annos, inner) => {
@@ -1624,8 +1643,7 @@ mod test {
     #[test]
     fn test_pattern_with_bracket_annotation() {
         let input = "[ xml:lang=\"en\" ] element foo { text }";
-        let (remaining, result) =
-            pattern(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = pattern(LocatedSpan::new(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
         match result {
             Pattern::Annotated(annos, inner) => {
@@ -1639,11 +1657,7 @@ mod test {
     #[test]
     fn test_unannotated_pattern_no_wrap() {
         // Unannotated patterns should NOT be wrapped in Annotated
-        ck(
-            pattern,
-            "text",
-            Pattern::Text(Some(0..4)),
-        );
+        ck(pattern, "text", Pattern::Text(Some(0..4)));
     }
 
     #[test]
@@ -1667,8 +1681,7 @@ mod test {
     fn test_single_comment_not_doc() {
         // A single # comment should NOT be parsed as documentation
         let input = "# regular comment\nelement foo { text }";
-        let (remaining, result) =
-            pattern(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = pattern(LocatedSpan::new(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
         // No annotation wrapping since # comment is consumed as whitespace
         assert!(matches!(result, Pattern::Element(_)));

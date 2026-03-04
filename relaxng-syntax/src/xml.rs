@@ -934,7 +934,6 @@ fn ncname(range: Range<usize>, val: &str) -> Result<NcName> {
                 ));
             }
         } else if !is_nc_name_char(c) {
-            println!("NcName Urk! {val:?}");
             return Err(Error::Unexpected(
                 range.start + i..range.start + i + 1,
                 "Unexpected character for NcName",

@@ -12,7 +12,7 @@ pub const NAMESPACE_URI: &str = "http://www.w3.org/2001/XMLSchema-datatypes";
 /// Wrapper for finite floats that implements Eq and Hash.
 /// Only constructed from validated finite values.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-struct FiniteF64(f64);
+pub struct FiniteF64(f64);
 impl Eq for FiniteF64 {}
 impl std::hash::Hash for FiniteF64 {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -21,7 +21,7 @@ impl std::hash::Hash for FiniteF64 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-struct FiniteF32(f32);
+pub struct FiniteF32(f32);
 impl Eq for FiniteF32 {}
 impl std::hash::Hash for FiniteF32 {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {

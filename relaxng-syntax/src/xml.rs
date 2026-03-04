@@ -97,6 +97,15 @@ fn check_standard_attrs(node: Node) -> Result<()> {
                             dt_lib.range_value(),
                             "Datatype library URI must not include a fragment identifier",
                         ))
+                    } else if uri.authority().is_none()
+                        && uri.path().as_str().is_empty()
+                        && uri.query().is_none()
+                    {
+                        // RFC 2396 requires scheme-specific part to be non-empty
+                        Err(Error::Unexpected(
+                            dt_lib.range_value(),
+                            "Datatype library URI has empty scheme-specific part",
+                        ))
                     } else {
                         Ok(())
                     }

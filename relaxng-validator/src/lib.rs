@@ -1051,7 +1051,7 @@ impl<'a> Validator<'a> {
 
     fn compile(s: &mut SchemaBuilder, p: &model::Pattern) -> PatId {
         match p {
-            model::Pattern::Choice(v) => {
+            model::Pattern::Choice(v, _) => {
                 let mut iter = v.iter().rev();
                 let mut right = Self::compile(s, iter.next().unwrap());
                 for left in iter {
@@ -1060,7 +1060,7 @@ impl<'a> Validator<'a> {
                 }
                 right
             }
-            model::Pattern::Interleave(v) => {
+            model::Pattern::Interleave(v, _) => {
                 let mut iter = v.iter().rev();
                 let mut right = Self::compile(s, iter.next().unwrap());
                 for left in iter {
@@ -1069,7 +1069,7 @@ impl<'a> Validator<'a> {
                 }
                 right
             }
-            model::Pattern::Group(v) => {
+            model::Pattern::Group(v, _) => {
                 let mut iter = v.iter().rev();
                 let mut right = Self::compile(s, iter.next().unwrap());
                 for left in iter {
@@ -1078,11 +1078,11 @@ impl<'a> Validator<'a> {
                 }
                 right
             }
-            model::Pattern::Mixed(p) => {
+            model::Pattern::Mixed(p, _) => {
                 let inner = Self::compile(s, p);
                 s.mixed(inner)
             }
-            model::Pattern::Empty => s.empty(),
+            model::Pattern::Empty(_) => s.empty(),
             model::Pattern::Text(span) => {
                 let id = s.text();
                 if let Some(span) = span {
@@ -1090,19 +1090,19 @@ impl<'a> Validator<'a> {
                 }
                 id
             }
-            model::Pattern::NotAllowed => s.not_allowed(),
-            model::Pattern::Optional(p) => {
+            model::Pattern::NotAllowed(_) => s.not_allowed(),
+            model::Pattern::Optional(p, _) => {
                 let inner = Self::compile(s, p);
                 let empty = s.empty();
                 s.choice(inner, empty)
             }
-            model::Pattern::ZeroOrMore(p) => {
+            model::Pattern::ZeroOrMore(p, _) => {
                 let inner = Self::compile(s, p);
                 let one = s.one_or_more(inner);
                 let empty = s.empty();
                 s.choice(one, empty)
             }
-            model::Pattern::OneOrMore(p) => {
+            model::Pattern::OneOrMore(p, _) => {
                 let inner = Self::compile(s, p);
                 s.one_or_more(inner)
             }
@@ -1156,7 +1156,7 @@ impl<'a> Validator<'a> {
                 }
                 id
             }
-            model::Pattern::List(p) => {
+            model::Pattern::List(p, _) => {
                 let inner = Self::compile(s, p);
                 s.list(inner)
             }
@@ -2451,7 +2451,9 @@ mod tests {
                     panic!("{e:?}");
                 }
             };
-            Fixture { schema }
+            Fixture {
+                schema: schema.start,
+            }
         }
 
         fn valid(&self, xml: &str) {
@@ -2526,7 +2528,7 @@ mod tests {
         };
 
         let reader = xmlparser::Tokenizer::from(doc);
-        let mut v = Validator::new(schema, reader).unwrap();
+        let mut v = Validator::new(schema.start, reader).unwrap();
         println!("====");
         v.schema.d(v.current_step).unwrap();
         println!("====");

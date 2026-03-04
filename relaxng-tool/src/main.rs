@@ -20,6 +20,8 @@ enum Cli {
         #[structopt(long, default_value = "text", possible_values = &["text", "html"])]
         format: String,
     },
+    /// Check a schema for potential issues
+    Lint { schema: PathBuf },
 }
 
 fn main() {
@@ -30,12 +32,11 @@ fn main() {
             xml,
             format,
         } => coverage(schema, xml, &format),
+        Cli::Lint { schema } => lint(schema),
     }
 }
 
-fn compile_schema(
-    schema: &Path,
-) -> std::rc::Rc<std::cell::RefCell<Option<relaxng_model::model::DefineRule>>> {
+fn compile_schema(schema: &Path) -> relaxng_model::CompileResult {
     let mut compiler = Compiler::default();
     match compiler.compile(schema) {
         Ok(m) => m,
@@ -65,7 +66,8 @@ fn run_validation<'a>(v: &mut Validator<'a>, xml: &Path, doc: String) {
 }
 
 fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
-    let model = compile_schema(&schema);
+    let result = compile_schema(&schema);
+    let model = result.start;
     for xml in &xmls {
         let mut f = File::open(xml).expect("open example xml");
         let mut doc = String::new();
@@ -80,13 +82,14 @@ fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
 
 fn coverage(schema: PathBuf, xmls: Vec<PathBuf>, format: &str) {
     let mut compiler = Compiler::default();
-    let model = match compiler.compile(&schema) {
+    let result = match compiler.compile(&schema) {
         Ok(m) => m,
         Err(err) => {
             compiler.dump_diagnostic(&err);
             exit(1);
         }
     };
+    let model = result.start;
     let mut merged_report: Option<CoverageReport> = None;
     for xml in &xmls {
         let mut f = File::open(xml).expect("open example xml");
@@ -109,6 +112,88 @@ fn coverage(schema: PathBuf, xmls: Vec<PathBuf>, format: &str) {
             "html" => print_coverage_html(&report, compiler.code_map()),
             _ => print_coverage_text(&report, compiler.code_map()),
         }
+    }
+}
+
+fn lint(schema: PathBuf) {
+    let mut compiler = Compiler::default();
+    let result = match compiler.compile(&schema) {
+        Ok(m) => m,
+        Err(err) => {
+            compiler.dump_diagnostic(&err);
+            exit(1);
+        }
+    };
+
+    let mut warning_count = 0;
+
+    // Check for unreachable definitions
+    let unreachable = result.unreachable_definitions();
+    for def in &unreachable {
+        let d = codemap_diagnostic::Diagnostic {
+            level: codemap_diagnostic::Level::Warning,
+            message: format!("unreachable definition '{}'", def.name),
+            code: None,
+            spans: vec![codemap_diagnostic::SpanLabel {
+                span: def.span,
+                style: codemap_diagnostic::SpanStyle::Primary,
+                label: Some("defined here".to_string()),
+            }],
+        };
+        let mut emitter = codemap_diagnostic::Emitter::stderr(
+            codemap_diagnostic::ColorConfig::Auto,
+            Some(compiler.code_map()),
+        );
+        emitter.emit(&[d]);
+        warning_count += 1;
+    }
+
+    // Check for pattern-level warnings
+    let borrowed = result.start.borrow();
+    if let Some(rule) = borrowed.as_ref() {
+        let lint_warnings = relaxng_model::lint::lint_pattern(rule.pattern());
+        for w in &lint_warnings {
+            let (message, span) = match w {
+                relaxng_model::lint::LintWarning::DeadChoiceBranch { span } => (
+                    "choice branch is notAllowed and can never match".to_string(),
+                    *span,
+                ),
+                relaxng_model::lint::LintWarning::DeadComposite { kind, span } => (
+                    format!("{kind} contains notAllowed, making the whole pattern dead"),
+                    *span,
+                ),
+                relaxng_model::lint::LintWarning::RedundantWrapping { outer, inner, span } => {
+                    (format!("redundant {outer}({inner}(...))"), *span)
+                }
+            };
+            if let Some(span) = span {
+                let d = codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Warning,
+                    message,
+                    code: None,
+                    spans: vec![codemap_diagnostic::SpanLabel {
+                        span,
+                        style: codemap_diagnostic::SpanStyle::Primary,
+                        label: None,
+                    }],
+                };
+                let mut emitter = codemap_diagnostic::Emitter::stderr(
+                    codemap_diagnostic::ColorConfig::Auto,
+                    Some(compiler.code_map()),
+                );
+                emitter.emit(&[d]);
+            } else {
+                eprintln!("warning: {message}");
+            }
+            warning_count += 1;
+        }
+    }
+
+    if warning_count == 0 {
+        eprintln!("No warnings found.");
+    } else {
+        eprintln!("\n{warning_count} warning(s) found.");
+        exit(1);
     }
 }
 

@@ -587,11 +587,15 @@ fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
         map((tag("parent"), space_comment1, identifier), |(_, _, p)| {
             Pattern::Parent(p)
         }),
-        map(tag("empty"), |_| Pattern::Empty),
+        map((position, tag("empty"), position), |(s, _, e)| {
+            Pattern::Empty(Some(span(s, e)))
+        }),
         map((position, tag("text"), position), |(s, _, e)| {
             Pattern::Text(Some(span(s, e)))
         }),
-        map(tag("notAllowed"), |_| Pattern::NotAllowed),
+        map((position, tag("notAllowed"), position), |(s, _, e)| {
+            Pattern::NotAllowed(Some(span(s, e)))
+        }),
         map(external_pattern, Pattern::External),
         map(grammar_pattern, Pattern::Grammar),
         map(group_pattern, |p| Pattern::Group(Box::new(p))),
@@ -615,17 +619,17 @@ fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
     loop {
         let (i, _) = space_comment0(input)?;
         if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("?")(i) {
-            result = Pattern::Optional(Box::new(result));
+            result = Pattern::Optional(None, Box::new(result));
             input = i;
             continue;
         }
         if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("*")(i) {
-            result = Pattern::ZeroOrMore(Box::new(result));
+            result = Pattern::ZeroOrMore(None, Box::new(result));
             input = i;
             continue;
         }
         if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("+")(i) {
-            result = Pattern::OneOrMore(Box::new(result));
+            result = Pattern::OneOrMore(None, Box::new(result));
             input = i;
             continue;
         }
@@ -1570,10 +1574,10 @@ mod test {
         ck(
             pattern,
             "a?",
-            Pattern::Optional(Box::new(Pattern::Identifier(Identifier(
-                0..1,
-                "a".to_string(),
-            )))),
+            Pattern::Optional(
+                None,
+                Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string()))),
+            ),
         )
     }
 
@@ -1596,9 +1600,10 @@ mod test {
             pattern,
             "a*, b",
             Pattern::ListPair(
-                Box::new(Pattern::ZeroOrMore(Box::new(Pattern::Identifier(
-                    Identifier(0..1, "a".to_string()),
-                )))),
+                Box::new(Pattern::ZeroOrMore(
+                    None,
+                    Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string()))),
+                )),
                 Box::new(Pattern::Identifier(Identifier(4..5, "b".to_string()))),
             ),
         )

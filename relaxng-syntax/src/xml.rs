@@ -403,21 +403,21 @@ fn optional(node: Node) -> Result<Pattern> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
     )?;
-    Ok(Pattern::Optional(Box::new(patt)))
+    Ok(Pattern::Optional(Some(node.range()), Box::new(patt)))
 }
 
 fn zero_or_more(node: Node) -> Result<Pattern> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
     )?;
-    Ok(Pattern::ZeroOrMore(Box::new(patt)))
+    Ok(Pattern::ZeroOrMore(Some(node.range()), Box::new(patt)))
 }
 
 fn one_or_more(node: Node) -> Result<Pattern> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
     )?;
-    Ok(Pattern::OneOrMore(Box::new(patt)))
+    Ok(Pattern::OneOrMore(Some(node.range()), Box::new(patt)))
 }
 
 fn list(node: Node) -> Result<ListPattern> {
@@ -455,7 +455,7 @@ fn parent_ref(node: Node) -> Result<Identifier> {
 fn empty(node: Node) -> Result<Pattern> {
     no_attrs(node)?;
     no_rng_element_children(node)?;
-    Ok(Pattern::Empty)
+    Ok(Pattern::Empty(Some(node.range())))
 }
 
 fn text(node: Node) -> Result<Pattern> {
@@ -619,7 +619,7 @@ fn param(node: Node) -> Result<Param> {
 fn not_allowed(node: Node) -> Result<Pattern> {
     no_attrs(node)?;
     no_rng_element_children(node)?;
-    Ok(Pattern::NotAllowed)
+    Ok(Pattern::NotAllowed(Some(node.range())))
 }
 
 fn external_ref(node: Node) -> Result<ExternalPattern> {

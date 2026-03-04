@@ -253,15 +253,15 @@ pub fn check_restrictions(start: &Pattern) -> Result<(), RestrictionKind> {
 /// oneOrMore(notAllowed) = notAllowed
 fn is_effectively_not_allowed(pattern: &Pattern) -> bool {
     match pattern {
-        Pattern::NotAllowed => true,
+        Pattern::NotAllowed(_) => true,
         Pattern::Attribute(_, body, _, _) => is_effectively_not_allowed(body),
-        Pattern::Group(children) | Pattern::Interleave(children) => {
+        Pattern::Group(children, _) | Pattern::Interleave(children, _) => {
             children.iter().any(is_effectively_not_allowed)
         }
-        Pattern::OneOrMore(body) | Pattern::ZeroOrMore(body) | Pattern::Optional(body) => {
+        Pattern::OneOrMore(body, _) | Pattern::ZeroOrMore(body, _) | Pattern::Optional(body, _) => {
             is_effectively_not_allowed(body)
         }
-        Pattern::List(body) => is_effectively_not_allowed(body),
+        Pattern::List(body, _) => is_effectively_not_allowed(body),
         _ => false,
     }
 }
@@ -287,7 +287,7 @@ fn walk(
     }
 
     match pattern {
-        Pattern::Empty => {
+        Pattern::Empty(_) => {
             if flags.in_data_except {
                 return Err(RestrictionKind::DataExceptContainsEmpty);
             }
@@ -297,7 +297,7 @@ fn walk(
             Ok(ContentType::Empty)
         }
 
-        Pattern::NotAllowed => Ok(ContentType::Empty),
+        Pattern::NotAllowed(_) => Ok(ContentType::Empty),
 
         Pattern::Text(_) => {
             if flags.in_list {
@@ -388,7 +388,7 @@ fn walk(
             Ok(ContentType::Simple)
         }
 
-        Pattern::List(body) => {
+        Pattern::List(body, _) => {
             if flags.in_list {
                 return Err(RestrictionKind::ListContainsList);
             }
@@ -403,7 +403,7 @@ fn walk(
             Ok(ContentType::Simple)
         }
 
-        Pattern::OneOrMore(body) => {
+        Pattern::OneOrMore(body, _) => {
             if flags.in_data_except {
                 return Err(RestrictionKind::DataExceptContainsOneOrMore);
             }
@@ -414,7 +414,7 @@ fn walk(
             walk(seen, inner_flags, body)
         }
 
-        Pattern::ZeroOrMore(body) => {
+        Pattern::ZeroOrMore(body, _) => {
             if flags.in_data_except {
                 return Err(RestrictionKind::DataExceptContainsOneOrMore);
             }
@@ -425,9 +425,9 @@ fn walk(
             walk(seen, inner_flags, body)
         }
 
-        Pattern::Optional(body) => walk(seen, flags, body),
+        Pattern::Optional(body, _) => walk(seen, flags, body),
 
-        Pattern::Mixed(body) => {
+        Pattern::Mixed(body, _) => {
             // Mixed = interleave(text, body)
             if flags.in_list {
                 return Err(RestrictionKind::ListContainsInterleave);
@@ -455,7 +455,7 @@ fn walk(
             Ok(ContentType::Complex)
         }
 
-        Pattern::Group(children) => {
+        Pattern::Group(children, _) => {
             if flags.in_data_except {
                 return Err(RestrictionKind::DataExceptContainsGroup);
             }
@@ -465,7 +465,7 @@ fn walk(
             walk_group_or_interleave(seen, flags, children, false)
         }
 
-        Pattern::Interleave(children) => {
+        Pattern::Interleave(children, _) => {
             if flags.in_list {
                 return Err(RestrictionKind::ListContainsInterleave);
             }
@@ -478,7 +478,7 @@ fn walk(
             walk_group_or_interleave(seen, flags, children, true)
         }
 
-        Pattern::Choice(children) => {
+        Pattern::Choice(children, _) => {
             let mut max_ct = ContentType::Empty;
             for child in children {
                 // In choice, NotAllowed branches are just skipped
@@ -504,7 +504,7 @@ fn walk_group_or_interleave(
     // If only one non-empty child, this group/interleave is effectively transparent
     let non_trivial: Vec<&Pattern> = children
         .iter()
-        .filter(|c| !matches!(c, Pattern::Empty | Pattern::NotAllowed))
+        .filter(|c| !matches!(c, Pattern::Empty(_) | Pattern::NotAllowed(_)))
         .collect();
     let is_real_group = non_trivial.len() > 1;
 
@@ -623,21 +623,23 @@ fn collect_attributes(
                 }
             }
         }
-        Pattern::Group(children) | Pattern::Interleave(children) | Pattern::Choice(children) => {
+        Pattern::Group(children, _)
+        | Pattern::Interleave(children, _)
+        | Pattern::Choice(children, _) => {
             for child in children {
                 collect_attributes(child, attrs, seen_refs);
             }
         }
-        Pattern::OneOrMore(body)
-        | Pattern::ZeroOrMore(body)
-        | Pattern::Optional(body)
-        | Pattern::Mixed(body)
-        | Pattern::List(body) => {
+        Pattern::OneOrMore(body, _)
+        | Pattern::ZeroOrMore(body, _)
+        | Pattern::Optional(body, _)
+        | Pattern::Mixed(body, _)
+        | Pattern::List(body, _) => {
             collect_attributes(body, attrs, seen_refs);
         }
-        Pattern::Empty
+        Pattern::Empty(_)
         | Pattern::Text(_)
-        | Pattern::NotAllowed
+        | Pattern::NotAllowed(_)
         | Pattern::DatatypeValue { .. }
         | Pattern::DatatypeName { .. } => {}
     }
@@ -658,22 +660,24 @@ fn collect_elements(pattern: &Pattern, elems: &mut Vec<NameClass>, seen_refs: &m
                 }
             }
         }
-        Pattern::Group(children) | Pattern::Interleave(children) | Pattern::Choice(children) => {
+        Pattern::Group(children, _)
+        | Pattern::Interleave(children, _)
+        | Pattern::Choice(children, _) => {
             for child in children {
                 collect_elements(child, elems, seen_refs);
             }
         }
-        Pattern::OneOrMore(body)
-        | Pattern::ZeroOrMore(body)
-        | Pattern::Optional(body)
-        | Pattern::Mixed(body)
-        | Pattern::List(body) => {
+        Pattern::OneOrMore(body, _)
+        | Pattern::ZeroOrMore(body, _)
+        | Pattern::Optional(body, _)
+        | Pattern::Mixed(body, _)
+        | Pattern::List(body, _) => {
             collect_elements(body, elems, seen_refs);
         }
         Pattern::Attribute(_, _, _, _) => {}
-        Pattern::Empty
+        Pattern::Empty(_)
         | Pattern::Text(_)
-        | Pattern::NotAllowed
+        | Pattern::NotAllowed(_)
         | Pattern::DatatypeValue { .. }
         | Pattern::DatatypeName { .. } => {}
     }
@@ -683,7 +687,7 @@ fn collect_elements(pattern: &Pattern, elems: &mut Vec<NameClass>, seen_refs: &m
 fn contains_text(pattern: &Pattern, seen_refs: &mut HashSet<usize>) -> bool {
     match pattern {
         Pattern::Text(_) => true,
-        Pattern::Mixed(_) => true,
+        Pattern::Mixed(_, _) => true,
         Pattern::Element(_, _, _, _) | Pattern::Attribute(_, _, _, _) => false,
         Pattern::Ref(_, _, pat_ref) => {
             let ptr = pat_ref.0.as_ptr() as usize;
@@ -695,15 +699,15 @@ fn contains_text(pattern: &Pattern, seen_refs: &mut HashSet<usize>) -> bool {
             }
             false
         }
-        Pattern::Group(children) | Pattern::Interleave(children) | Pattern::Choice(children) => {
-            children.iter().any(|c| contains_text(c, seen_refs))
-        }
-        Pattern::OneOrMore(body)
-        | Pattern::ZeroOrMore(body)
-        | Pattern::Optional(body)
-        | Pattern::List(body) => contains_text(body, seen_refs),
-        Pattern::Empty
-        | Pattern::NotAllowed
+        Pattern::Group(children, _)
+        | Pattern::Interleave(children, _)
+        | Pattern::Choice(children, _) => children.iter().any(|c| contains_text(c, seen_refs)),
+        Pattern::OneOrMore(body, _)
+        | Pattern::ZeroOrMore(body, _)
+        | Pattern::Optional(body, _)
+        | Pattern::List(body, _) => contains_text(body, seen_refs),
+        Pattern::Empty(_)
+        | Pattern::NotAllowed(_)
         | Pattern::DatatypeValue { .. }
         | Pattern::DatatypeName { .. } => false,
     }

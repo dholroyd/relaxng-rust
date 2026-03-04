@@ -33,17 +33,17 @@ pub enum CombineRule {
 
 #[derive(Debug)]
 pub enum Pattern {
-    Choice(Vec<Pattern>),
-    Interleave(Vec<Pattern>),
+    Choice(Vec<Pattern>, Option<codemap::Span>),
+    Interleave(Vec<Pattern>, Option<codemap::Span>),
     /// An ordered sequence of patterns
-    Group(Vec<Pattern>),
-    Mixed(Box<Pattern>),
-    Empty,
+    Group(Vec<Pattern>, Option<codemap::Span>),
+    Mixed(Box<Pattern>, Option<codemap::Span>),
+    Empty(Option<codemap::Span>),
     Text(Option<codemap::Span>),
-    NotAllowed,
-    Optional(Box<Pattern>),
-    ZeroOrMore(Box<Pattern>),
-    OneOrMore(Box<Pattern>),
+    NotAllowed(Option<codemap::Span>),
+    Optional(Box<Pattern>, Option<codemap::Span>),
+    ZeroOrMore(Box<Pattern>, Option<codemap::Span>),
+    OneOrMore(Box<Pattern>, Option<codemap::Span>),
     Attribute(
         NameClass,
         Box<Pattern>,
@@ -66,7 +66,7 @@ pub enum Pattern {
         except: Option<Box<Pattern>>,
         span: Option<codemap::Span>,
     },
-    List(Box<Pattern>),
+    List(Box<Pattern>, Option<codemap::Span>),
 }
 
 // Factored out from Pattern primarily to avoid infinite recursion in Debug impl

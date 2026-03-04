@@ -20,8 +20,35 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub mod datatype;
+pub mod lint;
 pub mod model;
 pub mod restrictions;
+
+/// Information about a named definition in a compiled schema.
+pub struct DefinitionInfo {
+    pub name: String,
+    pub span: codemap::Span,
+    pub pat_ref: Rc<RefCell<Option<model::DefineRule>>>,
+}
+
+/// Result of compiling a schema, including the start rule and metadata.
+pub struct CompileResult {
+    pub start: Rc<RefCell<Option<model::DefineRule>>>,
+    pub definitions: Vec<DefinitionInfo>,
+    pub reachable: HashSet<usize>,
+}
+
+impl CompileResult {
+    /// Returns definitions that are not reachable from the start rule.
+    pub fn unreachable_definitions(&self) -> Vec<&DefinitionInfo> {
+        self.definitions
+            .iter()
+            .filter(|d| {
+                d.name != "start" && !self.reachable.contains(&(d.pat_ref.as_ptr() as usize))
+            })
+            .collect()
+    }
+}
 
 // TODO:
 //  - Detect ambiguous grammars per https://www.kohsuke.org/relaxng/ambiguity/AmbiguousGrammarDetection.pdf
@@ -689,26 +716,29 @@ impl<FS: Files> Compiler<FS> {
         &self.codemap
     }
 
-    // TODO: provide a simpler return-type
     // TODO: does this need to support URLs?
-    pub fn compile(
-        &mut self,
-        name: &Path,
-    ) -> Result<Rc<RefCell<Option<model::DefineRule>>>, RelaxError> {
+    pub fn compile(&mut self, name: &Path) -> Result<CompileResult, RelaxError> {
         let (file, schema) = self.get_schema(name)?;
         let mut ctx = Context::new(file.clone());
         self.compile_schema(&mut ctx, schema)?;
-        for (name, r) in ctx.ref_iter() {
+
+        // Collect definitions before checking for undefined refs
+        let mut definitions = Vec::new();
+        for (def_name, r) in ctx.ref_iter() {
             if r.borrow().is_none() {
-                //println!("Undefined {:?} :(", name);
                 return Err(RelaxError::UndefinedReference {
                     span: file.span.subspan(0, 0),
-                    identifier: name,
+                    identifier: def_name,
                 });
-            } else {
-                //println!("Defined {:?} => :)", name);
             }
+            let def_span = r.borrow().as_ref().unwrap().span().to_owned();
+            definitions.push(DefinitionInfo {
+                name: def_name,
+                span: def_span,
+                pat_ref: r,
+            });
         }
+
         if let Some(start) = ctx.get_ref("start") {
             let mut seen = HashSet::new();
             let mut expanding = HashSet::new();
@@ -722,7 +752,11 @@ impl<FS: Files> Compiler<FS> {
             // Section 7 restrictions (must run after simplification/normalization)
             restrictions::check_restrictions(start.borrow().as_ref().unwrap().pattern())
                 .map_err(RelaxError::RestrictionViolation)?;
-            Ok(start)
+            Ok(CompileResult {
+                start,
+                definitions,
+                reachable: seen,
+            })
         } else {
             Err(RelaxError::StartRuleNotDefined { span: file.span })
         }
@@ -743,23 +777,23 @@ impl<FS: Files> Compiler<FS> {
         patt: &model::Pattern,
     ) -> Result<(), RelaxError> {
         match patt {
-            Pattern::Choice(v) | Pattern::Interleave(v) | Pattern::Group(v) => {
+            Pattern::Choice(v, _) | Pattern::Interleave(v, _) | Pattern::Group(v, _) => {
                 for p in v {
                     self.check(seen, expanding, inside_element, p)?
                 }
             }
-            Pattern::Mixed(p)
-            | Pattern::Optional(p)
-            | Pattern::ZeroOrMore(p)
-            | Pattern::OneOrMore(p)
+            Pattern::Mixed(p, _)
+            | Pattern::Optional(p, _)
+            | Pattern::ZeroOrMore(p, _)
+            | Pattern::OneOrMore(p, _)
             | Pattern::Attribute(_, p, _, _)
-            | Pattern::List(p) => self.check(seen, expanding, inside_element, p)?,
+            | Pattern::List(p, _) => self.check(seen, expanding, inside_element, p)?,
             Pattern::Element(_, p, _, _) => {
                 self.check(seen, expanding, true, p)?;
             }
-            Pattern::Empty
+            Pattern::Empty(_)
             | Pattern::Text(_)
-            | Pattern::NotAllowed
+            | Pattern::NotAllowed(_)
             | Pattern::DatatypeValue { .. } => {}
             Pattern::Ref(span, name, def) => {
                 let ptr = def.0.as_ptr() as usize;
@@ -1318,8 +1352,8 @@ impl<FS: Files> Compiler<FS> {
         Ok(())
     }
     fn append_choice(choice: &mut Pattern, c: Pattern) {
-        if let Pattern::Choice(this) = choice {
-            if let Pattern::Choice(mut other) = c {
+        if let Pattern::Choice(this, _) = choice {
+            if let Pattern::Choice(mut other, _) = c {
                 this.append(&mut other)
             } else {
                 this.push(c)
@@ -1329,8 +1363,8 @@ impl<FS: Files> Compiler<FS> {
         }
     }
     fn append_interleave(interleave: &mut Pattern, c: Pattern) {
-        if let Pattern::Interleave(this) = interleave {
-            if let Pattern::Interleave(mut other) = c {
+        if let Pattern::Interleave(this, _) = interleave {
+            if let Pattern::Interleave(mut other, _) = c {
                 this.append(&mut other)
             } else {
                 this.push(c)
@@ -1482,11 +1516,11 @@ impl<FS: Files> Compiler<FS> {
                 DefineRule::CombineOnly(this, CombineRule::Choice, mut patt_a),
                 DefineRule::CombineOnly(_, CombineRule::Choice, patt_b),
             ) => {
-                let result = if let Pattern::Choice(_) = patt_a {
+                let result = if let Pattern::Choice(_, _) = patt_a {
                     Self::append_choice(&mut patt_a, patt_b);
                     patt_a
                 } else {
-                    Pattern::Choice(vec![patt_a, patt_b])
+                    Pattern::Choice(vec![patt_a, patt_b], None)
                 };
                 Ok(DefineRule::CombineOnly(this, CombineRule::Choice, result))
             }
@@ -1506,11 +1540,11 @@ impl<FS: Files> Compiler<FS> {
                 DefineRule::CombineOnly(this, CombineRule::Choice, mut patt_a),
                 DefineRule::AssignCombine(_, None, patt_b),
             ) => {
-                let result = if let Pattern::Choice(_) = patt_a {
+                let result = if let Pattern::Choice(_, _) = patt_a {
                     Self::append_choice(&mut patt_a, patt_b);
                     patt_a
                 } else {
-                    Pattern::Choice(vec![patt_a, patt_b])
+                    Pattern::Choice(vec![patt_a, patt_b], None)
                 };
                 Ok(DefineRule::AssignCombine(
                     this,
@@ -1523,11 +1557,11 @@ impl<FS: Files> Compiler<FS> {
                 DefineRule::CombineOnly(this, CombineRule::Interleave, mut patt_a),
                 DefineRule::CombineOnly(_, CombineRule::Interleave, patt_b),
             ) => {
-                let result = if let Pattern::Interleave(_) = patt_a {
+                let result = if let Pattern::Interleave(_, _) = patt_a {
                     Self::append_interleave(&mut patt_a, patt_b);
                     patt_a
                 } else {
-                    Pattern::Interleave(vec![patt_a, patt_b])
+                    Pattern::Interleave(vec![patt_a, patt_b], None)
                 };
                 Ok(DefineRule::CombineOnly(
                     this,
@@ -1551,11 +1585,11 @@ impl<FS: Files> Compiler<FS> {
                 DefineRule::CombineOnly(this, CombineRule::Interleave, mut patt_a),
                 DefineRule::AssignCombine(_, None, patt_b),
             ) => {
-                let result = if let Pattern::Interleave(_) = patt_a {
+                let result = if let Pattern::Interleave(_, _) = patt_a {
                     Self::append_interleave(&mut patt_a, patt_b);
                     patt_a
                 } else {
-                    Pattern::Interleave(vec![patt_a, patt_b])
+                    Pattern::Interleave(vec![patt_a, patt_b], None)
                 };
                 Ok(DefineRule::AssignCombine(
                     this,
@@ -1603,31 +1637,39 @@ impl<FS: Files> Compiler<FS> {
             types::Pattern::Element(e) => self.compile_element(ctx, e),
             types::Pattern::Attribute(e) => self.compile_attribute(ctx, e),
             types::Pattern::List(l) => self.compile_list(ctx, l),
-            types::Pattern::Mixed(p) => Ok(model::Pattern::Mixed(Box::new(
-                self.compile_pattern(ctx, &p.0)?,
-            ))),
+            types::Pattern::Mixed(p) => Ok(model::Pattern::Mixed(
+                Box::new(self.compile_pattern(ctx, &p.0)?),
+                None,
+            )),
             types::Pattern::Identifier(i) => self.compile_ref(ctx, i),
             types::Pattern::Parent(p) => self.compile_parent(ctx, p),
-            types::Pattern::Empty => Ok(model::Pattern::Empty),
+            types::Pattern::Empty(span) => Ok(model::Pattern::Empty(
+                span.as_ref().map(|s| ctx.convert_span(s)),
+            )),
             types::Pattern::Text(span) => Ok(model::Pattern::Text(
                 span.as_ref().map(|s| ctx.convert_span(s)),
             )),
-            types::Pattern::NotAllowed => Ok(model::Pattern::NotAllowed),
+            types::Pattern::NotAllowed(span) => Ok(model::Pattern::NotAllowed(
+                span.as_ref().map(|s| ctx.convert_span(s)),
+            )),
             types::Pattern::External(e) => self.compile_external(ctx, e),
             types::Pattern::Grammar(g) => self.compile_grammar_pattern(ctx, g),
             types::Pattern::Group(g) => self.compile_pattern(ctx, g),
             types::Pattern::ListPair(a, b) => self.compile_sequence(ctx, a, b),
             types::Pattern::InterleavePair(a, b) => self.compile_interleave(ctx, a, b),
             types::Pattern::ChoicePair(a, b) => self.compile_choice(ctx, a, b),
-            types::Pattern::Optional(p) => Ok(model::Pattern::Optional(Box::new(
-                self.compile_pattern(ctx, p)?,
-            ))),
-            types::Pattern::ZeroOrMore(p) => Ok(model::Pattern::ZeroOrMore(Box::new(
-                self.compile_pattern(ctx, p)?,
-            ))),
-            types::Pattern::OneOrMore(p) => Ok(model::Pattern::OneOrMore(Box::new(
-                self.compile_pattern(ctx, p)?,
-            ))),
+            types::Pattern::Optional(span, p) => Ok(model::Pattern::Optional(
+                Box::new(self.compile_pattern(ctx, p)?),
+                span.as_ref().map(|s| ctx.convert_span(s)),
+            )),
+            types::Pattern::ZeroOrMore(span, p) => Ok(model::Pattern::ZeroOrMore(
+                Box::new(self.compile_pattern(ctx, p)?),
+                span.as_ref().map(|s| ctx.convert_span(s)),
+            )),
+            types::Pattern::OneOrMore(span, p) => Ok(model::Pattern::OneOrMore(
+                Box::new(self.compile_pattern(ctx, p)?),
+                span.as_ref().map(|s| ctx.convert_span(s)),
+            )),
             types::Pattern::DatatypeValue(d) => self.compile_datatype_value_pattern(ctx, d),
             types::Pattern::DatatypeName(d) => self.compile_datatype_name_pattern(ctx, d),
             types::Pattern::Annotated(annos, inner) => {
@@ -1682,9 +1724,10 @@ impl<FS: Files> Compiler<FS> {
         ctx: &mut Context,
         list: &types::ListPattern,
     ) -> Result<model::Pattern, RelaxError> {
-        Ok(model::Pattern::List(Box::new(
-            self.compile_pattern(ctx, &list.0)?,
-        )))
+        Ok(model::Pattern::List(
+            Box::new(self.compile_pattern(ctx, &list.0)?),
+            None,
+        ))
     }
     fn compile_ref(
         &mut self,
@@ -1836,14 +1879,14 @@ impl<FS: Files> Compiler<FS> {
         let b = self.compile_pattern(ctx, b)?;
         let mut i = vec![];
         match a {
-            Pattern::Group(mut v) => i.append(&mut v),
+            Pattern::Group(mut v, _) => i.append(&mut v),
             _ => i.push(a),
         }
         match b {
-            Pattern::Group(mut v) => i.append(&mut v),
+            Pattern::Group(mut v, _) => i.append(&mut v),
             _ => i.push(b),
         }
-        Ok(model::Pattern::Group(i))
+        Ok(model::Pattern::Group(i, None))
     }
     fn compile_interleave(
         &mut self,
@@ -1855,14 +1898,14 @@ impl<FS: Files> Compiler<FS> {
         let b = self.compile_pattern(ctx, b)?;
         let mut i = vec![];
         match a {
-            Pattern::Interleave(mut v) => i.append(&mut v),
+            Pattern::Interleave(mut v, _) => i.append(&mut v),
             _ => i.push(a),
         }
         match b {
-            Pattern::Interleave(mut v) => i.append(&mut v),
+            Pattern::Interleave(mut v, _) => i.append(&mut v),
             _ => i.push(b),
         }
-        Ok(model::Pattern::Interleave(i))
+        Ok(model::Pattern::Interleave(i, None))
     }
     fn compile_choice(
         &mut self,
@@ -1874,14 +1917,14 @@ impl<FS: Files> Compiler<FS> {
         let b = self.compile_pattern(ctx, b)?;
         let mut c = vec![];
         match a {
-            Pattern::Choice(mut v) => c.append(&mut v),
+            Pattern::Choice(mut v, _) => c.append(&mut v),
             _ => c.push(a),
         }
         match b {
-            Pattern::Choice(mut v) => c.append(&mut v),
+            Pattern::Choice(mut v, _) => c.append(&mut v),
             _ => c.push(b),
         }
-        Ok(model::Pattern::Choice(c))
+        Ok(model::Pattern::Choice(c, None))
     }
     fn compile_datatype_value_pattern(
         &mut self,
@@ -2225,7 +2268,7 @@ mod tests {
         }
         let mut c = Compiler::new(FS, Syntax::Compact);
         let input = Path::new("test.rnc");
-        let schema = match c.compile(input) {
+        let result = match c.compile(input) {
             Err(e) => {
                 c.dump_diagnostic(&e);
                 std::thread::sleep(std::time::Duration::from_secs(1));
@@ -2234,12 +2277,12 @@ mod tests {
             Ok(s) => s,
         };
 
-        let s = schema.borrow();
+        let s = result.start.borrow();
         let start = s.as_ref().unwrap().pattern();
         assert_matches!(start, Pattern::Ref(_whence, _name, model::PatRef(ref1)) => {
             assert_matches!(ref1.borrow().as_ref(), Some(model::DefineRule::AssignCombine(_, _, patt)) => {
                 assert_matches!(patt, Pattern::Element(_name, content_patt, _, _) => {
-                    assert_matches!(**content_patt, Pattern::Choice(ref seq) => {
+                    assert_matches!(**content_patt, Pattern::Choice(ref seq, _) => {
                         assert_matches!(seq[0], Pattern::Ref(_, _, model::PatRef(ref ref2)) => {
                             assert!(Rc::ptr_eq(ref1, ref2));
                         })
@@ -2269,19 +2312,19 @@ mod tests {
         }
         let mut c = Compiler::new(FS, Syntax::Compact);
         let input = Path::new("main.rnc");
-        let schema = match c.compile(input) {
+        let result = match c.compile(input) {
             Ok(s) => s,
             Err(e) => {
                 c.dump_diagnostic(&e);
                 panic!("{e:?}");
             }
         };
-        let s = schema.borrow();
+        let s = result.start.borrow();
         let start = s.as_ref().unwrap().pattern();
         assert_matches!(start, Pattern::Ref(_whence, _name, model::PatRef(ref1)) => {
             assert_matches!(ref1.borrow().as_ref(), Some(model::DefineRule::AssignCombine(_, _, patt)) => {
                 assert_matches!(patt, Pattern::Element(_name, content_patt, _, _) => {
-                    assert_matches!(**content_patt, Pattern::Optional(ref patt) => {
+                    assert_matches!(**content_patt, Pattern::Optional(ref patt, _) => {
                         assert_matches!(**patt, Pattern::Ref(_, _, model::PatRef(ref ref2)) => {
                             assert!(Rc::ptr_eq(ref1, ref2));
                         })
@@ -2289,5 +2332,53 @@ mod tests {
                 })
             })
         })
+    }
+
+    #[test]
+    fn unreachable_definition_detected() {
+        struct FS;
+        impl Files for FS {
+            fn load(&self, name: &Path) -> Result<String, RelaxError> {
+                let t = match name.to_str().unwrap() {
+                    "test.rnc" => {
+                        "
+                        start = element root { empty }
+                        orphan = element unused { text }
+                    "
+                    }
+                    other => panic!("No {other:?}"),
+                };
+                Ok(t.to_string())
+            }
+        }
+        let mut c = Compiler::new(FS, Syntax::Compact);
+        let result = c.compile(Path::new("test.rnc")).unwrap();
+        let unreachable = result.unreachable_definitions();
+        assert_eq!(unreachable.len(), 1);
+        assert_eq!(unreachable[0].name, "orphan");
+    }
+
+    #[test]
+    fn all_definitions_reachable() {
+        struct FS;
+        impl Files for FS {
+            fn load(&self, name: &Path) -> Result<String, RelaxError> {
+                let t = match name.to_str().unwrap() {
+                    "test.rnc" => {
+                        "
+                        start = foo
+                        foo = element x { bar }
+                        bar = text
+                    "
+                    }
+                    other => panic!("No {other:?}"),
+                };
+                Ok(t.to_string())
+            }
+        }
+        let mut c = Compiler::new(FS, Syntax::Compact);
+        let result = c.compile(Path::new("test.rnc")).unwrap();
+        let unreachable = result.unreachable_definitions();
+        assert!(unreachable.is_empty());
     }
 }

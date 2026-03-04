@@ -72,7 +72,7 @@ fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
         f.read_to_string(&mut doc).expect("read xml");
         let src = doc.clone();
         let reader = xmlparser::Tokenizer::from(&src[..]);
-        let mut v = Validator::new(model.clone(), reader);
+        let mut v = Validator::new(model.clone(), reader).expect("compile validator");
         eprintln!("Validating {xml:?}");
         run_validation(&mut v, xml, doc);
     }
@@ -94,7 +94,7 @@ fn coverage(schema: PathBuf, xmls: Vec<PathBuf>, format: &str) {
         f.read_to_string(&mut doc).expect("read xml");
         let src = doc.clone();
         let reader = xmlparser::Tokenizer::from(&src[..]);
-        let mut v = Validator::new_with_coverage(model.clone(), reader);
+        let mut v = Validator::new_with_coverage(model.clone(), reader).expect("compile validator");
         eprintln!("Validating {xml:?}");
         run_validation(&mut v, xml, doc);
         if let Some(report) = v.coverage_report() {

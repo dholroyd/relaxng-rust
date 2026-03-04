@@ -91,7 +91,7 @@ fn compile_schema() -> Rc<RefCell<Option<relaxng_model::model::DefineRule>>> {
 
 fn validate(schema: Rc<RefCell<Option<relaxng_model::model::DefineRule>>>, doc: &str) {
     let tokenizer = Tokenizer::from(doc);
-    let mut v = Validator::new(schema, tokenizer);
+    let mut v = Validator::new(schema, tokenizer).unwrap();
     loop {
         match v.validate_next() {
             None => break,

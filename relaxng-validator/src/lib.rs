@@ -49,6 +49,7 @@ pub enum ValidatorError<'a> {
         span: std::ops::Range<usize>,
     },
     TextBufferOverflow,
+    TooManyPatterns,
 }
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
@@ -152,6 +153,8 @@ struct SchemaBuilder {
     /// Deferred `(placeholder, target)` pairs where the target was still an
     /// unresolved slot at the time `resolve_ref` was called (mutual recursion).
     deferred: Vec<(PatId, PatId)>,
+    /// Set to true if the pattern limit (2^16) was exceeded during compilation.
+    overflowed: bool,
 }
 
 impl SchemaBuilder {
@@ -162,12 +165,14 @@ impl SchemaBuilder {
             refs: HashMap::new(),
             span_map: HashMap::new(),
             deferred: Vec::new(),
+            overflowed: false,
         }
     }
 
     fn push(&mut self, p: Pat) -> PatId {
         if self.patterns.len() > 0xffff {
-            panic!("Only up to 2^16 rules supported in one schema")
+            self.overflowed = true;
+            return *self.memo.get(&Pat::NotAllowed).unwrap_or(&PatId(0));
         }
         if let Some(id) = self.memo.get(&p) {
             *id
@@ -282,7 +287,8 @@ impl SchemaBuilder {
 
     fn reserve_slot(&mut self, define_id: DefineId, _name: &str) -> PatId {
         if self.patterns.len() > 0xffff {
-            panic!("Only up to 2^16 rules supported in one schema")
+            self.overflowed = true;
+            return *self.memo.get(&Pat::NotAllowed).unwrap_or(&PatId(0));
         }
         let pat_id = PatId(self.patterns.len() as u16);
         self.patterns.push(None);
@@ -348,7 +354,9 @@ impl Schema {
     fn push(&self, p: Pat) -> PatId {
         let mut inner = self.inner.borrow_mut();
         if inner.patterns.len() > 0xffff {
-            panic!("Only up to 2^16 rules supported in one schema")
+            // Gracefully degrade: treat as not-allowed rather than panicking.
+            // The NotAllowed sentinel is always at index 0 or exists in the memo.
+            return *inner.memo.get(&Pat::NotAllowed).unwrap_or(&PatId(0));
         }
         if let Some(id) = inner.memo.get(&p) {
             *id
@@ -951,12 +959,15 @@ impl<'a> Validator<'a> {
     pub fn new(
         model: Rc<RefCell<Option<model::DefineRule>>>,
         tokenizer: Tokenizer<'a>,
-    ) -> Validator<'a> {
+    ) -> Result<Validator<'a>, ValidatorError<'a>> {
         let mut builder = SchemaBuilder::new();
         let start = Self::compile(
             &mut builder,
             Rc::as_ref(&model).borrow().as_ref().unwrap().pattern(),
         );
+        if builder.overflowed {
+            return Err(ValidatorError::TooManyPatterns);
+        }
         let schema = Schema {
             inner: RefCell::new(builder.finalize()),
             ..Default::default()
@@ -967,7 +978,7 @@ impl<'a> Validator<'a> {
         entity_definitions.insert("amp".to_string(), "&".to_string());
         entity_definitions.insert("apos".to_string(), "'".to_string());
         entity_definitions.insert("quot".to_string(), "\"".to_string());
-        Validator {
+        Ok(Validator {
             schema,
             tokenizer,
             current_step: start,
@@ -976,20 +987,20 @@ impl<'a> Validator<'a> {
             entity_definitions,
             text_buffer: String::new(),
             max_text_buffer: 1024 * 1024,
-        }
+        })
     }
 
     /// Create a validator with coverage tracking enabled.
     pub fn new_with_coverage(
         model: Rc<RefCell<Option<model::DefineRule>>>,
         tokenizer: Tokenizer<'a>,
-    ) -> Validator<'a> {
-        let mut v = Self::new(model, tokenizer);
+    ) -> Result<Validator<'a>, ValidatorError<'a>> {
+        let mut v = Self::new(model, tokenizer)?;
         let compile_time_count = v.schema.inner.borrow().patterns.len() as u16;
         let word_count = (compile_time_count as usize).div_ceil(64);
         v.schema.compile_time_count = compile_time_count;
         v.schema.coverage = Some(vec![0u64; word_count].into_boxed_slice());
-        v
+        Ok(v)
     }
 
     /// Extract the coverage report. Returns `None` if coverage tracking was not enabled.
@@ -2130,6 +2141,14 @@ impl<'a> Validator<'a> {
                     spans: vec![],
                 })
             }
+            ValidatorError::TooManyPatterns => {
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: "Schema exceeds maximum number of patterns (65535)".to_string(),
+                    code: None,
+                    spans: vec![],
+                })
+            }
         }
         (map, diagnostics)
     }
@@ -2434,7 +2453,7 @@ mod tests {
 
         fn valid(&self, xml: &str) {
             let reader = xmlparser::Tokenizer::from(xml);
-            let mut v = Validator::new(self.schema.clone(), reader);
+            let mut v = Validator::new(self.schema.clone(), reader).unwrap();
             while let Some(i) = v.validate_next() {
                 if let Err(err) = i {
                     let (map, d) = v.diagnostic("valid.xml".to_string(), xml.to_string(), &err);
@@ -2450,7 +2469,7 @@ mod tests {
 
         fn valid_with_coverage(&self, xml: &str) -> super::CoverageReport {
             let reader = xmlparser::Tokenizer::from(xml);
-            let mut v = Validator::new_with_coverage(self.schema.clone(), reader);
+            let mut v = Validator::new_with_coverage(self.schema.clone(), reader).unwrap();
             while let Some(i) = v.validate_next() {
                 if let Err(err) = i {
                     let (map, d) = v.diagnostic("valid.xml".to_string(), xml.to_string(), &err);
@@ -2467,7 +2486,7 @@ mod tests {
 
         fn invalid(&self, xml: &str) {
             let reader = xmlparser::Tokenizer::from(xml);
-            let mut v = Validator::new(self.schema.clone(), reader);
+            let mut v = Validator::new(self.schema.clone(), reader).unwrap();
             while let Some(i) = v.validate_next() {
                 if let Err(_err) = i {
                     return;
@@ -2504,7 +2523,7 @@ mod tests {
         };
 
         let reader = xmlparser::Tokenizer::from(doc);
-        let mut v = Validator::new(schema, reader);
+        let mut v = Validator::new(schema, reader).unwrap();
         println!("====");
         v.schema.d(v.current_step).unwrap();
         println!("====");
@@ -2785,7 +2804,7 @@ mod tests {
     fn coverage_disabled_by_default() {
         let f = Fixture::correct("start = element a { empty }");
         let reader = xmlparser::Tokenizer::from("<a/>");
-        let mut v = Validator::new(f.schema.clone(), reader);
+        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
         while let Some(i) = v.validate_next() {
             i.unwrap();
         }

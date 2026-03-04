@@ -167,7 +167,7 @@ fn run_test(test_case: TestCase) -> Result<(), Failed> {
 
             for (i, doc) in valid.iter().enumerate() {
                 let reader = xmlparser::Tokenizer::from(&doc[..]);
-                let mut v = Validator::new(result.clone(), reader);
+                let mut v = Validator::new(result.clone(), reader).unwrap();
                 loop {
                     match v.validate_next() {
                         None => break,
@@ -186,7 +186,7 @@ fn run_test(test_case: TestCase) -> Result<(), Failed> {
 
             for (i, doc) in invalid.iter().enumerate() {
                 let reader = xmlparser::Tokenizer::from(&doc[..]);
-                let mut v = Validator::new(result.clone(), reader);
+                let mut v = Validator::new(result.clone(), reader).unwrap();
                 let mut was_rejected = false;
                 loop {
                     match v.validate_next() {

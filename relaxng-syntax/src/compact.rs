@@ -516,7 +516,7 @@ fn external_pattern(input: Span) -> IResult<Span, ExternalPattern> {
         opt(map((space_comment1, inherit), |(_, inherit)| inherit)),
     );
 
-    let mut parser = map(parse, |(_, _, uri, inherit)| ExternalPattern(uri, inherit));
+    let mut parser = map(parse, |(_, _, uri, inherit)| ExternalPattern(uri, inherit, None));
 
     parser.parse(input)
 }
@@ -906,6 +906,7 @@ fn include(input: Span) -> IResult<Span, Include> {
         inherit,
         content,
         annotations: None,
+        ns: None,
     });
 
     parser.parse(input)
@@ -1455,6 +1456,7 @@ mod test {
                     }),
                 ]),
                 annotations: None,
+                ns: None,
             },
         )
     }

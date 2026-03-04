@@ -241,6 +241,7 @@ impl<'a> Context<'a> {
         &self,
         span: codemap::Span,
         file: Arc<codemap::File>,
+        ns: Option<&str>,
     ) -> Result<Context<'_>, RelaxError> {
         self.check_include(span, file.clone())?;
         let mut namespaces = HashMap::new();
@@ -258,7 +259,7 @@ impl<'a> Context<'a> {
             file,
             overrides: RefCell::new(HashMap::new()),
             namespaces,
-            default_namespace: "".to_string(),
+            default_namespace: ns.unwrap_or("").to_string(),
             datatypes,
         })
     }
@@ -1328,7 +1329,7 @@ impl<FS: Files> Compiler<FS> {
         // TODO: get the span of the grammar in the file, rather than the span of the whole file
         let include_span = file.span;
 
-        let mut inc_ctx = ctx.new_include(span, file)?;
+        let mut inc_ctx = ctx.new_include(span, file, inc.ns.as_deref())?;
 
         if let Some(ref inherit) = inc.inherit {
             let prefix = inherit.0.to_string();
@@ -1656,6 +1657,10 @@ impl<FS: Files> Compiler<FS> {
         if external.1.is_some() {
             unimplemented!("inherit");
         }
+        let ns_override: Option<String> = external.2.clone().or_else(|| {
+            let ns = ctx.default_namespace_uri();
+            if ns.is_empty() { None } else { Some(ns.to_string()) }
+        });
         let path = Path::new(ctx.file().name())
             .parent()
             .expect("TODO: no parent?")
@@ -1665,14 +1670,14 @@ impl<FS: Files> Compiler<FS> {
             .get_schema(&path)
             .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?;
         let file_span = file.span;
-        let mut inc_ctx = ctx.new_include(span, file)?;
+        let mut inc_ctx = ctx.new_include(span, file, ns_override.as_deref())?;
 
         match &s.pattern_or_grammar {
             types::PatternOrGrammar::Pattern(pat) => self
                 .compile_pattern(&mut inc_ctx, pat)
                 .map_err(|e| RelaxError::IncludeError(span, Box::new(e))),
             types::PatternOrGrammar::Grammar(types::GrammarPattern { span: _, content }) => {
-                let mut child_ctx = ctx.new_grammar();
+                let mut child_ctx = inc_ctx.new_grammar();
                 for g in content {
                     self.compile_grammar_content_item(&mut child_ctx, g)?;
                 }
@@ -1946,10 +1951,16 @@ impl<FS: Files> Compiler<FS> {
                 Name::NamespacedName(NamespacedName {
                     namespace_uri,
                     localname,
-                }) => Ok(model::NameClass::named(
-                    namespace_uri.as_string_value(),
-                    localname.1.clone(),
-                )),
+                }) => {
+                    let ns = namespace_uri.as_string_value();
+                    let ns = if ns.is_empty() && elem_attr == ElemAttr::Element {
+                        let default = ctx.default_namespace_uri();
+                        if default.is_empty() { ns } else { default.to_string() }
+                    } else {
+                        ns
+                    };
+                    Ok(model::NameClass::named(ns, localname.1.clone()))
+                }
             },
             types::NameClass::NsName(types::NsName { name, except }) => {
                 let except = if let Some(except) = except {
@@ -2197,3 +2208,4 @@ mod tests {
         })
     }
 }
+

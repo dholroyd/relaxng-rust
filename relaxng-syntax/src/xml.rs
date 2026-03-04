@@ -623,7 +623,9 @@ fn external_ref(node: Node) -> Result<ExternalPattern> {
     };
     let val = Literal(href.range_value(), vec![seg]);
 
-    Ok(ExternalPattern(val, None))
+    let ns = get_ns_att(node).map(|a| a.value().to_string());
+
+    Ok(ExternalPattern(val, None, ns))
 }
 
 fn grammar(node: Node) -> Result<GrammarPattern> {
@@ -806,11 +808,14 @@ fn include(node: Node) -> Result<Include> {
         next = next_rng_sibling(child);
     }
 
+    let ns = get_ns_att(node).map(|a| a.value().to_string());
+
     Ok(Include {
         uri: val,
         inherit: None,
         content: Some(content),
         annotations: None,
+        ns,
     })
 }
 

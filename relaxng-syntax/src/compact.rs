@@ -19,7 +19,38 @@ use nom::{
 };
 use nom::{Input, Parser};
 use nom_locate::{LocatedSpan, position};
+use std::cell::Cell;
 use std::ops::{Range, RangeBounds};
+
+const MAX_RECURSION_DEPTH: usize = 40;
+
+thread_local! {
+    static RECURSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct RecursionGuard;
+
+impl RecursionGuard {
+    fn enter(input: Span) -> IResult<Span, Self> {
+        RECURSION_DEPTH.with(|depth| {
+            let current = depth.get();
+            if current >= MAX_RECURSION_DEPTH {
+                Err(nom::Err::Failure(Error::new(input, ErrorKind::TooLarge)))
+            } else {
+                depth.set(current + 1);
+                Ok((input, RecursionGuard))
+            }
+        })
+    }
+}
+
+impl Drop for RecursionGuard {
+    fn drop(&mut self) {
+        RECURSION_DEPTH.with(|depth| {
+            depth.set(depth.get() - 1);
+        });
+    }
+}
 
 pub type Span<'a> = LocatedSpan<&'a str>;
 
@@ -312,6 +343,7 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
 //    | "grammar" "{" grammarContent* "}"
 //    | "(" pattern ")"
 fn pattern(input: Span) -> IResult<Span, Pattern> {
+    let (input, _guard) = RecursionGuard::enter(input)?;
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = ws0(input)?;
     let (input, mut result) = alt((
@@ -617,6 +649,7 @@ fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
 }
 
 fn name_class(input: Span) -> IResult<Span, NameClass> {
+    let (input, _guard) = RecursionGuard::enter(input)?;
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = ws0(input)?;
     let (input, left) = alt((
@@ -738,6 +771,7 @@ where
 //                        | "div" "{" grammarContent* "}"
 //                        | "include" anyURILiteral [inherit] ["{" includeContent* "}"]
 fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
+    let (input, _guard) = RecursionGuard::enter(input)?;
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = ws0(input)?;
     let (input, mut item) = alt((
@@ -901,6 +935,7 @@ fn inherit(input: Span) -> IResult<Span, Inherit> {
 //                    | start
 //                    | "div" "{" includeContent* "}"
 fn include_content(input: Span) -> IResult<Span, IncludeContent> {
+    let (input, _guard) = RecursionGuard::enter(input)?;
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = ws0(input)?;
     let (input, mut item) = alt((
@@ -1118,6 +1153,7 @@ fn nested_annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute
 }
 
 fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
+    let (input, _guard) = RecursionGuard::enter(input)?;
     let parse = (
         name,
         space_comment0,
@@ -1715,4 +1751,57 @@ mod test {
         let result = annotation_attribute(LocatedSpan::new("lang=\"en\""));
         assert!(result.is_err());
     }
+
+    #[test]
+    fn deeply_nested_parens_pattern() {
+        let depth = 200;
+        let input = "(".repeat(depth) + "empty" + &")".repeat(depth);
+        let result = schema(LocatedSpan::new(&input));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deeply_nested_parens_name_class() {
+        let depth = 200;
+        let parens = "(".repeat(depth) + "foo" + &")".repeat(depth);
+        let input = format!("start = element {parens} {{ text }}");
+        let result = schema(LocatedSpan::new(&input));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deeply_nested_div_grammar() {
+        let depth = 200;
+        let input = "div { ".repeat(depth) + "a = empty" + &" }".repeat(depth);
+        let result = schema(LocatedSpan::new(&input));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deeply_nested_div_include() {
+        let depth = 200;
+        let divs = "div { ".repeat(depth) + "a = empty" + &" }".repeat(depth);
+        let input = format!("include \"foo.rnc\" {{ {divs} }}");
+        let result = schema(LocatedSpan::new(&input));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deeply_nested_annotation_elements() {
+        let depth = 200;
+        let input = "a:x [ ".repeat(depth) + "\"leaf\"" + &" ]".repeat(depth);
+        // Try parsing as an annotation element directly
+        let result = annotation_element(LocatedSpan::new(&input));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn moderate_nesting_succeeds() {
+        // A moderate depth should still parse fine
+        let depth = 20;
+        let input = "(".repeat(depth) + "empty" + &")".repeat(depth);
+        let result = schema(LocatedSpan::new(&input));
+        assert!(result.is_ok());
+    }
+
 }

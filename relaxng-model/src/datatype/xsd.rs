@@ -9,6 +9,26 @@ use std::str::FromStr;
 
 pub const NAMESPACE_URI: &str = "http://www.w3.org/2001/XMLSchema-datatypes";
 
+/// Wrapper for finite floats that implements Eq and Hash.
+/// Only constructed from validated finite values.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+struct FiniteF64(f64);
+impl Eq for FiniteF64 {}
+impl std::hash::Hash for FiniteF64 {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+struct FiniteF32(f32);
+impl Eq for FiniteF32 {}
+impl std::hash::Hash for FiniteF32 {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum XsdDatatypeValues {
     String(String),
@@ -66,8 +86,8 @@ pub enum XsdDatatypes {
         fraction_digits: Option<u16>,
         total_digits: Option<u16>,
     },
-    Float(Option<PatternFacet>),
-    Double(Option<PatternFacet>),
+    Float(MinMaxFacet<FiniteF32>, Option<PatternFacet>),
+    Double(MinMaxFacet<FiniteF64>, Option<PatternFacet>),
     NmTokens(LengthFacet),
     NmToken(LengthFacet),
     NcName(LengthFacet),
@@ -239,12 +259,18 @@ impl super::Datatype for XsdDatatypes {
                     && len.is_valid(&stripped)
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::Float(patt) => {
-                value.parse::<f32>().is_ok()
+            XsdDatatypes::Float(min_max, patt) => {
+                value
+                    .parse::<f32>()
+                    .ok()
+                    .is_some_and(|v| min_max.is_valid(&FiniteF32(v)))
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::Double(patt) => {
-                value.parse::<f64>().is_ok()
+            XsdDatatypes::Double(min_max, patt) => {
+                value
+                    .parse::<f64>()
+                    .ok()
+                    .is_some_and(|v| min_max.is_valid(&FiniteF64(v)))
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::AnyURI(patt) => {
@@ -1298,7 +1324,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Double(pattern))
+        Ok(XsdDatatypes::Double(min_max, pattern))
     }
 
     fn nmtokens(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -1630,10 +1656,15 @@ impl Compiler {
     }
 
     fn float(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut min_max = MinMaxFacet::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
+                "minInclusive" => min_max.min_inclusive(Self::f32(ctx, param)?)?,
+                "minExclusive" => min_max.min_exclusive(Self::f32(ctx, param)?)?,
+                "maxInclusive" => min_max.max_inclusive(Self::f32(ctx, param)?)?,
+                "maxExclusive" => min_max.max_exclusive(Self::f32(ctx, param)?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1644,7 +1675,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Float(pattern))
+        Ok(XsdDatatypes::Float(min_max, pattern))
     }
 
     fn non_negative_integer(
@@ -2056,17 +2087,37 @@ impl Compiler {
             })
     }
 
-    fn f64(ctx: &Context, param: &types::Param) -> Result<f64, FacetError> {
+    fn f32(ctx: &Context, param: &types::Param) -> Result<FiniteF32, FacetError> {
         param
             .value
             .as_string_value()
-            .parse()
-            .map_err(|e: std::num::ParseFloatError| {
+            .parse::<f32>()
+            .map_err(|e| {
                 FacetError::InvalidFloat(ctx.convert_span(&param.span), e.to_string())
             })
-            .and_then(|v: f64| {
+            .and_then(|v| {
                 if v.is_finite() {
-                    Ok(v)
+                    Ok(FiniteF32(v))
+                } else {
+                    Err(FacetError::InvalidFloat(
+                        ctx.convert_span(&param.span),
+                        "Only finite values allowed".to_string(),
+                    ))
+                }
+            })
+    }
+
+    fn f64(ctx: &Context, param: &types::Param) -> Result<FiniteF64, FacetError> {
+        param
+            .value
+            .as_string_value()
+            .parse::<f64>()
+            .map_err(|e| {
+                FacetError::InvalidFloat(ctx.convert_span(&param.span), e.to_string())
+            })
+            .and_then(|v| {
+                if v.is_finite() {
+                    Ok(FiniteF64(v))
                 } else {
                     Err(FacetError::InvalidFloat(
                         ctx.convert_span(&param.span),

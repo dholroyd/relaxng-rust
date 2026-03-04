@@ -688,6 +688,11 @@ impl<FS: Files> Compiler<FS> {
         self.loaded.keys()
     }
 
+    /// Access the underlying CodeMap for resolving spans to source locations.
+    pub fn code_map(&self) -> &CodeMap {
+        &self.codemap
+    }
+
     // TODO: provide a simpler return-type
     // TODO: does this need to support URLs?
     pub fn compile(
@@ -730,11 +735,11 @@ impl<FS: Files> Compiler<FS> {
             | Pattern::Optional(p)
             | Pattern::ZeroOrMore(p)
             | Pattern::OneOrMore(p)
-            | Pattern::Attribute(_, p)
-            | Pattern::Element(_, p)
+            | Pattern::Attribute(_, p, _)
+            | Pattern::Element(_, p, _)
             | Pattern::List(p) => self.check(seen, p)?,
             Pattern::Empty
-            | Pattern::Text
+            | Pattern::Text(_)
             | Pattern::NotAllowed
             | Pattern::DatatypeValue { .. } => {}
             Pattern::Ref(span, name, def) => {
@@ -1515,7 +1520,9 @@ impl<FS: Files> Compiler<FS> {
             types::Pattern::Identifier(i) => self.compile_ref(ctx, i),
             types::Pattern::Parent(p) => self.compile_parent(ctx, p),
             types::Pattern::Empty => Ok(model::Pattern::Empty),
-            types::Pattern::Text => Ok(model::Pattern::Text),
+            types::Pattern::Text(span) => Ok(model::Pattern::Text(
+                span.as_ref().map(|s| ctx.convert_span(s)),
+            )),
             types::Pattern::NotAllowed => Ok(model::Pattern::NotAllowed),
             types::Pattern::External(e) => self.compile_external(ctx, e),
             types::Pattern::Grammar(g) => self.compile_grammar_pattern(ctx, g),
@@ -1542,10 +1549,12 @@ impl<FS: Files> Compiler<FS> {
         element: &types::ElementPattern,
     ) -> Result<model::Pattern, RelaxError> {
         let name_class = self.compile_nameclass(ctx, ElemAttr::Element, &element.name_class)?;
-        let mut el_ctx = ctx.new_element(ctx.convert_span(&element.span))?;
+        let span = ctx.convert_span(&element.span);
+        let mut el_ctx = ctx.new_element(span)?;
         Ok(model::Pattern::Element(
             name_class,
             Box::new(self.compile_pattern(&mut el_ctx, &element.pattern)?),
+            Some(span),
         ))
     }
     fn compile_attribute(
@@ -1554,10 +1563,12 @@ impl<FS: Files> Compiler<FS> {
         attribute: &types::AttributePattern,
     ) -> Result<model::Pattern, RelaxError> {
         let name_class = self.compile_nameclass(ctx, ElemAttr::Attribute, &attribute.name_class)?;
-        let mut att_ctx = ctx.new_attribute(ctx.convert_span(&attribute.span));
+        let span = ctx.convert_span(&attribute.span);
+        let mut att_ctx = ctx.new_attribute(span);
         Ok(model::Pattern::Attribute(
             name_class,
             Box::new(self.compile_pattern(&mut att_ctx, &attribute.pattern)?),
+            Some(span),
         ))
     }
     fn compile_list(
@@ -1765,7 +1776,7 @@ impl<FS: Files> Compiler<FS> {
     ) -> Result<model::Pattern, RelaxError> {
         // the default datatype if none is explicitly specified is 'token'
         let name = datatype_value
-            .0
+            .1
             .as_ref()
             .unwrap_or(&types::DatatypeName::Token);
         let name = match name {
@@ -1786,11 +1797,12 @@ impl<FS: Files> Compiler<FS> {
                 NcName(localname.0.clone(), localname.1.clone()),
             )),
         };
+        let span = Some(ctx.convert_span(&datatype_value.0));
         let datatype = self
             .datatype_compiler
-            .datatype_value(ctx, &name, &datatype_value.1.as_string_value())
+            .datatype_value(ctx, &name, &datatype_value.2.as_string_value())
             .map_err(RelaxError::DatatypeError)?;
-        Ok(Pattern::DatatypeValue { datatype })
+        Ok(Pattern::DatatypeValue { datatype, span })
     }
     fn compile_datatype_name_pattern(
         &mut self,
@@ -1798,12 +1810,12 @@ impl<FS: Files> Compiler<FS> {
         datatype_name: &types::DatatypeNamePattern,
     ) -> Result<model::Pattern, RelaxError> {
         let tmp = [];
-        let params = if let Some(ref params) = datatype_name.1 {
+        let params = if let Some(ref params) = datatype_name.2 {
             &params[..]
         } else {
             &tmp
         };
-        let name = match &datatype_name.0 {
+        let name = match &datatype_name.1 {
             DatatypeName::String => DatatypeName::String,
             DatatypeName::Token => DatatypeName::Token,
             DatatypeName::CName(QName(namespace, name)) => DatatypeName::CName(QName(
@@ -1821,17 +1833,19 @@ impl<FS: Files> Compiler<FS> {
                 NcName(localname.0.clone(), localname.1.clone()),
             )),
         };
+        let span = Some(ctx.convert_span(&datatype_name.0));
         let datatype = self
             .datatype_compiler
             .datatype_name(ctx, &name, params)
             .map_err(RelaxError::DatatypeError)?;
         Ok(model::Pattern::DatatypeName {
             datatype,
-            except: if let Some(ref except) = datatype_name.2 {
+            except: if let Some(ref except) = datatype_name.3 {
                 Some(Box::new(self.compile_pattern(ctx, except)?))
             } else {
                 None
             },
+            span,
         })
     }
 
@@ -1976,7 +1990,7 @@ mod tests {
         let start = s.as_ref().unwrap().pattern();
         assert_matches!(start, Pattern::Ref(_whence, _name, model::PatRef(ref1)) => {
             assert_matches!(ref1.borrow().as_ref(), Some(model::DefineRule::AssignCombine(_, _, patt)) => {
-                assert_matches!(patt, Pattern::Element(_name, content_patt) => {
+                assert_matches!(patt, Pattern::Element(_name, content_patt, _) => {
                     assert_matches!(**content_patt, Pattern::Choice(ref seq) => {
                         assert_matches!(seq[0], Pattern::Ref(_, _, model::PatRef(ref ref2)) => {
                             assert!(Rc::ptr_eq(ref1, ref2));
@@ -2018,7 +2032,7 @@ mod tests {
         let start = s.as_ref().unwrap().pattern();
         assert_matches!(start, Pattern::Ref(_whence, _name, model::PatRef(ref1)) => {
             assert_matches!(ref1.borrow().as_ref(), Some(model::DefineRule::AssignCombine(_, _, patt)) => {
-                assert_matches!(patt, Pattern::Element(_name, content_patt) => {
+                assert_matches!(patt, Pattern::Element(_name, content_patt, _) => {
                     assert_matches!(**content_patt, Pattern::Optional(ref patt) => {
                         assert_matches!(**patt, Pattern::Ref(_, _, model::PatRef(ref ref2)) => {
                             assert!(Rc::ptr_eq(ref1, ref2));

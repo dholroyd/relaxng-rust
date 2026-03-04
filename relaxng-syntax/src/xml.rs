@@ -346,7 +346,7 @@ fn attribute(node: Node) -> Result<AttributePattern> {
     let (pattern, rest) = if let Some(child) = rest {
         (pattern(child)?, next_rng_sibling(child))
     } else {
-        (Pattern::Text, None)
+        (Pattern::Text(None), None)
     };
     if let Some(rest) = rest {
         return Err(Error::Unexpected(
@@ -451,7 +451,7 @@ fn empty(node: Node) -> Result<Pattern> {
 fn text(node: Node) -> Result<Pattern> {
     no_attrs(node)?;
     no_rng_element_children(node)?;
-    Ok(Pattern::Text)
+    Ok(Pattern::Text(Some(node.range())))
 }
 
 fn value(node: Node) -> Result<DatatypeValuePattern> {
@@ -479,6 +479,7 @@ fn value(node: Node) -> Result<DatatypeValuePattern> {
         Literal(node.range(), vec![seg])
     };
     Ok(DatatypeValuePattern(
+        node.range(),
         type_name.map(|name| {
             DatatypeName::NamespacedName(NamespacedName {
                 namespace_uri: datatype_ns,
@@ -536,6 +537,7 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
         return Err(Error::Unexpected(rest.range(), "Unexpected element"));
     }
     Ok(DatatypeNamePattern(
+        node.range(),
         type_name,
         Some(params),
         except.map(Box::new),

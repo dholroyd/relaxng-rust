@@ -44,7 +44,7 @@ pub enum Pattern {
     Identifier(Identifier),
     Parent(Identifier),
     Empty,
-    Text,
+    Text(Option<Span>),
     NotAllowed,
     External(ExternalPattern),
     Grammar(GrammarPattern),
@@ -98,6 +98,7 @@ pub struct ExternalPattern(pub Literal, pub Option<Inherit>);
 
 #[derive(Debug, PartialEq)]
 pub struct DatatypeValuePattern(
+    pub Span,
     // The default datatype if the schema doesn't specify one explicitly is "token"
     pub Option<DatatypeName>,
     pub Literal,
@@ -105,6 +106,7 @@ pub struct DatatypeValuePattern(
 
 #[derive(Debug, PartialEq)]
 pub struct DatatypeNamePattern(
+    pub Span,
     pub DatatypeName,
     pub Option<Vec<Param>>,
     pub Option<Box<Pattern>>,

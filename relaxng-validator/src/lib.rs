@@ -76,6 +76,7 @@ struct Inner {
     memo: HashMap<Pat, PatId>,
     patterns: Vec<Pat>,
     refs: HashMap<*const Option<relaxng_model::model::DefineRule>, PatId>,
+    span_map: HashMap<u16, Vec<codemap::Span>>,
 
     // Our implementation of https://relaxng.org/jclark/derivative.html#Memoization
 
@@ -91,6 +92,8 @@ struct Inner {
 #[derive(Default)]
 struct Schema {
     inner: RefCell<Inner>,
+    coverage: Option<Box<[u64]>>,
+    compile_time_count: u16,
 }
 impl Schema {
     fn push(&self, p: Pat) -> PatId {
@@ -105,6 +108,35 @@ impl Schema {
             inner.memo.insert(p.clone(), id);
             inner.patterns.push(p);
             id
+        }
+    }
+    fn record_source_span(&self, id: PatId, span: codemap::Span) {
+        self.inner
+            .borrow_mut()
+            .span_map
+            .entry(id.0 as u16)
+            .or_default()
+            .push(span);
+    }
+    #[inline(always)]
+    fn mark_covered(&mut self, id: PatId) {
+        if let Some(ref mut bits) = self.coverage {
+            let limit = self.compile_time_count as usize;
+            let idx = id.0 as usize;
+            if idx < limit {
+                bits[idx / 64] |= 1u64 << (idx % 64);
+            }
+            // Resolved Ref placeholders hold a copy of the original pattern,
+            // but the memo maps the pattern to its canonical PatId.  Mark both
+            // so that coverage_report() (which iterates by canonical PatId)
+            // sees the hit.
+            let inner = self.inner.borrow();
+            if let Some(&canonical) = inner.memo.get(&inner.patterns[idx]) {
+                let cidx = canonical.0 as usize;
+                if cidx < limit && cidx != idx {
+                    bits[cidx / 64] |= 1u64 << (cidx % 64);
+                }
+            }
         }
     }
     pub fn choice(&self, left: PatId, right: PatId) -> PatId {
@@ -564,6 +596,154 @@ struct Attr<'a> {
     span: StrSpan<'a>,
 }
 
+fn describe_nameclass(nc: &NameClass, desc: &mut String) {
+    match nc {
+        NameClass::Named {
+            namespace_uri: _,
+            name,
+        } => {
+            desc.push_str(name);
+        }
+        NameClass::NsName {
+            namespace_uri,
+            except,
+        } => {
+            desc.push_str(namespace_uri);
+            desc.push_str(":*");
+            if let Some(except) = except {
+                desc.push('-');
+                describe_nameclass(except, desc);
+            }
+        }
+        NameClass::AnyName { except } => {
+            desc.push('*');
+            if let Some(except) = except {
+                desc.push('-');
+                describe_nameclass(except, desc);
+            }
+        }
+        NameClass::Alt { a, b } => {
+            describe_nameclass(a, desc);
+            desc.push('|');
+            describe_nameclass(b, desc);
+        }
+    }
+}
+
+fn describe_datatype(dt: &datatype::Datatypes) -> String {
+    match dt {
+        datatype::Datatypes::Relax(r) => match r {
+            datatype::relax::BuiltinDatatype::Token => "token".to_string(),
+            datatype::relax::BuiltinDatatype::String => "string".to_string(),
+        },
+        datatype::Datatypes::Xsd(x) => {
+            use datatype::xsd::XsdDatatypes::*;
+            let name = match x {
+                String(_) => "xsd:string",
+                NormalizedString(_) => "xsd:normalizedString",
+                Token(_) => "xsd:token",
+                Short(..) => "xsd:short",
+                UnsignedShort(..) => "xsd:unsignedShort",
+                Int(..) => "xsd:int",
+                Integer(..) => "xsd:integer",
+                Long(..) => "xsd:long",
+                UnsignedInt(..) => "xsd:unsignedInt",
+                UnsignedLong(..) => "xsd:unsignedLong",
+                PositiveInteger(..) => "xsd:positiveInteger",
+                Decimal { .. } => "xsd:decimal",
+                Double(_) => "xsd:double",
+                NmTokens(_) => "xsd:NMTOKENS",
+                NmToken(_) => "xsd:NMTOKEN",
+                NcName(_) => "xsd:NCName",
+                Duration(_) => "xsd:duration",
+                Date(_) => "xsd:date",
+                Datetime(_) => "xsd:dateTime",
+                AnyURI(_) => "xsd:anyURI",
+                Language(_) => "xsd:language",
+                Boolean(_) => "xsd:boolean",
+                Id(_) => "xsd:ID",
+                IdRef(_) => "xsd:IDREF",
+            };
+            name.to_string()
+        }
+    }
+}
+
+fn describe_datatype_value(dt: &datatype::DatatypeValues) -> String {
+    match dt {
+        datatype::DatatypeValues::Relax(r) => match r {
+            datatype::relax::BuiltinDatatypeValue::TokenValue(s)
+            | datatype::relax::BuiltinDatatypeValue::StringValue(s) => {
+                format!("\"{}\"", s)
+            }
+        },
+        datatype::DatatypeValues::Xsd(x) => {
+            use datatype::xsd::XsdDatatypeValues::*;
+            match x {
+                String(s) | Token(s) => format!("\"{}\"", s),
+                QName(q) => format!("{:?}", q),
+            }
+        }
+    }
+}
+
+/// Description of a trackable pattern in the schema.
+pub struct TrackablePattern {
+    /// Index of this pattern in the schema's pattern arena.
+    pub pat_id: u16,
+    /// Kind of pattern.
+    pub kind: &'static str,
+    /// Human-readable name or description.
+    pub name: String,
+    /// Source spans where this pattern was defined.
+    pub spans: Vec<codemap::Span>,
+}
+
+/// Coverage report tracking which schema patterns were exercised during validation.
+pub struct CoverageReport {
+    covered: Box<[u64]>,
+    patterns: Vec<TrackablePattern>,
+}
+
+impl CoverageReport {
+    /// Check whether a specific pattern (by arena index) was covered.
+    pub fn is_covered(&self, pat_id: u16) -> bool {
+        let idx = pat_id as usize;
+        idx < self.covered.len() * 64 && (self.covered[idx / 64] >> (idx % 64)) & 1 != 0
+    }
+
+    /// Merge another report into this one (bitwise OR). Use this to aggregate
+    /// coverage across multiple document validations against the same schema.
+    pub fn merge(&mut self, other: &CoverageReport) {
+        for (a, b) in self.covered.iter_mut().zip(other.covered.iter()) {
+            *a |= *b;
+        }
+    }
+
+    /// Number of trackable patterns that were covered.
+    pub fn covered_count(&self) -> usize {
+        self.patterns
+            .iter()
+            .filter(|p| self.is_covered(p.pat_id))
+            .count()
+    }
+
+    /// Total number of trackable patterns in the schema.
+    pub fn total_trackable(&self) -> usize {
+        self.patterns.len()
+    }
+
+    /// All trackable patterns.
+    pub fn patterns(&self) -> &[TrackablePattern] {
+        &self.patterns
+    }
+
+    /// Iterator over patterns that were NOT covered.
+    pub fn uncovered_patterns(&self) -> impl Iterator<Item = &TrackablePattern> {
+        self.patterns.iter().filter(|p| !self.is_covered(p.pat_id))
+    }
+}
+
 pub struct Validator<'a> {
     schema: Schema,
     tokenizer: Tokenizer<'a>,
@@ -598,6 +778,67 @@ impl<'a> Validator<'a> {
             entity_definitions,
         }
     }
+
+    /// Create a validator with coverage tracking enabled.
+    pub fn new_with_coverage(
+        model: Rc<RefCell<Option<model::DefineRule>>>,
+        tokenizer: Tokenizer<'a>,
+    ) -> Validator<'a> {
+        let mut v = Self::new(model, tokenizer);
+        let compile_time_count = v.schema.inner.borrow().patterns.len() as u16;
+        let word_count = (compile_time_count as usize + 63) / 64;
+        v.schema.compile_time_count = compile_time_count;
+        v.schema.coverage = Some(vec![0u64; word_count].into_boxed_slice());
+        v
+    }
+
+    /// Extract the coverage report. Returns `None` if coverage tracking was not enabled.
+    pub fn coverage_report(&self) -> Option<CoverageReport> {
+        let covered = self.schema.coverage.as_ref()?.clone();
+        let inner = self.schema.inner.borrow();
+        let count = self.schema.compile_time_count as usize;
+        let mut patterns = Vec::new();
+        for i in 0..count {
+            let pat = &inner.patterns[i];
+            // Skip resolved-Ref duplicates: if the memo maps this pattern to
+            // a different (canonical) PatId, this slot is a placeholder copy.
+            if let Some(&canonical) = inner.memo.get(pat) {
+                if canonical.0 as usize != i {
+                    continue;
+                }
+            }
+            let (kind, name) = match pat {
+                Pat::Element(nc, _) => {
+                    let mut desc = String::new();
+                    describe_nameclass(nc, &mut desc);
+                    ("Element", desc)
+                }
+                Pat::Attribute(nc, _) => {
+                    let mut desc = String::new();
+                    describe_nameclass(nc, &mut desc);
+                    ("Attribute", desc)
+                }
+                Pat::Datatype(dt) => ("Datatype", describe_datatype(dt)),
+                Pat::DatatypeValue(dt) => ("DatatypeValue", describe_datatype_value(dt)),
+                Pat::DatatypeExcept(dt, _) => ("DatatypeExcept", describe_datatype(dt)),
+                Pat::Text => ("Text", "text".to_string()),
+                _ => continue,
+            };
+            let spans = inner
+                .span_map
+                .get(&(i as u16))
+                .cloned()
+                .unwrap_or_default();
+            patterns.push(TrackablePattern {
+                pat_id: i as u16,
+                kind,
+                name,
+                spans,
+            });
+        }
+        Some(CoverageReport { covered, patterns })
+    }
+
     fn compile(s: &Schema, p: &model::Pattern) -> PatId {
         match p {
             model::Pattern::Choice(v) => {
@@ -626,15 +867,33 @@ impl<'a> Validator<'a> {
             }
             model::Pattern::Mixed(p) => s.mixed(Self::compile(s, p)),
             model::Pattern::Empty => s.empty(),
-            model::Pattern::Text => s.text(),
+            model::Pattern::Text(span) => {
+                let id = s.text();
+                if let Some(span) = span {
+                    s.record_source_span(id, *span);
+                }
+                id
+            }
             model::Pattern::NotAllowed => s.not_allowed(),
             model::Pattern::Optional(p) => s.choice(Self::compile(s, p), s.empty()),
             model::Pattern::ZeroOrMore(p) => {
                 s.choice(s.one_or_more(Self::compile(s, p)), s.empty())
             }
             model::Pattern::OneOrMore(p) => s.one_or_more(Self::compile(s, p)),
-            model::Pattern::Attribute(name, p) => s.attribute(name.clone(), Self::compile(s, p)),
-            model::Pattern::Element(name, p) => s.element(name.clone(), Self::compile(s, p)),
+            model::Pattern::Attribute(name, p, span) => {
+                let id = s.attribute(name.clone(), Self::compile(s, p));
+                if let Some(span) = span {
+                    s.record_source_span(id, *span);
+                }
+                id
+            }
+            model::Pattern::Element(name, p, span) => {
+                let id = s.element(name.clone(), Self::compile(s, p));
+                if let Some(span) = span {
+                    s.record_source_span(id, *span);
+                }
+                id
+            }
             model::Pattern::Ref(whence, name, r) => {
                 let ptr = r.0.as_ptr();
                 if let Some(id) = s.get_ref(ptr) {
@@ -650,11 +909,27 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
-            model::Pattern::DatatypeValue { datatype } => s.datatype_value(datatype.clone()),
-            model::Pattern::DatatypeName { datatype, except } => s.datatype_name(
-                datatype.clone(),
-                except.as_ref().map(|e| Self::compile(s, e)),
-            ),
+            model::Pattern::DatatypeValue { datatype, span } => {
+                let id = s.datatype_value(datatype.clone());
+                if let Some(span) = span {
+                    s.record_source_span(id, *span);
+                }
+                id
+            }
+            model::Pattern::DatatypeName {
+                datatype,
+                except,
+                span,
+            } => {
+                let id = s.datatype_name(
+                    datatype.clone(),
+                    except.as_ref().map(|e| Self::compile(s, e)),
+                );
+                if let Some(span) = span {
+                    s.record_source_span(id, *span);
+                }
+                id
+            }
             model::Pattern::List(p) => s.list(Self::compile(s, p)),
         }
     }
@@ -685,7 +960,6 @@ impl<'a> Validator<'a> {
     }
 
     fn validate(&mut self, evt: Token<'a>) -> Result<(), ValidatorError<'a>> {
-        let pat = self.schema.patt(self.current_step);
         let new = match evt {
             Token::EmptyDtd { .. }
             | Token::Comment { .. }
@@ -748,7 +1022,7 @@ impl<'a> Validator<'a> {
                             //
                             // This fake text node is required for a pattern like 'element foo { token }'
                             // to match the input '<foo/>' or '<foo></foo>'
-                            Self::text_deriv(pat, &mut self.schema, "")
+                            Self::text_deriv(self.current_step, &mut self.schema, "")
                         } else {
                             self.current_step
                         };
@@ -761,7 +1035,6 @@ impl<'a> Validator<'a> {
                             evt,
                             self.current_step,
                         )?;
-                        let pat = self.schema.patt(next_id);
                         // The last event was XmlEvent::StartElement with no child elements or child
                         // text nodes.
                         //
@@ -772,7 +1045,7 @@ impl<'a> Validator<'a> {
                         //
                         // This fake text node is required for a pattern like 'element foo { token }'
                         // to match the input '<foo/>' or '<foo></foo>'
-                        let p = Self::text_deriv(pat, &mut self.schema, "");
+                        let p = Self::text_deriv(next_id, &mut self.schema, "");
                         Self::end_tag_deriv(p, &mut self.schema)
                     }
                 }
@@ -782,7 +1055,7 @@ impl<'a> Validator<'a> {
                 if mixed == self.current_step {
                     self.current_step
                 } else {
-                    Self::text_deriv(pat, &mut self.schema, &text)
+                    Self::text_deriv(self.current_step, &mut self.schema, &text)
                 }
             }
             Token::Text { text } => {
@@ -832,7 +1105,7 @@ impl<'a> Validator<'a> {
                 if mixed == self.current_step {
                     self.current_step
                 } else {
-                    let next_id = Self::text_deriv(pat, &mut self.schema, data);
+                    let next_id = Self::text_deriv(self.current_step, &mut self.schema, data);
                     let next_pat = self.schema.patt(next_id);
                     if let Pat::NotAllowed = next_pat {
                         return Err(ValidatorError::NotAllowed(Token::Text { text }));
@@ -922,53 +1195,48 @@ impl<'a> Validator<'a> {
         })
     }
 
-    fn text_deriv(current: Pat, schema: &mut Schema, text: &str) -> PatId {
-        // TODO: do we need to memoize here per att_deriv() ?
+    fn text_deriv(pid: PatId, schema: &mut Schema, text: &str) -> PatId {
+        let current = schema.patt(pid);
         match current {
             Pat::Choice(p1, p2, _) => {
-                let p1 = schema.patt(p1);
-                let p2 = schema.patt(p2);
                 let a = Self::text_deriv(p1, schema, text);
                 let b = Self::text_deriv(p2, schema, text);
                 schema.choice(a, b)
             }
             Pat::Interleave(p1, p2, _) => {
-                let pat1 = schema.patt(p1);
-                let pat2 = schema.patt(p2);
-
-                let d1 = Self::text_deriv(pat1, schema, text);
+                let d1 = Self::text_deriv(p1, schema, text);
                 let a = schema.interleave(d1, p2);
 
-                let d2 = Self::text_deriv(pat2, schema, text);
+                let d2 = Self::text_deriv(p2, schema, text);
                 let b = schema.interleave(p1, d2);
                 schema.choice(a, b)
             }
             Pat::Group(p1, p2, _) => {
-                let pat1 = schema.patt(p1);
-                let nullable = pat1.is_nullable();
-                let pat2 = schema.patt(p2);
-                let d1 = Self::text_deriv(pat1, schema, text);
+                let nullable = schema.patt(p1).is_nullable();
+                let d1 = Self::text_deriv(p1, schema, text);
                 let p = schema.group(d1, p2);
                 if nullable {
-                    let d2 = Self::text_deriv(pat2, schema, text);
+                    let d2 = Self::text_deriv(p2, schema, text);
                     schema.choice(p, d2)
                 } else {
                     p
                 }
             }
             Pat::After(p1, p2) => {
-                let pat1 = schema.patt(p1);
-                let d = Self::text_deriv(pat1, schema, text);
+                let d = Self::text_deriv(p1, schema, text);
                 schema.after(d, p2)
             }
             Pat::OneOrMore(p, _) => {
-                let pat = schema.patt(p);
-                let d = Self::text_deriv(pat, schema, text);
+                let d = Self::text_deriv(p, schema, text);
                 schema.group(d, schema.choice(schema.one_or_more(p), schema.empty()))
             }
-            Pat::Text => schema.text(),
+            Pat::Text => {
+                schema.mark_covered(pid);
+                schema.text()
+            }
             Pat::Datatype(dt) => {
                 if dt.is_valid(text) {
+                    schema.mark_covered(pid);
                     schema.empty()
                 } else {
                     schema.not_allowed()
@@ -976,16 +1244,17 @@ impl<'a> Validator<'a> {
             }
             Pat::DatatypeValue(dt) => {
                 if dt.is_valid(text) {
+                    schema.mark_covered(pid);
                     schema.empty()
                 } else {
                     schema.not_allowed()
                 }
             }
             Pat::DatatypeExcept(dt, except) => {
-                let pat = schema.patt(except);
-                let d = Self::text_deriv(pat, schema, text);
+                let d = Self::text_deriv(except, schema, text);
                 let pat2 = schema.patt(d);
                 if dt.is_valid(text) && !pat2.is_nullable() {
+                    schema.mark_covered(pid);
                     schema.empty()
                 } else {
                     schema.not_allowed()
@@ -994,8 +1263,7 @@ impl<'a> Validator<'a> {
             Pat::List(p) => {
                 let mut p = p;
                 for item in text.split_whitespace() {
-                    let pat = schema.patt(p);
-                    p = Self::text_deriv(pat, schema, item);
+                    p = Self::text_deriv(p, schema, item);
                     if let Pat::NotAllowed = schema.patt(p) {
                         return p;
                     }
@@ -1034,7 +1302,7 @@ impl<'a> Validator<'a> {
             Pat::NotAllowed | Pat::Attribute(_, _) => schema.not_allowed(),
             Pat::Element(_, _) => {
                 if xml::common::is_whitespace_str(text) {
-                    schema.push(current) // TODO: just have the PatId to hand
+                    pid
                 } else {
                     schema.not_allowed()
                 }
@@ -1088,7 +1356,10 @@ impl<'a> Validator<'a> {
                 let d = Self::mixed_text_deriv(p, schema);
                 schema.group(d, schema.choice(schema.one_or_more(p), schema.empty()))
             }
-            Pat::Text => pid,
+            Pat::Text => {
+                schema.mark_covered(pid);
+                pid
+            }
             _ => schema.not_allowed(),
         };
         let mut inner = schema.inner.borrow_mut();
@@ -1157,6 +1428,7 @@ impl<'a> Validator<'a> {
             }
             Pat::Element(ref nc, inner_pat) => {
                 if contains(nc, name) {
+                    schema.mark_covered(pid);
                     let empty = schema.empty();
                     schema.after(inner_pat, empty)
                 } else {
@@ -1246,6 +1518,7 @@ impl<'a> Validator<'a> {
             }
             Pat::Attribute(ref nc, val_pat) => {
                 if contains(nc, name) {
+                    schema.mark_covered(pid);
                     let empty = schema.empty();
                     schema.after(val_pat, empty)
                 } else {
@@ -1273,8 +1546,7 @@ impl<'a> Validator<'a> {
         let pat = schema.patt(pid);
         match pat {
             Pat::After(val_pat, cont) => {
-                let vp = schema.patt(val_pat);
-                if Self::value_match(vp, schema, value) {
+                if Self::value_match(val_pat, schema, value) {
                     cont
                 } else {
                     schema.not_allowed()
@@ -1314,11 +1586,12 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn value_match(pat: Pat, schema: &mut Schema, val: &str) -> bool {
+    fn value_match(pid: PatId, schema: &mut Schema, val: &str) -> bool {
+        let pat = schema.patt(pid);
         if pat.is_nullable() && is_whitespace_str(val) {
             true
         } else {
-            let d = Self::text_deriv(pat, schema, val);
+            let d = Self::text_deriv(pid, schema, val);
             schema.patt(d).is_nullable()
         }
     }
@@ -1480,39 +1753,8 @@ impl<'a> Validator<'a> {
         // TODO: plus attributes and everything else
         result
     }
-    #[allow(clippy::only_used_in_recursion)]
     fn describe_nameclass(&self, nc: &NameClass, desc: &mut String) {
-        match nc {
-            NameClass::Named {
-                namespace_uri: _,
-                name,
-            } => {
-                desc.push_str(name);
-            }
-            NameClass::NsName {
-                namespace_uri,
-                except,
-            } => {
-                desc.push_str(namespace_uri);
-                desc.push_str(":*");
-                if let Some(except) = except {
-                    desc.push('-');
-                    self.describe_nameclass(except, desc);
-                }
-            }
-            NameClass::AnyName { except } => {
-                desc.push('*');
-                if let Some(except) = except {
-                    desc.push('-');
-                    self.describe_nameclass(except, desc);
-                }
-            }
-            NameClass::Alt { a, b } => {
-                self.describe_nameclass(a, desc);
-                desc.push('|');
-                self.describe_nameclass(b, desc);
-            }
-        }
+        describe_nameclass(nc, desc);
     }
 
     pub fn diagnostic(
@@ -1923,6 +2165,23 @@ mod tests {
             }
         }
 
+        fn valid_with_coverage(&self, xml: &str) -> super::CoverageReport {
+            let reader = xmlparser::Tokenizer::from(xml);
+            let mut v = Validator::new_with_coverage(self.schema.clone(), reader);
+            while let Some(i) = v.validate_next() {
+                if let Err(err) = i {
+                    let (map, d) = v.diagnostic("valid.xml".to_string(), xml.to_string(), &err);
+                    let mut emitter = codemap_diagnostic::Emitter::stderr(
+                        codemap_diagnostic::ColorConfig::Auto,
+                        Some(&map),
+                    );
+                    emitter.emit(&d[..]);
+                    panic!("{err:?}");
+                }
+            }
+            v.coverage_report().expect("coverage should be enabled")
+        }
+
         fn invalid(&self, xml: &str) {
             let reader = xmlparser::Tokenizer::from(xml);
             let mut v = Validator::new(self.schema.clone(), reader);
@@ -2156,5 +2415,94 @@ mod tests {
             "<?xml version=\"1.0\"?><a/>",
         );
         assert_matches!(res, Ok(()));
+    }
+
+    #[test]
+    fn coverage_element_choice() {
+        let f = Fixture::correct(
+            "start = element a { element b { empty } | element c { empty } }",
+        );
+        let report = f.valid_with_coverage("<a><b/></a>");
+        // Element 'a' and 'b' covered, 'c' not covered
+        assert!(report.covered_count() > 0);
+        assert!(report.total_trackable() > 0);
+        assert!(report.covered_count() < report.total_trackable());
+        let uncovered: Vec<_> = report.uncovered_patterns().collect();
+        assert!(
+            uncovered.iter().any(|p| p.kind == "Element" && p.name == "c"),
+            "Element 'c' should be uncovered, got: {:?}",
+            uncovered.iter().map(|p| format!("{}:{}", p.kind, p.name)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn coverage_full() {
+        let f = Fixture::correct("start = element a { element b { empty } }");
+        let report = f.valid_with_coverage("<a><b/></a>");
+        // Both elements covered
+        assert_eq!(report.covered_count(), report.total_trackable());
+    }
+
+    #[test]
+    fn coverage_attribute() {
+        let f = Fixture::correct(
+            "start = element a { attribute x { text }, attribute y { text } }",
+        );
+        let report = f.valid_with_coverage("<a x=\"1\" y=\"2\"/>");
+        let uncovered: Vec<_> = report.uncovered_patterns().collect();
+        // Both attributes should be covered
+        assert!(
+            !uncovered.iter().any(|p| p.kind == "Attribute"),
+            "All attributes should be covered, uncovered: {:?}",
+            uncovered.iter().map(|p| format!("{}:{}", p.kind, p.name)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn coverage_text() {
+        let f = Fixture::correct("start = element a { text }");
+        let report = f.valid_with_coverage("<a>hello</a>");
+        let covered: Vec<_> = report
+            .patterns()
+            .iter()
+            .filter(|p| report.is_covered(p.pat_id) && p.kind == "Text")
+            .collect();
+        assert!(!covered.is_empty(), "Text pattern should be covered");
+    }
+
+    #[test]
+    fn coverage_datatype() {
+        let f = Fixture::correct("start = element a { xsd:string }");
+        let report = f.valid_with_coverage("<a>hello</a>");
+        let covered: Vec<_> = report
+            .patterns()
+            .iter()
+            .filter(|p| report.is_covered(p.pat_id) && p.kind == "Datatype")
+            .collect();
+        assert!(!covered.is_empty(), "Datatype pattern should be covered");
+    }
+
+    #[test]
+    fn coverage_merge() {
+        let f = Fixture::correct(
+            "start = element a { element b { empty } | element c { empty } }",
+        );
+        let mut report1 = f.valid_with_coverage("<a><b/></a>");
+        let report2 = f.valid_with_coverage("<a><c/></a>");
+        let before = report1.covered_count();
+        report1.merge(&report2);
+        // After merging, more patterns should be covered
+        assert!(report1.covered_count() > before);
+    }
+
+    #[test]
+    fn coverage_disabled_by_default() {
+        let f = Fixture::correct("start = element a { empty }");
+        let reader = xmlparser::Tokenizer::from("<a/>");
+        let mut v = Validator::new(f.schema.clone(), reader);
+        while let Some(i) = v.validate_next() {
+            i.unwrap();
+        }
+        assert!(v.coverage_report().is_none());
     }
 }

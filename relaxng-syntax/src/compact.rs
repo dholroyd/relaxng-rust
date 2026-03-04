@@ -328,7 +328,7 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
             Pattern::Parent(p)
         }),
         map(tag("empty"), |_| Pattern::Empty),
-        map(tag("text"), |_| Pattern::Text),
+        map((position, tag("text"), position), |(s, _, e)| Pattern::Text(Some(span(s, e)))),
         map(tag("notAllowed"), |_| Pattern::NotAllowed),
         map(external_pattern, Pattern::External),
         map(grammar_pattern, Pattern::Grammar),
@@ -514,9 +514,11 @@ fn group_pattern(input: Span) -> IResult<Span, Pattern> {
 
 // [datatypeName] datatypeValue
 fn datatype_value_pattern(input: Span) -> IResult<Span, DatatypeValuePattern> {
-    let parse = (opt(datatype_name), space_comment0, datatype_value);
+    let parse = (position, opt(datatype_name), space_comment0, datatype_value, position);
 
-    let mut parser = map(parse, |(name, _, value)| DatatypeValuePattern(name, value));
+    let mut parser = map(parse, |(start, name, _, value, end)| {
+        DatatypeValuePattern(span(start, end), name, value)
+    });
 
     parser.parse(input)
 }
@@ -534,12 +536,14 @@ fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
     let params = map(params, |(_, _, _, p, _, _)| p);
 
     let parse = (
+        position,
         datatype_name,
         opt(params),
         opt(map((space_comment0, except_pattern), |(_, e)| e)),
+        position,
     );
-    let mut parser = map(parse, |(name, params, except)| {
-        DatatypeNamePattern(name, params, except.map(Box::new))
+    let mut parser = map(parse, |(start, name, params, except, end)| {
+        DatatypeNamePattern(span(start, end), name, params, except.map(Box::new))
     });
 
     parser.parse(input)
@@ -1138,7 +1142,7 @@ mod test {
             AttributePattern {
                 span: 0..20,
                 name_class: NameClass::AnyName(AnyName(None)),
-                pattern: Box::new(Pattern::Text),
+                pattern: Box::new(Pattern::Text(Some(14..18))),
             },
         )
     }
@@ -1193,6 +1197,7 @@ mod test {
             pattern,
             "xsd:string",
             Pattern::DatatypeName(DatatypeNamePattern(
+                0..10,
                 DatatypeName::CName(QName(
                     NcName(0..3, "xsd".to_string()),
                     NcName(4..10, "string".to_string()),
@@ -1261,6 +1266,7 @@ mod test {
             pattern,
             "ns:foo { pattern = \"bar\" }",
             Pattern::DatatypeName(DatatypeNamePattern(
+                0..26,
                 DatatypeName::CName(QName(
                     NcName(0..2, "ns".to_string()),
                     NcName(3..6, "foo".to_string()),
@@ -1295,6 +1301,7 @@ mod test {
                         Identifier(0..16, "integer.datatype".to_string()),
                         AssignMethod::Assign,
                         Pattern::DatatypeName(DatatypeNamePattern(
+                            19..30,
                             DatatypeName::CName(QName(
                                 NcName(19..22, "xsd".to_string()),
                                 NcName(23..30, "integer".to_string()),
@@ -1324,6 +1331,7 @@ mod test {
                         Identifier(0..16, "integer.datatype".to_string()),
                         AssignMethod::Assign,
                         Pattern::DatatypeName(DatatypeNamePattern(
+                            19..30,
                             DatatypeName::CName(QName(
                                 NcName(19..22, "xsd".to_string()),
                                 NcName(23..30, "integer".to_string()),
@@ -1343,6 +1351,7 @@ mod test {
             pattern,
             "string \"preserve\"",
             Pattern::DatatypeValue(DatatypeValuePattern(
+                0..17,
                 Some(DatatypeName::String),
                 Literal(
                     7..17,

@@ -65,7 +65,12 @@ impl Syntax {
                 RelaxError::XmlParse(span, e)
             }),
             Syntax::Compact => {
-                let input = LocatedSpan::new(file.source());
+                let source = compact::resolve_escapes(file.source())
+                    .map_err(|e| RelaxError::EscapeError(
+                        file.span.subspan(e.span.start as _, e.span.end as _),
+                        e.message,
+                    ))?;
+                let input = LocatedSpan::new(source.as_ref());
                 let schema = compact::schema(input).map_err(|e| match e {
                     nom::Err::Error(Error { input, code }) => RelaxError::Parse(
                         file.span.subspan(
@@ -166,6 +171,7 @@ pub enum RelaxError {
         include_span: codemap::Span,
         name: String,
     },
+    EscapeError(codemap::Span, String),
 }
 
 enum Context<'a> {

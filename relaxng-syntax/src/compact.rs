@@ -1,5 +1,6 @@
 use crate::types::*;
 use nom::character::complete::satisfy;
+use std::borrow::Cow;
 use nom::combinator::cut;
 use nom::error::{Error, ParseError};
 use nom::multi::separated_list1;
@@ -57,9 +58,130 @@ pub type Span<'a> = LocatedSpan<&'a str>;
 // per https://www.oasis-open.org/committees/relax-ng/compact-20021121.html
 
 // TODO:
-//  - utf8 escape sequences
 //  - check rules are left-factored as required to avoid inefficiently rematching the same sub-rule
 //    in multiple alternatives
+
+/// Error from [`resolve_escapes`], with the byte offset span of the invalid
+/// escape sequence within the original input.
+#[derive(Debug)]
+pub struct EscapeError {
+    /// Byte range of the escape sequence in the original input.
+    pub span: Range<usize>,
+    pub message: String,
+}
+
+/// Resolve `\x{N}` escape sequences per the compact syntax spec (section 2.4).
+///
+/// Call this on the input before parsing with [`schema()`].
+///
+/// The escape format is `\x+{hex_digits}` where one or more `x` characters
+/// may appear. The hex value must be a valid XML 1.0 Char.
+pub fn resolve_escapes(input: &str) -> Result<Cow<'_, str>, EscapeError> {
+    let bytes = input.as_bytes();
+    // Scan for the first escape sequence; if none, return borrowed input
+    let first_escape = find_escape(bytes, 0);
+    let Some(first_escape) = first_escape else {
+        return Ok(Cow::Borrowed(input));
+    };
+    let mut result = String::with_capacity(input.len());
+    result.push_str(&input[..first_escape]);
+    let mut i = first_escape;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if let Some(hex_start) = is_escape_at(bytes, i) {
+                let start = i;
+                i = hex_start;
+                while i < bytes.len() && bytes[i] != b'}' {
+                    if !bytes[i].is_ascii_hexdigit() {
+                        return Err(EscapeError {
+                            span: start..i + 1,
+                            message: format!(
+                                "invalid character '{}' in escape sequence",
+                                bytes[i] as char
+                            ),
+                        });
+                    }
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    return Err(EscapeError {
+                        span: start..i,
+                        message: "unterminated escape sequence".into(),
+                    });
+                }
+                let hex = &input[hex_start..i];
+                let end = i + 1; // include closing '}'
+                i = end;
+                if hex.is_empty() {
+                    return Err(EscapeError {
+                        span: start..end,
+                        message: "empty escape sequence".into(),
+                    });
+                }
+                let code = u32::from_str_radix(hex, 16).map_err(|_| EscapeError {
+                    span: start..end,
+                    message: "escape value too large".into(),
+                })?;
+                let c = char::from_u32(code).ok_or_else(|| EscapeError {
+                    span: start..end,
+                    message: format!("\\x{{{hex}}} is not a valid Unicode value"),
+                })?;
+                if !is_xml_char(c) {
+                    return Err(EscapeError {
+                        span: start..end,
+                        message: format!("\\x{{{hex}}} is not a valid XML character"),
+                    });
+                }
+                result.push(c);
+                continue;
+            }
+            result.push('\\');
+            i += 1;
+        } else {
+            let c = input[i..].chars().next().unwrap();
+            result.push(c);
+            i += c.len_utf8();
+        }
+    }
+    Ok(Cow::Owned(result))
+}
+
+/// If `bytes[pos]` is `\` followed by `x+{`, returns the byte index of the
+/// first hex digit (just after `{`). Otherwise returns `None`.
+fn is_escape_at(bytes: &[u8], pos: usize) -> Option<usize> {
+    let mut j = pos + 1;
+    let mut x_count = 0;
+    while j < bytes.len() && bytes[j] == b'x' {
+        x_count += 1;
+        j += 1;
+    }
+    if x_count > 0 && j < bytes.len() && bytes[j] == b'{' {
+        Some(j + 1)
+    } else {
+        None
+    }
+}
+
+/// Find the byte offset of the first `\x+{` escape in `bytes` starting from `from`.
+fn find_escape(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && is_escape_at(bytes, i).is_some() {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_xml_char(c: char) -> bool {
+    matches!(c,
+        '\u{9}' | '\u{A}' | '\u{D}' |
+        '\u{20}'..='\u{D7FF}' |
+        '\u{E000}'..='\u{FFFD}' |
+        '\u{10000}'..='\u{10FFFF}'
+    )
+}
 
 pub fn schema(input: Span) -> Result<Schema, nom::Err<Error<Span>>> {
     all_consuming((space_comment0, top_level, space_comment0))
@@ -1805,6 +1927,68 @@ mod test {
         // A moderate depth should still parse fine
         let depth = 20;
         let input = "(".repeat(depth) + "empty" + &")".repeat(depth);
+        let result = schema(LocatedSpan::new(&input));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn escape_basic() {
+        // \x{66}\x{6f}\x{6f} == "foo"
+        assert_eq!(resolve_escapes(r"\x{66}\x{6f}\x{6f}").unwrap(), "foo");
+    }
+
+    #[test]
+    fn escape_multiple_x() {
+        // Multiple x's are allowed: \xx{41} == "A"
+        assert_eq!(resolve_escapes(r"\xx{41}").unwrap(), "A");
+        assert_eq!(resolve_escapes(r"\xxx{41}").unwrap(), "A");
+    }
+
+    #[test]
+    fn escape_mixed_with_text() {
+        assert_eq!(
+            resolve_escapes(r"hello \x{20} world").unwrap(),
+            "hello   world"
+        );
+    }
+
+    #[test]
+    fn escape_no_escapes() {
+        assert_eq!(resolve_escapes("plain text").unwrap(), "plain text");
+    }
+
+    #[test]
+    fn escape_backslash_not_followed_by_x() {
+        // \keyword should pass through unchanged
+        assert_eq!(resolve_escapes(r"\keyword").unwrap(), r"\keyword");
+    }
+
+    #[test]
+    fn escape_invalid_xml_char() {
+        // U+0000 is not a valid XML char
+        assert!(resolve_escapes(r"\x{0}").is_err());
+    }
+
+    #[test]
+    fn escape_unterminated() {
+        assert!(resolve_escapes(r"\x{41").is_err());
+    }
+
+    #[test]
+    fn escape_empty_hex() {
+        assert!(resolve_escapes(r"\x{}").is_err());
+    }
+
+    #[test]
+    fn escape_non_bmp() {
+        // U+10000 LINEAR B SYLLABLE B008 A
+        assert_eq!(resolve_escapes(r"\x{10000}").unwrap(), "\u{10000}");
+    }
+
+    #[test]
+    fn escape_in_schema() {
+        // element \x{66}\x{6f}\x{6f} { empty } -- from the spec
+        let input = resolve_escapes(r"element \x{66}\x{6f}\x{6f} { empty }").unwrap();
         let result = schema(LocatedSpan::new(&input));
         assert!(result.is_ok());
     }

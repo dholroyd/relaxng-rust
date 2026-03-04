@@ -64,11 +64,12 @@ impl Syntax {
                 RelaxError::XmlParse(span, e)
             }),
             Syntax::Compact => {
-                let source = compact::resolve_escapes(file.source())
-                    .map_err(|e| RelaxError::EscapeError(
+                let source = compact::resolve_escapes(file.source()).map_err(|e| {
+                    RelaxError::EscapeError(
                         file.span.subspan(e.span.start as _, e.span.end as _),
                         e.message,
-                    ))?;
+                    )
+                })?;
                 let input = LocatedSpan::new(source.as_ref());
                 let schema = compact::schema(input).map_err(|e| match e {
                     nom::Err::Error(Error { input, code }) => RelaxError::Parse(
@@ -399,12 +400,10 @@ impl<'a> Context<'a> {
         match self {
             Context::Root { datatypes, .. } | Context::Include { datatypes, .. } => {
                 match datatypes.entry(prefix) {
-                    Entry::Occupied(e) => {
-                        Err(RelaxError::DatatypePrefixAlreadyDefined {
-                            span,
-                            prefix: e.key().clone(),
-                        })
-                    }
+                    Entry::Occupied(e) => Err(RelaxError::DatatypePrefixAlreadyDefined {
+                        span,
+                        prefix: e.key().clone(),
+                    }),
                     Entry::Vacant(e) => {
                         e.insert(uri);
                         Ok(())

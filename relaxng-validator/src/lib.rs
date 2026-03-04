@@ -2141,14 +2141,12 @@ impl<'a> Validator<'a> {
                     spans: vec![],
                 })
             }
-            ValidatorError::TooManyPatterns => {
-                diagnostics.push(codemap_diagnostic::Diagnostic {
-                    level: codemap_diagnostic::Level::Error,
-                    message: "Schema exceeds maximum number of patterns (65535)".to_string(),
-                    code: None,
-                    spans: vec![],
-                })
-            }
+            ValidatorError::TooManyPatterns => diagnostics.push(codemap_diagnostic::Diagnostic {
+                level: codemap_diagnostic::Level::Error,
+                message: "Schema exceeds maximum number of patterns (65535)".to_string(),
+                code: None,
+                spans: vec![],
+            }),
         }
         (map, diagnostics)
     }

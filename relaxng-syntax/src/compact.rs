@@ -1,6 +1,5 @@
 use crate::types::*;
 use nom::character::complete::satisfy;
-use std::borrow::Cow;
 use nom::combinator::cut;
 use nom::error::{Error, ParseError};
 use nom::multi::separated_list1;
@@ -20,6 +19,7 @@ use nom::{
 };
 use nom::{Input, Parser};
 use nom_locate::{LocatedSpan, position};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::ops::{Range, RangeBounds};
 
@@ -1992,5 +1992,4 @@ mod test {
         let result = schema(LocatedSpan::new(&input));
         assert!(result.is_ok());
     }
-
 }

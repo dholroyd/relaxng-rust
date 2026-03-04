@@ -81,21 +81,18 @@ impl Flags {
 /// Description of what restriction was violated
 #[derive(Debug)]
 pub enum RestrictionKind {
-    /// 7.1.1: attribute//ref or attribute//attribute
-    AttributeContainsRef,
+    /// 7.1.1: attribute//attribute
     AttributeContainsAttribute,
     /// 7.1.2: oneOrMore//group//attribute or oneOrMore//interleave//attribute
     DuplicateAttribute,
     /// 7.1.3: list restrictions
     ListContainsList,
-    ListContainsRef,
     ListContainsAttribute,
     ListContainsText,
     ListContainsInterleave,
     ListContainsElement,
     /// 7.1.4: data/except restrictions
     DataExceptContainsAttribute,
-    DataExceptContainsRef,
     DataExceptContainsText,
     DataExceptContainsList,
     DataExceptContainsGroup,
@@ -136,17 +133,14 @@ pub enum RestrictionKind {
 impl std::fmt::Display for RestrictionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RestrictionKind::AttributeContainsRef => write!(f, "attribute must not contain ref (section 7.1.1)"),
             RestrictionKind::AttributeContainsAttribute => write!(f, "attribute must not contain attribute (section 7.1.1)"),
             RestrictionKind::DuplicateAttribute => write!(f, "duplicate attribute in oneOrMore (section 7.1.2)"),
             RestrictionKind::ListContainsList => write!(f, "list must not contain list (section 7.1.3)"),
-            RestrictionKind::ListContainsRef => write!(f, "list must not contain ref (section 7.1.3)"),
             RestrictionKind::ListContainsAttribute => write!(f, "list must not contain attribute (section 7.1.3)"),
             RestrictionKind::ListContainsText => write!(f, "list must not contain text (section 7.1.3)"),
             RestrictionKind::ListContainsInterleave => write!(f, "list must not contain interleave (section 7.1.3)"),
             RestrictionKind::ListContainsElement => write!(f, "list must not contain element (section 7.1.3)"),
             RestrictionKind::DataExceptContainsAttribute => write!(f, "data/except must not contain attribute (section 7.1.4)"),
-            RestrictionKind::DataExceptContainsRef => write!(f, "data/except must not contain ref (section 7.1.4)"),
             RestrictionKind::DataExceptContainsText => write!(f, "data/except must not contain text (section 7.1.4)"),
             RestrictionKind::DataExceptContainsList => write!(f, "data/except must not contain list (section 7.1.4)"),
             RestrictionKind::DataExceptContainsGroup => write!(f, "data/except must not contain group (section 7.1.4)"),
@@ -249,15 +243,10 @@ fn walk(
         }
 
         Pattern::Ref(_, _, pat_ref) => {
-            if flags.in_attribute {
-                return Err(RestrictionKind::AttributeContainsRef);
-            }
-            if flags.in_list {
-                return Err(RestrictionKind::ListContainsRef);
-            }
-            if flags.in_data_except {
-                return Err(RestrictionKind::DataExceptContainsRef);
-            }
+            // Refs are allowed in lists, attributes, and data/except — the spec says
+            // to check what the ref expands to, not reject refs outright.
+            // walk() follows the ref with the same flags, so forbidden content
+            // (element, text, list, etc.) will be caught in the expanded pattern.
             let ptr = pat_ref.0.as_ptr() as usize;
             if !seen.contains(&ptr) {
                 seen.insert(ptr);

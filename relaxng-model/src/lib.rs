@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 pub mod datatype;
 pub mod model;
+pub mod restrictions;
 
 // TODO:
 //  - Detect ambiguous grammars per https://www.kohsuke.org/relaxng/ambiguity/AmbiguousGrammarDetection.pdf
@@ -150,6 +151,7 @@ pub enum RelaxError {
         attribute_span: codemap::Span,
         element_span: codemap::Span,
     },
+    RestrictionViolation(restrictions::RestrictionKind),
     RecursiveInclude {
         name: String,
         span: codemap::Span,
@@ -717,6 +719,9 @@ impl<FS: Files> Compiler<FS> {
             let mut seen = HashSet::new();
             // TODO: this is a temporary hack to detect bad references; do this in a better way?
             self.check(&mut seen, start.borrow().as_ref().unwrap().pattern())?;
+            // Section 7 restrictions (must run after simplification/normalization)
+            restrictions::check_restrictions(start.borrow().as_ref().unwrap().pattern())
+                .map_err(RelaxError::RestrictionViolation)?;
             Ok(start)
         } else {
             Err(RelaxError::StartRuleNotDefined { span: file.span })
@@ -1164,6 +1169,12 @@ impl<FS: Files> Compiler<FS> {
                     spans: vec![override_label, include_label],
                 }
             }
+            RelaxError::RestrictionViolation(kind) => codemap_diagnostic::Diagnostic {
+                level: codemap_diagnostic::Level::Error,
+                message: format!("Schema restriction violated: {kind}"),
+                code: None,
+                spans: vec![],
+            },
             RelaxError::Parse(span, _kind) => {
                 let label = codemap_diagnostic::SpanLabel {
                     span: *span,
@@ -1908,7 +1919,7 @@ impl<FS: Files> Compiler<FS> {
         name_class: &types::NameClass,
     ) -> Result<model::NameClass, RelaxError> {
         // TODO: wrap namespace-prefix resolution failure with source-span information from the AST
-        match name_class {
+        let result = match name_class {
             types::NameClass::Name(name) => match name {
                 types::Name::Identifier(id) => Ok(model::NameClass::named(
                     if elem_attr == ElemAttr::Element {
@@ -1963,7 +1974,11 @@ impl<FS: Files> Compiler<FS> {
                 // Annotations on name classes are metadata-only; compile the inner name class
                 self.compile_nameclass(ctx, elem_attr, inner)
             }
-        }
+        }?;
+        // Check name class structural restrictions (anyName/except, nsName/except)
+        restrictions::check_name_class_restrictions(&result)
+            .map_err(RelaxError::RestrictionViolation)?;
+        Ok(result)
     }
 
     fn compile_annotations(

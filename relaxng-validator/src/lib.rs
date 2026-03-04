@@ -2539,7 +2539,7 @@ mod tests {
              default namespace foo = \"urn:foo\" \
              element MPD { \
                 attribute mediaPresentationDuration { xsd:duration }?, \
-                attribute * - (foo:* | local:*)  { text } \
+                (attribute * - (foo:* | local:*)  { text })+ \
              }",
         )
         .invalid(

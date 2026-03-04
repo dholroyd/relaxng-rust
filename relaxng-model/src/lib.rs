@@ -1281,12 +1281,12 @@ impl<FS: Files> Compiler<FS> {
             types::AssignMethod::Choice => model::DefineRule::CombineOnly(
                 span,
                 model::CombineRule::Choice,
-                Pattern::Choice(vec![rule]),
+                rule,
             ),
             types::AssignMethod::Interleave => model::DefineRule::CombineOnly(
                 span,
                 model::CombineRule::Interleave,
-                Pattern::Interleave(vec![rule]),
+                rule,
             ),
         };
         ctx.define(&id, new_rule)?;
@@ -1414,8 +1414,13 @@ impl<FS: Files> Compiler<FS> {
                 DefineRule::CombineOnly(this, CombineRule::Choice, mut patt_a),
                 DefineRule::CombineOnly(_, CombineRule::Choice, patt_b),
             ) => {
-                Self::append_choice(&mut patt_a, patt_b);
-                Ok(DefineRule::CombineOnly(this, CombineRule::Choice, patt_a))
+                let result = if let Pattern::Choice(_) = patt_a {
+                    Self::append_choice(&mut patt_a, patt_b);
+                    patt_a
+                } else {
+                    Pattern::Choice(vec![patt_a, patt_b])
+                };
+                Ok(DefineRule::CombineOnly(this, CombineRule::Choice, result))
             }
             (
                 DefineRule::AssignCombine(this, Some(CombineRule::Choice), mut patt_a),
@@ -1450,11 +1455,16 @@ impl<FS: Files> Compiler<FS> {
                 DefineRule::CombineOnly(this, CombineRule::Interleave, mut patt_a),
                 DefineRule::CombineOnly(_, CombineRule::Interleave, patt_b),
             ) => {
-                Self::append_interleave(&mut patt_a, patt_b);
+                let result = if let Pattern::Interleave(_) = patt_a {
+                    Self::append_interleave(&mut patt_a, patt_b);
+                    patt_a
+                } else {
+                    Pattern::Interleave(vec![patt_a, patt_b])
+                };
                 Ok(DefineRule::CombineOnly(
                     this,
                     CombineRule::Interleave,
-                    patt_a,
+                    result,
                 ))
             }
             (

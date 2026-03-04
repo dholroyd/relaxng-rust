@@ -15,7 +15,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::io::Read;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -94,8 +93,6 @@ impl Syntax {
     }
 }
 
-type Span = Range<usize>;
-
 #[derive(Debug)]
 pub enum RelaxError {
     Io(PathBuf, io::Error),
@@ -107,11 +104,6 @@ pub enum RelaxError {
         name: String,
         duplicate: codemap::Span,
         original: codemap::Span,
-    },
-    IncompatibleCombination {
-        file: PathBuf,
-        combine: Span,
-        original: Span,
     },
     UndefinedNamespacePrefix {
         span: codemap::Span,
@@ -129,10 +121,10 @@ pub enum RelaxError {
         span: codemap::Span,
         prefix: String,
     },
-    DatatypePrefixAlreadyDefined(String),
-    DuplicateParameterName(String),
-    /// the grammar has 'start = ...' more than once
-    StartRuleRedefined,
+    DatatypePrefixAlreadyDefined {
+        span: codemap::Span,
+        prefix: String,
+    },
     /// a 'grammar' section failed to specify a 'start = ...' rule
     StartRuleNotDefined {
         span: codemap::Span,
@@ -398,12 +390,20 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn declare_datatype(&mut self, prefix: String, uri: String) -> Result<(), RelaxError> {
+    fn declare_datatype(
+        &mut self,
+        prefix: String,
+        uri: String,
+        span: codemap::Span,
+    ) -> Result<(), RelaxError> {
         match self {
             Context::Root { datatypes, .. } | Context::Include { datatypes, .. } => {
                 match datatypes.entry(prefix) {
                     Entry::Occupied(e) => {
-                        Err(RelaxError::DatatypePrefixAlreadyDefined(e.key().clone()))
+                        Err(RelaxError::DatatypePrefixAlreadyDefined {
+                            span,
+                            prefix: e.key().clone(),
+                        })
                     }
                     Entry::Vacant(e) => {
                         e.insert(uri);
@@ -1200,7 +1200,45 @@ impl<FS: Files> Compiler<FS> {
                     spans: vec![label],
                 }
             }
-            _ => panic!("{err:?}"),
+            RelaxError::EscapeError(span, message) => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: *span,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                    label: None,
+                };
+                codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: message.clone(),
+                    code: None,
+                    spans: vec![label],
+                }
+            }
+            RelaxError::NamespacePrefixAlreadyDefined { span, prefix } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: *span,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                    label: Some("already defined".to_string()),
+                };
+                codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: format!("Namespace prefix {prefix:?} is already defined"),
+                    code: None,
+                    spans: vec![label],
+                }
+            }
+            RelaxError::DatatypePrefixAlreadyDefined { span, prefix } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: *span,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                    label: Some("already defined".to_string()),
+                };
+                codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: format!("Datatype prefix {prefix:?} is already defined"),
+                    code: None,
+                    spans: vec![label],
+                }
+            }
         }
     }
 
@@ -1938,7 +1976,8 @@ impl<FS: Files> Compiler<FS> {
                 }
             },
             types::Decl::Datatypes(types::DatatypesDeclaration { prefix, uri }) => {
-                ctx.declare_datatype(prefix.clone(), uri.as_string_value())
+                let span = ctx.convert_span(&uri.0);
+                ctx.declare_datatype(prefix.clone(), uri.as_string_value(), span)
             }
         }
     }

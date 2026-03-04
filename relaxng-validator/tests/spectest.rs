@@ -1,5 +1,4 @@
-// TODO: https://github.com/LukasKalbertodt/libtest-mimic ?
-
+use libtest_mimic::{Arguments, Failed, Trial};
 use relaxng_model::Compiler;
 use relaxng_validator::Validator;
 use roxmltree::{ExpandedName, Node};
@@ -9,26 +8,22 @@ use std::convert::TryFrom;
 use std::fs::File;
 use std::io;
 use std::io::Read;
-use std::panic;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // TODO: only run this test if testcases are not filtered or if the filter matches this case
-    //       this hack of checking for Some("spectest") does not handle all filtering cases
-    if let Some("spectest") = std::env::args().nth(1).as_deref() {
-        spectest()
-    }
+    let args = Arguments::from_args();
+    let tests = collect_tests();
+    libtest_mimic::run(&args, tests).exit();
 }
 
-fn spectest() {
+fn collect_tests() -> Vec<Trial> {
+    // Silence panic output during test collection (pre-flight checks may panic)
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
     let src = "tests/spectest.xml";
-    let mut f = File::open(src).expect("open example xml");
+    let mut f = File::open(src).expect("open spectest.xml");
     let mut s = String::new();
     f.read_to_string(&mut s).unwrap();
-    let mut map = codemap::CodeMap::new();
-    let file = map.add_file(src.to_string(), s.clone());
-    let mut emitter =
-        codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Auto, Some(&map));
     let opts = roxmltree::ParsingOptions {
         allow_dtd: true,
         ..Default::default()
@@ -38,40 +33,205 @@ fn spectest() {
         doc.root_element().tag_name(),
         ExpandedName::from("testSuite")
     );
-    let mut stats = Stats::default();
-    process_suite(&mut emitter, &file, &mut stats, doc.root_element());
-    eprintln!(
-        "{} passed, {} failed, {} skipped",
-        stats.passed, stats.failed, stats.skipped
-    );
+    let mut trials = Vec::new();
+    let mut counters: HashMap<String, usize> = HashMap::new();
+    collect_suite(&mut trials, &mut counters, &[], doc.root_element());
+    std::panic::set_hook(prev_hook);
+    trials
 }
 
-#[derive(Default)]
-struct Stats {
-    passed: u64,
-    failed: u64,
-    skipped: u64,
-}
-
-fn process_suite(
-    emitter: &mut codemap_diagnostic::Emitter,
-    file: &codemap::File,
-    stats: &mut Stats,
-    suite: Node,
+fn collect_suite<'a, 'input>(
+    trials: &mut Vec<Trial>,
+    counters: &mut HashMap<String, usize>,
+    path: &[String],
+    suite: Node<'a, 'input>,
 ) {
+    let mut suite_name: Option<String> = None;
     for child in suite.children() {
         if child.is_element() {
             if child.tag_name() == ExpandedName::from("testSuite") {
-                process_suite(emitter, file, stats, child)
+                let sub_path: Vec<String> = if let Some(ref name) = suite_name {
+                    let mut p = path.to_vec();
+                    p.push(name.clone());
+                    p
+                } else {
+                    path.to_vec()
+                };
+                collect_suite(trials, counters, &sub_path, child);
             } else if child.tag_name() == ExpandedName::from("testCase") {
-                process_case(emitter, file, stats, child)
+                collect_case(trials, counters, path, &suite_name, child);
             } else if child.tag_name() == ExpandedName::from("documentation") {
-                if let Some(text) = child.text() {
-                    eprintln!("== {text} ==");
-                }
+                suite_name = child.text().map(|t| slugify(t));
             }
         }
     }
+}
+
+fn collect_case(
+    trials: &mut Vec<Trial>,
+    counters: &mut HashMap<String, usize>,
+    path: &[String],
+    suite_name: &Option<String>,
+    case: Node,
+) {
+    let test_case = match TestCase::try_from(case) {
+        Ok(c) => c,
+        Err(()) => return,
+    };
+
+    // Build a hierarchical test name
+    let mut parts: Vec<String> = path.to_vec();
+    if let Some(name) = suite_name {
+        parts.push(name.clone());
+    }
+    if let Some(ref doc) = test_case.documentation {
+        parts.push(slugify(doc));
+    } else if let Some(ref sec) = test_case.section {
+        parts.push(format!("section_{sec}"));
+    }
+
+    let base_name = if parts.is_empty() {
+        "test".to_string()
+    } else {
+        parts.join("::")
+    };
+
+    // Deduplicate names with a counter
+    let count = counters.entry(base_name.clone()).or_insert(0);
+    *count += 1;
+    let name = if *count > 1 {
+        format!("{base_name}#{}", *count - 1)
+    } else {
+        base_name
+    };
+
+    // Detect if this test should be ignored (TODO/unimplemented)
+    let ignored = is_suppressed(&test_case);
+
+    let trial = Trial::test(name, move || run_test(test_case))
+        .with_ignored_flag(ignored);
+    trials.push(trial);
+}
+
+/// Check if a test case would hit an unimplemented TODO path without actually running it.
+/// We do a quick pre-flight compile to detect Error::Todo.
+fn is_suppressed(test_case: &TestCase) -> bool {
+    let resources = match &test_case.fixture {
+        Fixture::Incorrect { resources } => resources,
+        Fixture::Correct { resources, .. } => resources,
+    };
+    let schema_key = match &test_case.fixture {
+        Fixture::Incorrect { .. } => "incorrect.rng",
+        Fixture::Correct { .. } => "correct.rng",
+    };
+    let resources = resources.clone();
+    let schema_key = schema_key.to_string();
+    let result = std::panic::catch_unwind(move || {
+        let mut c = create_compiler(resources);
+        c.compile(Path::new(&schema_key))
+    });
+    match result {
+        Ok(Err(relaxng_model::RelaxError::XmlParse(
+            _,
+            relaxng_syntax::xml::Error::Todo(_),
+        ))) => true,
+        _ => false,
+    }
+}
+
+fn run_test(test_case: TestCase) -> Result<(), Failed> {
+    match test_case.fixture {
+        Fixture::Incorrect { resources } => {
+            let mut c = create_compiler(resources.clone());
+            let input = Path::new("incorrect.rng");
+            match c.compile(input) {
+                Err(_) => Ok(()),
+                Ok(_) => {
+                    let schema = resources.get("incorrect.rng").unwrap();
+                    Err(format!("Incorrect schema should have been rejected:\n{schema}").into())
+                }
+            }
+        }
+        Fixture::Correct {
+            resources,
+            valid,
+            invalid,
+        } => {
+            let mut c = create_compiler(resources.clone());
+            let input = Path::new("correct.rng");
+            let result = match c.compile(input) {
+                Ok(r) => r,
+                Err(e) => {
+                    let schema = resources.get("correct.rng").unwrap();
+                    return Err(
+                        format!("Correct schema was rejected: {e:?}\n{schema}").into()
+                    );
+                }
+            };
+
+            for (i, doc) in valid.iter().enumerate() {
+                let reader = xmlparser::Tokenizer::from(&doc[..]);
+                let mut v = Validator::new(result.clone(), reader);
+                loop {
+                    match v.validate_next() {
+                        None => break,
+                        Some(Ok(())) => {}
+                        Some(Err(err)) => {
+                            let schema = resources.get("correct.rng").unwrap();
+                            return Err(format!(
+                                "Valid document #{} rejected: {err:?}\nschema: {schema}\ndoc: {doc}",
+                                i + 1
+                            )
+                            .into());
+                        }
+                    }
+                }
+            }
+
+            for (i, doc) in invalid.iter().enumerate() {
+                let reader = xmlparser::Tokenizer::from(&doc[..]);
+                let mut v = Validator::new(result.clone(), reader);
+                let mut was_rejected = false;
+                loop {
+                    match v.validate_next() {
+                        None => break,
+                        Some(Ok(())) => {}
+                        Some(Err(_)) => {
+                            was_rejected = true;
+                            break;
+                        }
+                    }
+                }
+                if !was_rejected {
+                    let schema = resources.get("correct.rng").unwrap();
+                    return Err(format!(
+                        "Invalid document #{} was accepted:\nschema: {schema}\ndoc: {doc}",
+                        i + 1
+                    )
+                    .into());
+                }
+            }
+
+            Ok(())
+        }
+    }
+}
+
+fn slugify(s: &str) -> String {
+    s.trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 #[derive(Clone)]
@@ -82,6 +242,7 @@ struct TestCase {
     fixture: Fixture,
     span: std::ops::Range<usize>,
 }
+
 #[derive(Clone)]
 enum Fixture {
     Incorrect {
@@ -125,9 +286,7 @@ impl<'a, 'input> TryFrom<Node<'a, 'input>> for TestCase {
                     "dir" | "resource" => {
                         load_resources(&PathBuf::new(), &mut resources, child);
                     }
-                    "requires" => {
-                        println!("TODO: ignoring {child:?}");
-                    }
+                    "requires" => {}
                     _ => panic!(
                         "unexpected child of <testCase>: <{}>",
                         child.tag_name().name()
@@ -177,199 +336,12 @@ fn load_resources(path: &Path, resources: &mut HashMap<String, String>, node: No
                 .attribute("name")
                 .expect("Expected @name on <resource>");
             let sub_name = path.join(name);
-            println!("resource {sub_name:?} --");
             let data = node
                 .first_element_child()
                 .expect("expected child element in <resource>");
-            println!("{}", stringify(data));
             resources.insert(sub_name.to_string_lossy().to_string(), stringify(data));
         }
         _other_name => panic!("unsupported tag {node:?}"),
-    }
-}
-
-fn process_case(
-    emitter: &mut codemap_diagnostic::Emitter,
-    file: &codemap::File,
-    stats: &mut Stats,
-    case: Node,
-) {
-    let test_case = match TestCase::try_from(case) {
-        Ok(c) => c,
-        Err(_e) => {
-            eprintln!(" 🙈 TODO: Test case not handled");
-            return;
-        }
-    };
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let test = test_case;
-    std::thread::spawn(move || {
-        let result = panic::catch_unwind(|| run_test(test.clone()));
-        tx.send(result)
-    });
-    let result = rx.recv_timeout(std::time::Duration::from_secs(5));
-    match result {
-        Ok(result) => match result {
-            Ok(test_result) => match test_result {
-                TestResult::Pass => {
-                    stats.passed += 1;
-                    eprintln!("  ✅ passed");
-                }
-                TestResult::Fail => {
-                    stats.failed += 1;
-                    diagnostic(emitter, file, case.range());
-                    eprintln!("  ❌ failed");
-                }
-                TestResult::Suppressed => {
-                    stats.skipped += 1;
-                    eprintln!("  🙈 skipped");
-                }
-            },
-            Err(e) => {
-                eprintln!(" ❌ Test thread failed: {e:?}");
-                stats.failed += 1;
-            }
-        },
-        Err(err) => {
-            eprintln!(" ⛔ Timeout waiting for test to complete:");
-            panic!("{err:?}");
-        }
-    }
-}
-
-fn diagnostic(
-    emitter: &mut codemap_diagnostic::Emitter,
-    file: &codemap::File,
-    span: std::ops::Range<usize>,
-) {
-    let label = codemap_diagnostic::SpanLabel {
-        span: file.span.subspan(span.start as _, span.end as _),
-        style: codemap_diagnostic::SpanStyle::Primary,
-        label: None,
-    };
-    let d = codemap_diagnostic::Diagnostic {
-        level: codemap_diagnostic::Level::Error,
-        message: "Test failed".to_string(),
-        code: None,
-        spans: vec![label],
-    };
-    emitter.emit(&[d]);
-}
-
-enum TestResult {
-    Pass,
-    Fail,
-    Suppressed,
-}
-
-fn run_test(test_case: TestCase) -> TestResult {
-    match test_case.fixture {
-        Fixture::Incorrect { resources } => {
-            let mut c = create_compiler(resources.clone());
-            let input = Path::new("incorrect.rng");
-
-            match c.compile(input) {
-                Err(e) => {
-                    if let relaxng_model::RelaxError::XmlParse(
-                        _,
-                        relaxng_syntax::xml::Error::Todo(e),
-                    ) = e
-                    {
-                        eprintln!("  {}", resources.get("incorrect.rng").unwrap());
-                        eprintln!("  ❌ TODO: {e}");
-                        TestResult::Suppressed
-                    } else {
-                        //eprintln!("--------");
-                        //eprintln!("  {}", s);
-                        //eprintln!("  ✅ Incorrect schema was rejected");
-                        c.dump_diagnostic(&e);
-                        TestResult::Pass
-                    }
-                }
-                Ok(_result) => {
-                    eprintln!("--------");
-                    eprintln!("  {}", resources.get("incorrect.rng").unwrap());
-                    eprintln!("  ❌ Incorrect schema should have failed");
-                    TestResult::Fail
-                }
-            }
-        }
-        Fixture::Correct {
-            resources,
-            valid,
-            invalid,
-        } => {
-            let mut c = create_compiler(resources.clone());
-            let input = Path::new("correct.rng");
-
-            match c.compile(input) {
-                Err(e) => {
-                    if let relaxng_model::RelaxError::XmlParse(
-                        _,
-                        relaxng_syntax::xml::Error::Todo(e),
-                    ) = e
-                    {
-                        eprintln!("  {}", resources.get("correct.rng").unwrap());
-                        eprintln!("  ❌ TODO: {e}");
-                        TestResult::Suppressed
-                    } else {
-                        //eprintln!("--------");
-                        eprintln!("  {}", resources.get("correct.rng").unwrap());
-                        eprintln!("  ❌ Correct schema was rejected");
-                        c.dump_diagnostic(&e);
-                        TestResult::Fail
-                    }
-                }
-                Ok(result) => {
-                    for doc in valid {
-                        let reader = xmlparser::Tokenizer::from(&doc[..]);
-                        let mut v = Validator::new(result.clone(), reader);
-                        //eprintln!("--------");
-                        //eprintln!("  {}", schema);
-                        //eprintln!("  ❌ Incorrect schema should have failed");
-                        loop {
-                            match v.validate_next() {
-                                None => break,
-                                Some(Ok(())) => {}
-                                Some(Err(err)) => {
-                                    println!("v.next(): {err:?}");
-                                    eprintln!("  {}", resources.get("correct.rng").unwrap());
-                                    eprintln!("  {doc}");
-                                    eprintln!("  ❌ Valid input rejected");
-                                    return TestResult::Fail;
-                                }
-                            }
-                        }
-                        //eprintln!("  ✅ Valid input accepted");
-                        // fall through to the 'invalid' case
-                    }
-                    if let Some(doc) = invalid.into_iter().next() {
-                        let reader = xmlparser::Tokenizer::from(&doc[..]);
-                        let mut v = Validator::new(result, reader);
-                        //eprintln!("--------");
-                        //eprintln!("  {}", schema);
-                        //eprintln!("  ❌ Incorrect schema should have failed");
-                        loop {
-                            match v.validate_next() {
-                                None => break,
-                                Some(Ok(())) => {}
-                                Some(Err(_err)) => {
-                                    //eprintln!("  ✅ Invalid input rejected");
-                                    return TestResult::Pass;
-                                }
-                            }
-                        }
-                        eprintln!("  {}", resources.get("correct.rng").unwrap());
-                        eprintln!("  {doc}");
-                        eprintln!("  ❌ Invalid input accepted");
-                        return TestResult::Fail;
-                    }
-                    // if the valid / invalid cases above didn't Fail, then it's a Pass
-                    TestResult::Pass
-                }
-            }
-        }
     }
 }
 

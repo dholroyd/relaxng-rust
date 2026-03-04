@@ -124,6 +124,9 @@ struct SchemaBuilder {
     patterns: Vec<Option<Pat>>,
     refs: HashMap<DefineId, PatId>,
     span_map: HashMap<u16, Vec<codemap::Span>>,
+    /// Deferred `(placeholder, target)` pairs where the target was still an
+    /// unresolved slot at the time `resolve_ref` was called (mutual recursion).
+    deferred: Vec<(PatId, PatId)>,
 }
 
 impl SchemaBuilder {
@@ -133,6 +136,7 @@ impl SchemaBuilder {
             patterns: Vec::new(),
             refs: HashMap::new(),
             span_map: HashMap::new(),
+            deferred: Vec::new(),
         }
     }
 
@@ -268,9 +272,6 @@ impl SchemaBuilder {
         if placeholder_id == id {
             return;
         }
-        let target = self.patterns[id.0 as usize]
-            .clone()
-            .expect("can't resolve with another reserved slot");
         match &self.patterns[placeholder_id.0 as usize] {
             None => (),
             Some(p) => panic!(
@@ -278,10 +279,34 @@ impl SchemaBuilder {
                 p, placeholder_id.0, id.0, name
             ),
         }
-        self.patterns[placeholder_id.0 as usize] = Some(target);
+        match self.patterns[id.0 as usize].clone() {
+            Some(target) => {
+                self.patterns[placeholder_id.0 as usize] = Some(target);
+            }
+            None => {
+                // Target is still an unresolved placeholder (mutual recursion);
+                // defer resolution until finalize().
+                self.deferred.push((placeholder_id, id));
+            }
+        }
     }
 
-    fn finalize(self) -> Inner {
+    fn finalize(mut self) -> Inner {
+        // Resolve deferred placeholders from mutual recursion.  Iterate until
+        // no more progress is made to handle chains (A→B→C).
+        let mut made_progress = true;
+        while made_progress {
+            made_progress = false;
+            self.deferred.retain(|&(placeholder, target)| {
+                if let Some(pat) = self.patterns[target.0 as usize].clone() {
+                    self.patterns[placeholder.0 as usize] = Some(pat);
+                    made_progress = true;
+                    false // resolved, remove from list
+                } else {
+                    true // still unresolved, keep
+                }
+            });
+        }
         let patterns: Vec<Pat> = self
             .patterns
             .into_iter()

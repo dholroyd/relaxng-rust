@@ -48,6 +48,7 @@ pub enum ValidatorError<'a> {
     InvalidOrUnclosedEntity {
         span: std::ops::Range<usize>,
     },
+    TextBufferOverflow,
 }
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
@@ -940,6 +941,8 @@ pub struct Validator<'a> {
     last_was_start_element: bool,
     stack: ElementStack<'a>,
     entity_definitions: HashMap<String, String>,
+    text_buffer: String,
+    max_text_buffer: usize,
 }
 
 impl<'a> Validator<'a> {
@@ -969,6 +972,8 @@ impl<'a> Validator<'a> {
             last_was_start_element: false,
             stack: ElementStack::default(),
             entity_definitions,
+            text_buffer: String::new(),
+            max_text_buffer: 1024 * 1024,
         }
     }
 
@@ -1150,6 +1155,19 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Flush any buffered text by applying text_deriv.
+    /// Returns true if the result was NotAllowed.
+    fn flush_text(&mut self) -> bool {
+        if !self.text_buffer.is_empty() {
+            let next_id = Self::text_deriv(self.current_step, &mut self.schema, &self.text_buffer);
+            self.text_buffer.clear();
+            self.current_step = next_id;
+            matches!(self.schema.patt(next_id), Pat::NotAllowed)
+        } else {
+            false
+        }
+    }
+
     #[allow(unused)]
     fn assert_health(&self) {
         let mut seen = vec![];
@@ -1174,6 +1192,9 @@ impl<'a> Validator<'a> {
                 local,
                 span,
             } => {
+                if self.flush_text() {
+                    return Err(ValidatorError::NotAllowed(evt));
+                }
                 self.stack.push(prefix, local, span);
                 // does not change current_step state
                 return Ok(());
@@ -1205,6 +1226,9 @@ impl<'a> Validator<'a> {
                 return Ok(());
             }
             Token::ElementEnd { end, span: _ } => {
+                if self.flush_text() {
+                    return Err(ValidatorError::NotAllowed(evt));
+                }
                 match end {
                     ElementEnd::Open => Self::close_element_start(
                         &self.stack,
@@ -1253,6 +1277,9 @@ impl<'a> Validator<'a> {
                 }
             }
             Token::Cdata { text, span: _ } => {
+                if self.flush_text() {
+                    return Err(ValidatorError::NotAllowed(evt));
+                }
                 let mixed = Self::mixed_text_deriv(self.current_step, &mut self.schema);
                 if mixed == self.current_step {
                     self.current_step
@@ -1307,12 +1334,14 @@ impl<'a> Validator<'a> {
                 if mixed == self.current_step {
                     self.current_step
                 } else {
-                    let next_id = Self::text_deriv(self.current_step, &mut self.schema, data);
-                    let next_pat = self.schema.patt(next_id);
-                    if let Pat::NotAllowed = next_pat {
-                        return Err(ValidatorError::NotAllowed(Token::Text { text }));
+                    // Buffer text for deferred processing — text fragments split by
+                    // PIs/comments must be concatenated before validation (spec 6.2.7).
+                    self.text_buffer.push_str(data);
+                    if self.text_buffer.len() > self.max_text_buffer {
+                        return Err(ValidatorError::TextBufferOverflow);
                     }
-                    next_id
+                    self.last_was_start_element = false;
+                    return Ok(());
                 }
             }
             Token::EntityDeclaration {
@@ -1339,7 +1368,11 @@ impl<'a> Validator<'a> {
                 return Ok(());
             }
         };
-        if let Token::ElementStart { .. } = evt {
+        if let Token::ElementEnd {
+            end: ElementEnd::Open,
+            ..
+        } = evt
+        {
             self.last_was_start_element = true;
         } else {
             self.last_was_start_element = false;
@@ -2087,6 +2120,14 @@ impl<'a> Validator<'a> {
                     message: "Invalid or unclosed entity reference".to_string(),
                     code: None,
                     spans: vec![label],
+                })
+            }
+            ValidatorError::TextBufferOverflow => {
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: "Text content exceeds maximum buffer size".to_string(),
+                    code: None,
+                    spans: vec![],
                 })
             }
         }

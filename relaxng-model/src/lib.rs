@@ -546,7 +546,6 @@ impl<'a> Context<'a> {
     }
 
     fn acquire_ref(&self, ref_id: &types::Identifier) -> Result<model::PatRef, RelaxError> {
-        self.check_ref_recursion(ref_id)?;
         self.acquire_ref_impl(ref_id)
     }
     fn acquire_ref_impl(&self, ref_id: &types::Identifier) -> Result<model::PatRef, RelaxError> {
@@ -583,34 +582,6 @@ impl<'a> Context<'a> {
             Context::Grammar { parent, .. } => parent.acquire_ref(id),
         }
     }
-    /// Given the identifier if a reference, checks that the current context is not actually the
-    /// definition of that same name.
-    ///
-    /// Such recursive references are allowed if the definition body includes an element, and the
-    /// recursive reference is within the body of that element.
-    fn check_ref_recursion(&self, ref_id: &types::Identifier) -> Result<(), RelaxError> {
-        match self {
-            Context::Root { .. } => Ok(()),
-            Context::Include { .. } => Ok(()),
-            Context::IncludeOverrides { .. } => Ok(()),
-            Context::Grammar { .. } => Ok(()),
-            Context::Define { id, .. } => {
-                if id.1 == ref_id.1 {
-                    Err(RelaxError::RecursiveReference {
-                        ref_id: ref_id.1.clone(),
-                        ref_span: self.convert_span(&ref_id.0),
-                        def_id: id.1.clone(),
-                        def_span: self.convert_span(&id.0),
-                    })
-                } else {
-                    Ok(())
-                }
-            }
-            Context::Element { .. } => Ok(()),
-            Context::Attribute { parent, .. } => parent.check_ref_recursion(ref_id),
-        }
-    }
-
     // Returns Some if the parent definition for which this is the context is defining an
     // attribute, and None otherwise
     fn parent_attribute(&self) -> Option<codemap::Span> {
@@ -718,8 +689,9 @@ impl<FS: Files> Compiler<FS> {
         }
         if let Some(start) = ctx.get_ref("start") {
             let mut seen = HashSet::new();
-            // TODO: this is a temporary hack to detect bad references; do this in a better way?
-            self.check(&mut seen, start.borrow().as_ref().unwrap().pattern())?;
+            let mut expanding = HashSet::new();
+            // Check for undefined references and recursive references without element
+            self.check(&mut seen, &mut expanding, false, start.borrow().as_ref().unwrap().pattern())?;
             // Section 7 restrictions (must run after simplification/normalization)
             restrictions::check_restrictions(start.borrow().as_ref().unwrap().pattern())
                 .map_err(RelaxError::RestrictionViolation)?;
@@ -729,12 +701,24 @@ impl<FS: Files> Compiler<FS> {
         }
     }
 
+    /// Walk the pattern tree from start, checking for undefined references and
+    /// recursive references that don't pass through an element.
+    /// - `seen`: refs that have been fully checked (skip on re-encounter)
+    /// - `expanding`: refs currently being expanded in the call chain
+    /// - `inside_element`: whether we've entered an element since the nearest
+    ///   enclosing ref expansion started
     #[allow(clippy::only_used_in_recursion)]
-    fn check(&self, seen: &mut HashSet<usize>, patt: &model::Pattern) -> Result<(), RelaxError> {
+    fn check(
+        &self,
+        seen: &mut HashSet<usize>,
+        expanding: &mut HashSet<usize>,
+        inside_element: bool,
+        patt: &model::Pattern,
+    ) -> Result<(), RelaxError> {
         match patt {
             Pattern::Choice(v) | Pattern::Interleave(v) | Pattern::Group(v) => {
                 for p in v {
-                    self.check(seen, p)?
+                    self.check(seen, expanding, inside_element, p)?
                 }
             }
             Pattern::Mixed(p)
@@ -742,29 +726,45 @@ impl<FS: Files> Compiler<FS> {
             | Pattern::ZeroOrMore(p)
             | Pattern::OneOrMore(p)
             | Pattern::Attribute(_, p, _, _)
-            | Pattern::Element(_, p, _, _)
-            | Pattern::List(p) => self.check(seen, p)?,
+            | Pattern::List(p) => self.check(seen, expanding, inside_element, p)?,
+            Pattern::Element(_, p, _, _) => {
+                self.check(seen, expanding, true, p)?;
+            }
             Pattern::Empty
             | Pattern::Text(_)
             | Pattern::NotAllowed
             | Pattern::DatatypeValue { .. } => {}
             Pattern::Ref(span, name, def) => {
                 let ptr = def.0.as_ptr() as usize;
-                if !seen.contains(&ptr) {
-                    seen.insert(ptr);
+                if expanding.contains(&ptr) {
+                    if !inside_element {
+                        let borrowed = def.0.borrow();
+                        let def_span = borrowed.as_ref().map(|r| *r.span());
+                        return Err(RelaxError::RecursiveReference {
+                            ref_id: name.clone(),
+                            ref_span: *span,
+                            def_id: name.clone(),
+                            def_span: def_span.unwrap_or(*span),
+                        });
+                    }
+                    // Valid recursion through element — don't recurse further
+                } else if !seen.contains(&ptr) {
+                    expanding.insert(ptr);
                     if let Some(rule) = def.0.borrow().as_ref() {
-                        self.check(seen, rule.pattern())?
+                        self.check(seen, expanding, false, rule.pattern())?
                     } else {
                         return Err(RelaxError::UndefinedReference {
                             span: *span,
                             identifier: name.to_string(),
                         });
                     }
+                    expanding.remove(&ptr);
+                    seen.insert(ptr);
                 }
             }
             Pattern::DatatypeName { except, .. } => {
                 if let Some(e) = except.as_ref() {
-                    self.check(seen, e)?;
+                    self.check(seen, expanding, inside_element, e)?;
                 }
             }
         }

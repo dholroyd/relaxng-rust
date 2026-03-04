@@ -2166,17 +2166,35 @@ struct ElementStack<'a> {
 
 impl<'a> ElementStack<'a> {
     fn lookup_namespace_uri(&self, prefix: &str) -> Option<StrSpan<'a>> {
+        if prefix == "xml" {
+            return Some(StrSpan::from("http://www.w3.org/XML/1998/namespace"));
+        }
         self.elements
             .iter()
             .rev()
             .find_map(|elem| elem.lookup_namespace_uri(prefix))
     }
 
-    fn try_lookup_namespace_uri(
+    fn resolve_element_namespace(
         &self,
         prefix: StrSpan<'a>,
     ) -> Result<Option<StrSpan<'a>>, ValidatorError<'a>> {
-        if "" == prefix.as_str() {
+        if prefix.as_str() == "" {
+            // For elements, empty prefix means look up the default namespace (xmlns="...")
+            Ok(self.lookup_namespace_uri(""))
+        } else {
+            Ok(Some(self.lookup_namespace_uri(&prefix).ok_or(
+                ValidatorError::UndefinedNamespacePrefix { prefix },
+            )?))
+        }
+    }
+
+    fn resolve_attribute_namespace(
+        &self,
+        prefix: StrSpan<'a>,
+    ) -> Result<Option<StrSpan<'a>>, ValidatorError<'a>> {
+        if prefix.as_str() == "" {
+            // Per XML Namespaces spec, unprefixed attributes have no namespace
             Ok(None)
         } else {
             Ok(Some(self.lookup_namespace_uri(&prefix).ok_or(
@@ -2225,7 +2243,7 @@ impl<'a> ElementStack<'a> {
     }
     fn current_element(&self) -> Result<QualifiedName<'a>, ValidatorError<'a>> {
         let curr = self.elements.last().unwrap();
-        let namespace_uri = self.try_lookup_namespace_uri(curr.prefix)?;
+        let namespace_uri = self.resolve_element_namespace(curr.prefix)?;
         Ok(QualifiedName {
             namespace_uri,
             local_name: curr.local,
@@ -2238,11 +2256,7 @@ impl<'a> ElementStack<'a> {
             .attributes
             .iter()
             .map(move |unresolved| {
-                let namespace_uri = if unresolved.prefix.as_str() == "" {
-                    None
-                } else {
-                    self.try_lookup_namespace_uri(unresolved.prefix)?
-                };
+                let namespace_uri = self.resolve_attribute_namespace(unresolved.prefix)?;
                 Ok(Attr {
                     name: QualifiedName {
                         namespace_uri,

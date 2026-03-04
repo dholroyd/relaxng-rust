@@ -138,7 +138,7 @@ fn next_rng_sibling<'a, 'input: 'a>(node: Node<'a, 'input>) -> Option<Node<'a, '
 fn element(node: Node) -> Result<ElementPattern> {
     no_attrs_except(node, &["name", "ns", "datatypeLibrary"])?;
     let (name_class, pattern) = if let Some(name) = node.attribute_node("name") {
-        let name_class = NameClass::Name(qname_att(node, &name)?);
+        let name_class = NameClass::Name(qname_att(node, &name, true)?);
         let pat_el = first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?;
         let pattern = single_pattern_or_group(pat_el)?;
         (name_class, pattern)
@@ -318,7 +318,8 @@ fn single_pattern_or_group(mut node: Node) -> Result<Pattern> {
 
 fn attribute(node: Node) -> Result<AttributePattern> {
     no_attrs_except(node, &["name", "ns", "datatypeLibrary"])?;
-    let ns = get_ns_att(node);
+    // For <attribute>, ns defaults to "" and does NOT inherit from ancestors (spec section 4.3)
+    let ns = node.attribute_node("ns");
     let (name_class, rest) = if let Some(name) = node.attribute_node("name") {
         if name.value() == "xmlns" && (ns.is_none() || ns.unwrap().value() == "") {
             return Err(Error::Unexpected(
@@ -334,7 +335,7 @@ fn attribute(node: Node) -> Result<AttributePattern> {
             ));
         }
         (
-            NameClass::Name(qname_att(node, &name)?),
+            NameClass::Name(qname_att(node, &name, false)?),
             first_rng_child(node),
         )
     } else {
@@ -836,7 +837,10 @@ fn div_include_content(node: Node) -> Result<IncludeContent> {
     Ok(IncludeContent::Div(content))
 }
 
-fn qname_att(node: Node, name: &Attribute) -> Result<Name> {
+/// Resolve a QName from a `name` attribute on an `<element>` or `<attribute>` element.
+/// For `<attribute>`, the `ns` attribute defaults to "" (does not inherit from ancestors)
+/// per RELAX NG spec section 4.3.
+fn qname_att(node: Node, name: &Attribute, inherit_ns: bool) -> Result<Name> {
     let val = name.value();
     if let Some(pos) = val.find(':') {
         let start = name.range_value().start;
@@ -852,7 +856,15 @@ fn qname_att(node: Node, name: &Attribute) -> Result<Name> {
             localname,
         }))
     } else {
-        let ns = get_ns(node).unwrap_or(Literal::new(0..0, String::new())); // TODO allow None or something rather than inventing an 'empty' NcName
+        let ns = if inherit_ns {
+            // For <element>: inherit ns from nearest ancestor
+            get_ns(node).unwrap_or(Literal::new(0..0, String::new()))
+        } else {
+            // For <attribute>: only use ns if directly on this element, default to ""
+            node.attribute_node("ns")
+                .map(|a| Literal::new(a.range_value(), a.value().to_string()))
+                .unwrap_or(Literal::new(0..0, String::new()))
+        };
         let localname = ncname(name.range_value(), val)?;
         Ok(Name::NamespacedName(NamespacedName {
             namespace_uri: ns,

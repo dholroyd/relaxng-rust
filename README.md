@@ -33,16 +33,15 @@ help: Expected Element sheep dog
 
 ## Status
 
-The as of Feburary 2021, `relaxng-validator` crate passes 259 and fails 125 tests from the RELAX NG test suite.
+The `relaxng-validator` crate passes 271 and fails 113 tests from the RELAX NG test suite.
+
+All 44 XML Schema built-in datatypes are supported (except `NOTATION`, which the RelaxNG spec forbids).
 
 Current problems,
 
  - ❌ Many restrictions required by the spec to reject invalid schema definitions are not yet implemented.  (Not so
    much of a problem if you already have a schema that works with other tools, but do not develop a schema against this
    tool.)
- - ❌ RELAX NG reuses the XML Schema datatype definitions but here, few datatypes and their facets are currently
-   implemented.  Hitting an unsupported case will currently panic, rather than accepting an invalid input, (These
-   panics will go away once the full datatype library is implemented.)
  - ❌ The implementation is currently very slow (compared to the [Jing](https://github.com/relaxng/jing-trang)
    implementation of RELAX NG validation, for example)
  - ❌ Suffers from

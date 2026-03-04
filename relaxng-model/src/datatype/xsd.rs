@@ -32,6 +32,14 @@ lazy_static! {
     static ref LANG_RE: regex::Regex = regex::Regex::new(r"^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$").unwrap();
     static ref DATETIME_RE: regex::Regex = regex::Regex::new(r"^-?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z(?:(?:\+|-)\d{2}:\d{2})?)?$").unwrap();
     static ref DURATION_RE: regex::Regex = regex::Regex::new(r"^P(([0-9]+([.,][0-9]*)?Y)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?D)?T?([0-9]+([.,][0-9]*)?H)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?S)?)|\d{4}-?(0[1-9]|11|12)-?(?:[0-2]\d|30|31)T((?:[0-1][0-9]|[2][0-3]):?(?:[0-5][0-9]):?(?:[0-5][0-9]|60)|2400|24:00)$").unwrap();
+    static ref TIME_RE: regex::Regex = regex::Regex::new(r"^\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$").unwrap();
+    static ref GYEARMONTH_RE: regex::Regex = regex::Regex::new(r"^-?\d{4,}-\d{2}(Z|[+-]\d{2}:\d{2})?$").unwrap();
+    static ref GYEAR_RE: regex::Regex = regex::Regex::new(r"^-?\d{4,}(Z|[+-]\d{2}:\d{2})?$").unwrap();
+    static ref GMONTHDAY_RE: regex::Regex = regex::Regex::new(r"^--\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$").unwrap();
+    static ref GDAY_RE: regex::Regex = regex::Regex::new(r"^---\d{2}(Z|[+-]\d{2}:\d{2})?$").unwrap();
+    static ref GMONTH_RE: regex::Regex = regex::Regex::new(r"^--\d{2}(Z|[+-]\d{2}:\d{2})?$").unwrap();
+    static ref HEX_RE: regex::Regex = regex::Regex::new(r"^([0-9a-fA-F]{2})*$").unwrap();
+    static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^[A-Za-z0-9+/\s]*={0,2}$").unwrap();
 }
 
 // TODO: actually apply all required facets to each datatype
@@ -39,12 +47,17 @@ lazy_static! {
 pub enum XsdDatatypes {
     NormalizedString(StringFacets),
     String(StringFacets),
+    Byte(MinMaxFacet<i8>, Option<PatternFacet>),
     Short(MinMaxFacet<i16>, Option<PatternFacet>),
+    UnsignedByte(MinMaxFacet<u8>, Option<PatternFacet>),
     UnsignedShort(MinMaxFacet<u16>, Option<PatternFacet>),
     Long(MinMaxFacet<i64>, Option<PatternFacet>),
     Int(MinMaxFacet<i32>, Option<PatternFacet>),
     Integer(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
     PositiveInteger(MinMaxFacet<num_bigint::BigUint>, Option<PatternFacet>),
+    NonNegativeInteger(MinMaxFacet<num_bigint::BigUint>, Option<PatternFacet>),
+    NonPositiveInteger(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
+    NegativeInteger(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
     UnsignedInt(MinMaxFacet<u32>, Option<PatternFacet>),
     UnsignedLong(MinMaxFacet<u64>, Option<PatternFacet>),
     Decimal {
@@ -53,19 +66,32 @@ pub enum XsdDatatypes {
         fraction_digits: Option<u16>,
         total_digits: Option<u16>,
     },
+    Float(Option<PatternFacet>),
     Double(Option<PatternFacet>),
     NmTokens(LengthFacet),
     NmToken(LengthFacet),
     NcName(LengthFacet),
+    Name(LengthFacet),
     Token(LengthFacet),
     Duration(Option<PatternFacet>),
     Date(Option<PatternFacet>),
     Datetime(Option<PatternFacet>),
+    Time(Option<PatternFacet>),
+    GYearMonth(Option<PatternFacet>),
+    GYear(Option<PatternFacet>),
+    GMonthDay(Option<PatternFacet>),
+    GDay(Option<PatternFacet>),
+    GMonth(Option<PatternFacet>),
+    HexBinary(LengthFacet, Option<PatternFacet>),
+    Base64Binary(LengthFacet, Option<PatternFacet>),
     AnyURI(Option<PatternFacet>),
     Language(Option<PatternFacet>),
     Boolean(Option<PatternFacet>),
     Id(Option<PatternFacet>),
     IdRef(Option<PatternFacet>),
+    IdRefs(LengthFacet),
+    Entity(LengthFacet),
+    Entities(LengthFacet),
 }
 impl super::Datatype for XsdDatatypes {
     fn is_valid(&self, value: &str) -> bool {
@@ -75,8 +101,20 @@ impl super::Datatype for XsdDatatypes {
                 str_facets.is_valid(&normal_val)
             }
             XsdDatatypes::String(str_facets) => str_facets.is_valid(value),
+            XsdDatatypes::Byte(min_max, patt) => {
+                i8::from_str(value)
+                    .ok()
+                    .is_some_and(|v| min_max.is_valid(&v))
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
             XsdDatatypes::Short(min_max, patt) => {
                 i16::from_str(value)
+                    .ok()
+                    .is_some_and(|v| min_max.is_valid(&v))
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::UnsignedByte(min_max, patt) => {
+                u8::from_str(value)
                     .ok()
                     .is_some_and(|v| min_max.is_valid(&v))
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
@@ -111,6 +149,24 @@ impl super::Datatype for XsdDatatypes {
                     .is_some_and(|v| min_max.is_valid(&v))
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
+            XsdDatatypes::NonNegativeInteger(min_max, patt) => {
+                num_bigint::BigUint::from_str(value)
+                    .ok()
+                    .is_some_and(|v| min_max.is_valid(&v))
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::NonPositiveInteger(min_max, patt) => {
+                num_bigint::BigInt::from_str(value)
+                    .ok()
+                    .is_some_and(|v| v <= num_bigint::BigInt::from(0) && min_max.is_valid(&v))
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::NegativeInteger(min_max, patt) => {
+                num_bigint::BigInt::from_str(value)
+                    .ok()
+                    .is_some_and(|v| v < num_bigint::BigInt::from(0) && min_max.is_valid(&v))
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
             XsdDatatypes::Decimal {
                 min_max,
                 pattern: pat,
@@ -122,15 +178,18 @@ impl super::Datatype for XsdDatatypes {
                     .is_some_and(|v| min_max.is_valid(&v))
                     && pat.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::NmTokens(_len) => {
-                unimplemented!()
+            XsdDatatypes::NmTokens(len) => {
+                let tokens: Vec<&str> = value.split_whitespace().collect();
+                !tokens.is_empty()
+                    && tokens.iter().all(|t| is_valid_nmtoken(t))
+                    && len.is_valid(value)
             }
-            XsdDatatypes::NmToken(_len) => {
-                unimplemented!()
-            }
+            XsdDatatypes::NmToken(len) => is_valid_nmtoken(value) && len.is_valid(value),
             XsdDatatypes::NcName(len) => len.is_valid(value) && is_valid_ncname(value),
-            XsdDatatypes::Token(_len) => {
-                unimplemented!()
+            XsdDatatypes::Name(len) => len.is_valid(value) && is_valid_name(value),
+            XsdDatatypes::Token(len) => {
+                let normalized = super::relax::normalize_whitespace(value);
+                len.is_valid(&normalized)
             }
             XsdDatatypes::Duration(patt) => {
                 DURATION_RE.is_match(value)
@@ -142,6 +201,46 @@ impl super::Datatype for XsdDatatypes {
             }
             XsdDatatypes::Datetime(patt) => {
                 DATETIME_RE.is_match(value)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::Time(patt) => {
+                TIME_RE.is_match(value)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::GYearMonth(patt) => {
+                GYEARMONTH_RE.is_match(value)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::GYear(patt) => {
+                GYEAR_RE.is_match(value)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::GMonthDay(patt) => {
+                GMONTHDAY_RE.is_match(value)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::GDay(patt) => {
+                GDAY_RE.is_match(value)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::GMonth(patt) => {
+                GMONTH_RE.is_match(value)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::HexBinary(len, patt) => {
+                HEX_RE.is_match(value)
+                    && len.is_valid(value)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::Base64Binary(len, patt) => {
+                let stripped: std::string::String =
+                    value.chars().filter(|c| !c.is_whitespace()).collect();
+                BASE64_RE.is_match(&stripped)
+                    && len.is_valid(&stripped)
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            }
+            XsdDatatypes::Float(patt) => {
+                value.parse::<f32>().is_ok()
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Double(patt) => {
@@ -174,7 +273,49 @@ impl super::Datatype for XsdDatatypes {
             }
             XsdDatatypes::Id(patt) => patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true),
             XsdDatatypes::IdRef(patt) => patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true),
+            XsdDatatypes::IdRefs(len) => {
+                let tokens: Vec<&str> = value.split_whitespace().collect();
+                !tokens.is_empty()
+                    && tokens.iter().all(|t| is_valid_ncname(t))
+                    && len.is_valid(value)
+            }
+            XsdDatatypes::Entity(len) => len.is_valid(value) && is_valid_ncname(value),
+            XsdDatatypes::Entities(len) => {
+                let tokens: Vec<&str> = value.split_whitespace().collect();
+                !tokens.is_empty()
+                    && tokens.iter().all(|t| is_valid_ncname(t))
+                    && len.is_valid(value)
+            }
         }
+    }
+}
+
+fn is_name_start_char(c: char) -> bool {
+    matches!(c,
+        ':' | 'A'..='Z' | '_' | 'a'..='z'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}'
+        | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}'
+        | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{EFFFF}'
+    )
+}
+
+fn is_name_char(c: char) -> bool {
+    is_name_start_char(c)
+        || matches!(c, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
+}
+
+fn is_valid_nmtoken(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(is_name_char)
+}
+
+fn is_valid_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) if is_name_start_char(c) => chars.all(is_name_char),
+        _ => false,
     }
 }
 
@@ -291,14 +432,26 @@ impl LengthFacet {
                 }
                 LengthFacet::Length(_) => return Err(FacetError::ConflictingFacet("length")),
             },
-            LengthFacet::MaxLength(_) => {
-                unimplemented!()
-            }
+            LengthFacet::MaxLength(max) => match other {
+                LengthFacet::Unbounded | LengthFacet::MinMaxLength(_, _) => unreachable!(),
+                LengthFacet::MaxLength(_max) => {
+                    return Err(FacetError::ConflictingFacet("maxLength"));
+                }
+                LengthFacet::MinLength(min) => {
+                    if min > *max {
+                        return Err(FacetError::ConflictingFacet(
+                            "minLength greater than maxLength",
+                        ));
+                    }
+                    LengthFacet::MinMaxLength(min, *max)
+                }
+                LengthFacet::Length(_) => return Err(FacetError::ConflictingFacet("length")),
+            },
             LengthFacet::MinMaxLength(_, _) => {
-                unimplemented!()
+                return Err(FacetError::ConflictingFacet("conflicting length facet"));
             }
             LengthFacet::Length(_) => {
-                unimplemented!()
+                return Err(FacetError::ConflictingFacet("conflicting length facet"));
             }
         };
         Ok(())
@@ -620,12 +773,25 @@ impl Compiler {
                     type_name: "string",
                     facet,
                 }),
+            "byte" => self
+                .byte(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "byte",
+                    facet,
+                }),
             "short" => self
                 .short(ctx, params)
                 .map_err(|facet| XsdDatatypeError::Facet {
                     type_name: "short",
                     facet,
                 }),
+            "unsignedByte" => {
+                self.unsigned_byte(ctx, params)
+                    .map_err(|facet| XsdDatatypeError::Facet {
+                        type_name: "unsignedByte",
+                        facet,
+                    })
+            }
             "unsignedShort" => {
                 self.unsigned_short(ctx, params)
                     .map_err(|facet| XsdDatatypeError::Facet {
@@ -658,10 +824,37 @@ impl Compiler {
                         facet,
                     })
             }
+            "nonNegativeInteger" => {
+                self.non_negative_integer(ctx, params)
+                    .map_err(|facet| XsdDatatypeError::Facet {
+                        type_name: "nonNegativeInteger",
+                        facet,
+                    })
+            }
+            "nonPositiveInteger" => {
+                self.non_positive_integer(ctx, params)
+                    .map_err(|facet| XsdDatatypeError::Facet {
+                        type_name: "nonPositiveInteger",
+                        facet,
+                    })
+            }
+            "negativeInteger" => {
+                self.negative_integer(ctx, params)
+                    .map_err(|facet| XsdDatatypeError::Facet {
+                        type_name: "negativeInteger",
+                        facet,
+                    })
+            }
             "decimal" => self
                 .decimal(ctx, params)
                 .map_err(|facet| XsdDatatypeError::Facet {
                     type_name: "decimal",
+                    facet,
+                }),
+            "float" => self
+                .float(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "float",
                     facet,
                 }),
             "double" => self
@@ -686,6 +879,12 @@ impl Compiler {
                 .ncname(ctx, params)
                 .map_err(|facet| XsdDatatypeError::Facet {
                     type_name: "NCName",
+                    facet,
+                }),
+            "Name" => self
+                .name(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "Name",
                     facet,
                 }),
             "token" => self
@@ -756,6 +955,73 @@ impl Compiler {
                         facet,
                     })
             }
+            "time" => self
+                .time(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "time",
+                    facet,
+                }),
+            "gYearMonth" => self
+                .gyearmonth(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "gYearMonth",
+                    facet,
+                }),
+            "gYear" => self
+                .gyear(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "gYear",
+                    facet,
+                }),
+            "gMonthDay" => self
+                .gmonthday(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "gMonthDay",
+                    facet,
+                }),
+            "gDay" => self
+                .gday(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "gDay",
+                    facet,
+                }),
+            "gMonth" => self
+                .gmonth(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "gMonth",
+                    facet,
+                }),
+            "hexBinary" => self
+                .hex_binary(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "hexBinary",
+                    facet,
+                }),
+            "base64Binary" => {
+                self.base64_binary(ctx, params)
+                    .map_err(|facet| XsdDatatypeError::Facet {
+                        type_name: "base64Binary",
+                        facet,
+                    })
+            }
+            "IDREFS" => self
+                .idrefs(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "IDREFS",
+                    facet,
+                }),
+            "ENTITY" => self
+                .entity(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "ENTITY",
+                    facet,
+                }),
+            "ENTITIES" => self
+                .entities(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "ENTITIES",
+                    facet,
+                }),
             _ => Err(XsdDatatypeError::UnsupportedDatatype {
                 span: ctx.convert_span(span),
                 name: name.to_string(),
@@ -1313,6 +1579,423 @@ impl Compiler {
         Ok(XsdDatatypes::IdRef(pattern))
     }
 
+    fn byte(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut min_max = MinMaxFacet::default();
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "minInclusive" => min_max.min_inclusive(Self::i8(ctx, param)?)?,
+                "minExclusive" => min_max.min_exclusive(Self::i8(ctx, param)?)?,
+                "maxInclusive" => min_max.max_inclusive(Self::i8(ctx, param)?)?,
+                "maxExclusive" => min_max.max_exclusive(Self::i8(ctx, param)?)?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::Byte(min_max, pattern))
+    }
+
+    fn unsigned_byte(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+    ) -> Result<XsdDatatypes, FacetError> {
+        let mut min_max = MinMaxFacet::default();
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "minInclusive" => min_max.min_inclusive(Self::u8(ctx, param)?)?,
+                "minExclusive" => min_max.min_exclusive(Self::u8(ctx, param)?)?,
+                "maxInclusive" => min_max.max_inclusive(Self::u8(ctx, param)?)?,
+                "maxExclusive" => min_max.max_exclusive(Self::u8(ctx, param)?)?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::UnsignedByte(min_max, pattern))
+    }
+
+    fn float(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::Float(pattern))
+    }
+
+    fn non_negative_integer(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+    ) -> Result<XsdDatatypes, FacetError> {
+        let mut min_max = MinMaxFacet::default();
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "minInclusive" => min_max.min_inclusive(Self::biguint(ctx, param)?)?,
+                "minExclusive" => min_max.min_exclusive(Self::biguint(ctx, param)?)?,
+                "maxInclusive" => min_max.max_inclusive(Self::biguint(ctx, param)?)?,
+                "maxExclusive" => min_max.max_exclusive(Self::biguint(ctx, param)?)?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::NonNegativeInteger(min_max, pattern))
+    }
+
+    fn non_positive_integer(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+    ) -> Result<XsdDatatypes, FacetError> {
+        let mut min_max = MinMaxFacet::default();
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "minInclusive" => min_max.min_inclusive(Self::bigint(ctx, param)?)?,
+                "minExclusive" => min_max.min_exclusive(Self::bigint(ctx, param)?)?,
+                "maxInclusive" => min_max.max_inclusive(Self::bigint(ctx, param)?)?,
+                "maxExclusive" => min_max.max_exclusive(Self::bigint(ctx, param)?)?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::NonPositiveInteger(min_max, pattern))
+    }
+
+    fn negative_integer(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+    ) -> Result<XsdDatatypes, FacetError> {
+        let mut min_max = MinMaxFacet::default();
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "minInclusive" => min_max.min_inclusive(Self::bigint(ctx, param)?)?,
+                "minExclusive" => min_max.min_exclusive(Self::bigint(ctx, param)?)?,
+                "maxInclusive" => min_max.max_inclusive(Self::bigint(ctx, param)?)?,
+                "maxExclusive" => min_max.max_exclusive(Self::bigint(ctx, param)?)?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::NegativeInteger(min_max, pattern))
+    }
+
+    fn time(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::Time(pattern))
+    }
+
+    fn gyearmonth(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+    ) -> Result<XsdDatatypes, FacetError> {
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::GYearMonth(pattern))
+    }
+
+    fn gyear(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::GYear(pattern))
+    }
+
+    fn gmonthday(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+    ) -> Result<XsdDatatypes, FacetError> {
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::GMonthDay(pattern))
+    }
+
+    fn gday(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::GDay(pattern))
+    }
+
+    fn gmonth(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::GMonth(pattern))
+    }
+
+    fn hex_binary(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+    ) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::HexBinary(len, pattern))
+    }
+
+    fn base64_binary(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+    ) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::Base64Binary(len, pattern))
+    }
+
+    fn name(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::Name(len))
+    }
+
+    fn idrefs(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::IdRefs(len))
+    }
+
+    fn entity(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::Entity(len))
+    }
+
+    fn entities(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::Entities(len))
+    }
+
+    fn i8(ctx: &Context, param: &types::Param) -> Result<i8, FacetError> {
+        param
+            .value
+            .as_string_value()
+            .parse()
+            .map_err(|e: std::num::ParseIntError| {
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
+            })
+    }
+
+    fn u8(ctx: &Context, param: &types::Param) -> Result<u8, FacetError> {
+        param
+            .value
+            .as_string_value()
+            .parse()
+            .map_err(|e: std::num::ParseIntError| {
+                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
+            })
+    }
+
     fn i16(ctx: &Context, param: &types::Param) -> Result<i16, FacetError> {
         param
             .value
@@ -1503,5 +2186,274 @@ mod test {
                 pattern: None
             }))
         )
+    }
+
+    // Helper: compile an XSD datatype with no params
+    fn compile_no_params(name: &str) -> XsdDatatypes {
+        let mut map = CodeMap::new();
+        let file = map.add_file("test.rnc".to_string(), "test".to_string());
+        let ctx = Context::new(file);
+        let c = Compiler;
+        c.compile(&ctx, &(0..0), name, &[]).unwrap()
+    }
+
+    use crate::datatype::Datatype;
+
+    #[test]
+    fn length_facet_merge_max_then_min() {
+        let mut f = LengthFacet::MaxLength(10);
+        f.merge(LengthFacet::MinLength(3)).unwrap();
+        assert_eq!(f, LengthFacet::MinMaxLength(3, 10));
+    }
+
+    #[test]
+    fn length_facet_merge_max_then_min_conflict() {
+        let mut f = LengthFacet::MaxLength(2);
+        assert!(f.merge(LengthFacet::MinLength(5)).is_err());
+    }
+
+    #[test]
+    fn length_facet_merge_max_then_max_conflict() {
+        let mut f = LengthFacet::MaxLength(10);
+        assert!(f.merge(LengthFacet::MaxLength(5)).is_err());
+    }
+
+    #[test]
+    fn length_facet_merge_minmax_conflict() {
+        let mut f = LengthFacet::MinMaxLength(3, 10);
+        assert!(f.merge(LengthFacet::MinLength(1)).is_err());
+    }
+
+    #[test]
+    fn length_facet_merge_length_conflict() {
+        let mut f = LengthFacet::Length(5);
+        assert!(f.merge(LengthFacet::MinLength(1)).is_err());
+    }
+
+    #[test]
+    fn token_is_valid() {
+        let dt = XsdDatatypes::Token(LengthFacet::Unbounded);
+        assert!(dt.is_valid("hello world"));
+        assert!(dt.is_valid("  spaced  "));
+    }
+
+    #[test]
+    fn token_length_facet() {
+        let dt = XsdDatatypes::Token(LengthFacet::MaxLength(5));
+        assert!(dt.is_valid("hello"));
+        // " a b " normalizes to "a b" (3 chars)
+        assert!(dt.is_valid(" a b "));
+    }
+
+    #[test]
+    fn nmtoken_valid() {
+        let dt = XsdDatatypes::NmToken(LengthFacet::Unbounded);
+        assert!(dt.is_valid("hello"));
+        assert!(dt.is_valid("a-b.c"));
+        assert!(dt.is_valid("123"));
+        assert!(!dt.is_valid(""));
+        assert!(!dt.is_valid("hello world"));
+    }
+
+    #[test]
+    fn nmtokens_valid() {
+        let dt = XsdDatatypes::NmTokens(LengthFacet::Unbounded);
+        assert!(dt.is_valid("hello"));
+        assert!(dt.is_valid("hello world"));
+        assert!(!dt.is_valid(""));
+        assert!(!dt.is_valid("hello @invalid"));
+    }
+
+    #[test]
+    fn byte_valid() {
+        let dt = compile_no_params("byte");
+        assert!(dt.is_valid("0"));
+        assert!(dt.is_valid("-128"));
+        assert!(dt.is_valid("127"));
+        assert!(!dt.is_valid("128"));
+        assert!(!dt.is_valid("-129"));
+        assert!(!dt.is_valid("abc"));
+    }
+
+    #[test]
+    fn unsigned_byte_valid() {
+        let dt = compile_no_params("unsignedByte");
+        assert!(dt.is_valid("0"));
+        assert!(dt.is_valid("255"));
+        assert!(!dt.is_valid("256"));
+        assert!(!dt.is_valid("-1"));
+    }
+
+    #[test]
+    fn float_valid() {
+        let dt = compile_no_params("float");
+        assert!(dt.is_valid("1.0"));
+        assert!(dt.is_valid("-3.14"));
+        assert!(dt.is_valid("0"));
+        assert!(!dt.is_valid("abc"));
+    }
+
+    #[test]
+    fn non_negative_integer_valid() {
+        let dt = compile_no_params("nonNegativeInteger");
+        assert!(dt.is_valid("0"));
+        assert!(dt.is_valid("42"));
+        assert!(!dt.is_valid("-1"));
+    }
+
+    #[test]
+    fn non_positive_integer_valid() {
+        let dt = compile_no_params("nonPositiveInteger");
+        assert!(dt.is_valid("0"));
+        assert!(dt.is_valid("-42"));
+        assert!(!dt.is_valid("1"));
+    }
+
+    #[test]
+    fn negative_integer_valid() {
+        let dt = compile_no_params("negativeInteger");
+        assert!(dt.is_valid("-1"));
+        assert!(dt.is_valid("-999"));
+        assert!(!dt.is_valid("0"));
+        assert!(!dt.is_valid("1"));
+    }
+
+    #[test]
+    fn time_valid() {
+        let dt = compile_no_params("time");
+        assert!(dt.is_valid("13:20:00"));
+        assert!(dt.is_valid("13:20:00Z"));
+        assert!(dt.is_valid("13:20:00.5"));
+        assert!(dt.is_valid("13:20:00+05:30"));
+        assert!(!dt.is_valid("abc"));
+        assert!(!dt.is_valid("1:2:3")); // needs 2-digit fields
+    }
+
+    #[test]
+    fn gyearmonth_valid() {
+        let dt = compile_no_params("gYearMonth");
+        assert!(dt.is_valid("2023-01"));
+        assert!(dt.is_valid("-0045-12"));
+        assert!(dt.is_valid("2023-01Z"));
+        assert!(!dt.is_valid("2023"));
+        assert!(!dt.is_valid("abc"));
+    }
+
+    #[test]
+    fn gyear_valid() {
+        let dt = compile_no_params("gYear");
+        assert!(dt.is_valid("2023"));
+        assert!(dt.is_valid("-0045"));
+        assert!(dt.is_valid("2023Z"));
+        assert!(!dt.is_valid("abc"));
+    }
+
+    #[test]
+    fn gmonthday_valid() {
+        let dt = compile_no_params("gMonthDay");
+        assert!(dt.is_valid("--12-25"));
+        assert!(dt.is_valid("--01-01Z"));
+        assert!(!dt.is_valid("12-25"));
+        assert!(!dt.is_valid("abc"));
+    }
+
+    #[test]
+    fn gday_valid() {
+        let dt = compile_no_params("gDay");
+        assert!(dt.is_valid("---25"));
+        assert!(dt.is_valid("---01Z"));
+        assert!(!dt.is_valid("--25"));
+        assert!(!dt.is_valid("abc"));
+    }
+
+    #[test]
+    fn gmonth_valid() {
+        let dt = compile_no_params("gMonth");
+        assert!(dt.is_valid("--12"));
+        assert!(dt.is_valid("--01Z"));
+        assert!(!dt.is_valid("12"));
+        assert!(!dt.is_valid("abc"));
+    }
+
+    #[test]
+    fn hex_binary_valid() {
+        let dt = compile_no_params("hexBinary");
+        assert!(dt.is_valid(""));
+        assert!(dt.is_valid("0FB7"));
+        assert!(dt.is_valid("aabb"));
+        assert!(dt.is_valid("0F")); // 1 octet is valid
+        assert!(!dt.is_valid("0FG")); // invalid hex char
+        assert!(!dt.is_valid("abc")); // odd length
+    }
+
+    #[test]
+    fn base64_binary_valid() {
+        let dt = compile_no_params("base64Binary");
+        assert!(dt.is_valid(""));
+        assert!(dt.is_valid("SGVsbG8="));
+        assert!(dt.is_valid("AQID"));
+        assert!(!dt.is_valid("!!!"));
+    }
+
+    #[test]
+    fn name_valid() {
+        let dt = compile_no_params("Name");
+        assert!(dt.is_valid("foo"));
+        assert!(dt.is_valid("foo:bar")); // Name allows colon
+        assert!(dt.is_valid("_underscore"));
+        assert!(!dt.is_valid("123"));
+        assert!(!dt.is_valid(""));
+    }
+
+    #[test]
+    fn idrefs_valid() {
+        let dt = compile_no_params("IDREFS");
+        assert!(dt.is_valid("id1"));
+        assert!(dt.is_valid("id1 id2 id3"));
+        assert!(!dt.is_valid(""));
+        assert!(!dt.is_valid("id:1")); // NCName, no colon
+    }
+
+    #[test]
+    fn entity_valid() {
+        let dt = compile_no_params("ENTITY");
+        assert!(dt.is_valid("foo"));
+        assert!(!dt.is_valid("foo:bar")); // NCName, no colon
+        assert!(!dt.is_valid(""));
+    }
+
+    #[test]
+    fn entities_valid() {
+        let dt = compile_no_params("ENTITIES");
+        assert!(dt.is_valid("foo"));
+        assert!(dt.is_valid("foo bar"));
+        assert!(!dt.is_valid(""));
+    }
+
+    // Compilation test: all new types compile
+    #[test]
+    fn all_new_types_compile() {
+        for name in [
+            "byte",
+            "unsignedByte",
+            "float",
+            "nonNegativeInteger",
+            "nonPositiveInteger",
+            "negativeInteger",
+            "time",
+            "gYearMonth",
+            "gYear",
+            "gMonthDay",
+            "gDay",
+            "gMonth",
+            "hexBinary",
+            "base64Binary",
+            "Name",
+            "IDREFS",
+            "ENTITY",
+            "ENTITIES",
+        ] {
+            compile_no_params(name);
+        }
     }
 }

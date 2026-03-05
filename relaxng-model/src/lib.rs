@@ -734,7 +734,7 @@ impl<FS: Files> Compiler<FS> {
 
         if let Some(start) = ctx.get_ref("start") {
             let mut seen = HashSet::new();
-            let mut expanding = HashSet::new();
+            let mut expanding = HashMap::new();
             // Check for undefined references and recursive references without element
             self.check(
                 &mut seen,
@@ -758,14 +758,15 @@ impl<FS: Files> Compiler<FS> {
     /// Walk the pattern tree from start, checking for undefined references and
     /// recursive references that don't pass through an element.
     /// - `seen`: refs that have been fully checked (skip on re-encounter)
-    /// - `expanding`: refs currently being expanded in the call chain
+    /// - `expanding`: refs currently being expanded in the call chain, mapped
+    ///   to whether an element has been crossed since that ref started expanding
     /// - `inside_element`: whether we've entered an element since the nearest
     ///   enclosing ref expansion started
     #[allow(clippy::only_used_in_recursion)]
     fn check(
         &self,
         seen: &mut HashSet<usize>,
-        expanding: &mut HashSet<usize>,
+        expanding: &mut HashMap<usize, bool>,
         inside_element: bool,
         patt: &model::Pattern,
     ) -> Result<(), RelaxError> {
@@ -782,7 +783,19 @@ impl<FS: Files> Compiler<FS> {
             | Pattern::Attribute(_, p, _, _)
             | Pattern::List(p, _) => self.check(seen, expanding, inside_element, p)?,
             Pattern::Element(_, p, _, _) => {
+                // Mark all currently-expanding refs as having crossed an element,
+                // but save old values so siblings outside this element aren't affected
+                let saved: Vec<(usize, bool)> = expanding.iter().map(|(&k, &v)| (k, v)).collect();
+                for v in expanding.values_mut() {
+                    *v = true;
+                }
                 self.check(seen, expanding, true, p)?;
+                // Restore the crossed-element flags for refs still in expanding
+                for (k, v) in saved {
+                    if let Some(entry) = expanding.get_mut(&k) {
+                        *entry = v;
+                    }
+                }
             }
             Pattern::Empty(_)
             | Pattern::Text(_)
@@ -790,8 +803,8 @@ impl<FS: Files> Compiler<FS> {
             | Pattern::DatatypeValue { .. } => {}
             Pattern::Ref(span, name, def) => {
                 let ptr = def.0.as_ptr() as usize;
-                if expanding.contains(&ptr) {
-                    if !inside_element {
+                if let Some(&crossed_element) = expanding.get(&ptr) {
+                    if !crossed_element {
                         let borrowed = def.0.borrow();
                         let def_span = borrowed.as_ref().map(|r| *r.span());
                         return Err(RelaxError::RecursiveReference {
@@ -803,7 +816,7 @@ impl<FS: Files> Compiler<FS> {
                     }
                     // Valid recursion through element — don't recurse further
                 } else if !seen.contains(&ptr) {
-                    expanding.insert(ptr);
+                    expanding.insert(ptr, false);
                     if let Some(rule) = def.0.borrow().as_ref() {
                         self.check(seen, expanding, false, rule.pattern())?
                     } else {

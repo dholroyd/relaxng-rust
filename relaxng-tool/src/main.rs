@@ -154,10 +154,6 @@ fn lint(schema: PathBuf) {
         let lint_warnings = relaxng_model::lint::lint_pattern(rule.pattern());
         for w in &lint_warnings {
             let (message, span) = match w {
-                relaxng_model::lint::LintWarning::DeadChoiceBranch { span } => (
-                    "choice branch is notAllowed and can never match".to_string(),
-                    *span,
-                ),
                 relaxng_model::lint::LintWarning::DeadComposite { kind, span } => (
                     format!("{kind} contains notAllowed, making the whole pattern dead"),
                     *span,

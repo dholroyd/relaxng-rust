@@ -4,8 +4,6 @@ use std::collections::HashSet;
 /// Lint warnings for patterns that are technically valid but likely unintended.
 #[derive(Debug)]
 pub enum LintWarning {
-    /// A Choice branch is NotAllowed and can never match.
-    DeadChoiceBranch { span: Option<codemap::Span> },
     /// A Group or Interleave contains NotAllowed, making the whole pattern dead.
     DeadComposite {
         kind: &'static str,
@@ -31,13 +29,6 @@ fn lint_walk(pat: &Pattern, warnings: &mut Vec<LintWarning>, seen: &mut HashSet<
     match pat {
         Pattern::Choice(children, _span) => {
             for child in children {
-                if matches!(child, Pattern::NotAllowed(_)) {
-                    let child_span = match child {
-                        Pattern::NotAllowed(s) => *s,
-                        _ => None,
-                    };
-                    warnings.push(LintWarning::DeadChoiceBranch { span: child_span });
-                }
                 lint_walk(child, warnings, seen);
             }
         }
@@ -104,9 +95,6 @@ fn lint_walk(pat: &Pattern, warnings: &mut Vec<LintWarning>, seen: &mut HashSet<
 
 /// Check if a lint warning is a DeadChoiceBranch.
 impl LintWarning {
-    pub fn is_dead_choice_branch(&self) -> bool {
-        matches!(self, LintWarning::DeadChoiceBranch { .. })
-    }
     pub fn is_dead_composite(&self) -> bool {
         matches!(self, LintWarning::DeadComposite { .. })
     }
@@ -181,25 +169,6 @@ mod tests {
         let pat = Pattern::Choice(vec![empty(), text()], None);
         let warnings = lint_pattern(&pat);
         assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn dead_choice_branch_detected() {
-        let pat = Pattern::Choice(vec![text(), not_allowed()], None);
-        let warnings = lint_pattern(&pat);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].is_dead_choice_branch());
-    }
-
-    #[test]
-    fn multiple_dead_choice_branches() {
-        let pat = Pattern::Choice(vec![not_allowed(), text(), not_allowed()], None);
-        let warnings = lint_pattern(&pat);
-        let dead_count = warnings
-            .iter()
-            .filter(|w| w.is_dead_choice_branch())
-            .count();
-        assert_eq!(dead_count, 2);
     }
 
     #[test]
@@ -318,31 +287,16 @@ mod tests {
     }
 
     #[test]
-    fn nested_warnings_through_element() {
-        // Warnings inside elements should be found
-        let choice = Pattern::Choice(vec![text(), not_allowed()], None);
-        let pat = Pattern::Element(
-            NameClass::AnyName { except: None },
-            Box::new(choice),
-            None,
-            None,
-        );
-        let warnings = lint_pattern(&pat);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].is_dead_choice_branch());
-    }
-
-    #[test]
     fn follows_refs_once() {
-        // Build a Ref that points to a pattern with a warning
+        // Build a Ref that points to a pattern with a warning (dead group)
         let span = dummy_span();
-        let inner_pat = Pattern::Choice(vec![text(), not_allowed()], None);
+        let inner_pat = Pattern::Group(vec![text(), not_allowed()], None);
         let define = DefineRule::AssignCombine(span, None, inner_pat);
         let pat_ref = Rc::new(RefCell::new(Some(define)));
         let ref_pat = Pattern::Ref(dummy_span(), "test".to_string(), PatRef(pat_ref));
         let warnings = lint_pattern(&ref_pat);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].is_dead_choice_branch());
+        assert!(warnings[0].is_dead_composite());
     }
 
     #[test]

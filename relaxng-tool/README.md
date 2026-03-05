@@ -57,7 +57,6 @@ USAGE:
 Scans a compiled schema for potential problems:
 
 - **Unreachable definitions** — named patterns that are never referenced
-- **Dead choice branches** — `notAllowed` inside a `choice`
 - **Dead composites** — `group` or `interleave` containing `notAllowed`
 - **Redundant wrapping** — e.g. `(x?)?`, `(x+)*`
 

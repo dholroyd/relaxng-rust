@@ -83,7 +83,6 @@ lazy_static! {
     static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^[A-Za-z0-9+/\s]*={0,2}$").unwrap();
 }
 
-// TODO: actually apply all required facets to each datatype
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum XsdDatatypes {
     NormalizedString(StringFacets),
@@ -109,11 +108,11 @@ pub enum XsdDatatypes {
     },
     Float(MinMaxFacet<FiniteF32>, Option<PatternFacet>),
     Double(MinMaxFacet<FiniteF64>, Option<PatternFacet>),
-    NmTokens(LengthFacet),
-    NmToken(LengthFacet),
-    NcName(LengthFacet),
-    Name(LengthFacet),
-    Token(LengthFacet),
+    NmTokens(LengthFacet, Option<PatternFacet>),
+    NmToken(StringFacets),
+    NcName(StringFacets),
+    Name(StringFacets),
+    Token(StringFacets),
     Duration(Option<PatternFacet>),
     Date(Option<PatternFacet>),
     Datetime(Option<PatternFacet>),
@@ -125,14 +124,14 @@ pub enum XsdDatatypes {
     GMonth(Option<PatternFacet>),
     HexBinary(LengthFacet, Option<PatternFacet>),
     Base64Binary(LengthFacet, Option<PatternFacet>),
-    AnyURI(Option<PatternFacet>),
-    Language(Option<PatternFacet>),
+    AnyURI(StringFacets),
+    Language(StringFacets),
     Boolean(Option<PatternFacet>),
-    Id(Option<PatternFacet>),
-    IdRef(Option<PatternFacet>),
-    IdRefs(LengthFacet),
-    Entity(LengthFacet),
-    Entities(LengthFacet),
+    Id(StringFacets),
+    IdRef(StringFacets),
+    IdRefs(LengthFacet, Option<PatternFacet>),
+    Entity(StringFacets),
+    Entities(LengthFacet, Option<PatternFacet>),
 }
 impl super::Datatype for XsdDatatypes {
     fn is_valid(&self, value: &str) -> bool {
@@ -211,26 +210,53 @@ impl super::Datatype for XsdDatatypes {
             XsdDatatypes::Decimal {
                 min_max,
                 pattern: pat,
-                fraction_digits: _,
-                total_digits: _,
+                fraction_digits,
+                total_digits,
             } => {
                 bigdecimal::BigDecimal::from_str(value)
                     .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
+                    .is_some_and(|v| {
+                        if !min_max.is_valid(&v) {
+                            return false;
+                        }
+                        if let Some(td) = total_digits {
+                            // totalDigits counts significant digits (ignoring sign, decimal point, leading zeros)
+                            let stripped = value.trim_start_matches('-').trim_start_matches('0');
+                            let sig_digits: usize =
+                                stripped.chars().filter(|c| c.is_ascii_digit()).count();
+                            let sig_digits = if sig_digits == 0 { 1 } else { sig_digits };
+                            if sig_digits > *td as usize {
+                                return false;
+                            }
+                        }
+                        if let Some(fd) = fraction_digits {
+                            let (_digits, scale) = v.as_bigint_and_exponent();
+                            let actual_frac = if scale > 0 { scale as usize } else { 0 };
+                            if actual_frac > *fd as usize {
+                                return false;
+                            }
+                        }
+                        true
+                    })
                     && pat.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::NmTokens(len) => {
+            XsdDatatypes::NmTokens(len, patt) => {
                 let tokens: Vec<&str> = value.split_whitespace().collect();
                 !tokens.is_empty()
                     && tokens.iter().all(|t| is_valid_nmtoken(t))
-                    && len.is_valid(value)
+                    && len.is_valid_count(tokens.len())
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::NmToken(len) => is_valid_nmtoken(value) && len.is_valid(value),
-            XsdDatatypes::NcName(len) => len.is_valid(value) && is_valid_ncname(value),
-            XsdDatatypes::Name(len) => len.is_valid(value) && is_valid_name(value),
-            XsdDatatypes::Token(len) => {
+            XsdDatatypes::NmToken(str_facets) => {
+                is_valid_nmtoken(value) && str_facets.is_valid(value)
+            }
+            XsdDatatypes::NcName(str_facets) => {
+                is_valid_ncname(value) && str_facets.is_valid(value)
+            }
+            XsdDatatypes::Name(str_facets) => is_valid_name(value) && str_facets.is_valid(value),
+            XsdDatatypes::Token(str_facets) => {
                 let normalized = super::relax::normalize_whitespace(value);
-                len.is_valid(&normalized)
+                str_facets.is_valid(&normalized)
             }
             XsdDatatypes::Duration(patt) => {
                 DURATION_RE.is_match(value)
@@ -270,14 +296,24 @@ impl super::Datatype for XsdDatatypes {
             }
             XsdDatatypes::HexBinary(len, patt) => {
                 HEX_RE.is_match(value)
-                    && len.is_valid(value)
+                    && len.is_valid_count(value.len() / 2)
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Base64Binary(len, patt) => {
                 let stripped: std::string::String =
                     value.chars().filter(|c| !c.is_whitespace()).collect();
-                BASE64_RE.is_match(&stripped)
-                    && len.is_valid(&stripped)
+                if !BASE64_RE.is_match(&stripped) {
+                    return false;
+                }
+                // Count decoded bytes: each 4 base64 chars = 3 bytes, minus padding
+                let padding = stripped.chars().rev().take_while(|&c| c == '=').count();
+                let data_chars = stripped.len() - padding;
+                let decoded_len = if stripped.is_empty() {
+                    0
+                } else {
+                    (data_chars * 3) / 4
+                };
+                len.is_valid_count(decoded_len)
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Float(min_max, patt) => {
@@ -294,13 +330,11 @@ impl super::Datatype for XsdDatatypes {
                     .is_some_and(|v| min_max.is_valid(&FiniteF64(v)))
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::AnyURI(patt) => {
-                uriparse::URIReference::try_from(value).is_ok()
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            XsdDatatypes::AnyURI(str_facets) => {
+                uriparse::URIReference::try_from(value).is_ok() && str_facets.is_valid(value)
             }
-            XsdDatatypes::Language(patt) => {
-                LANG_RE.is_match(value)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            XsdDatatypes::Language(str_facets) => {
+                LANG_RE.is_match(value) && str_facets.is_valid(value)
             }
             XsdDatatypes::Boolean(patt) => {
                 (value == "true" || value == "false" || value == "1" || value == "0")
@@ -318,20 +352,24 @@ impl super::Datatype for XsdDatatypes {
                     .is_some_and(|v| min_max.is_valid(&v))
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::Id(patt) => patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true),
-            XsdDatatypes::IdRef(patt) => patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true),
-            XsdDatatypes::IdRefs(len) => {
+            XsdDatatypes::Id(str_facets) => is_valid_ncname(value) && str_facets.is_valid(value),
+            XsdDatatypes::IdRef(str_facets) => is_valid_ncname(value) && str_facets.is_valid(value),
+            XsdDatatypes::IdRefs(len, patt) => {
                 let tokens: Vec<&str> = value.split_whitespace().collect();
                 !tokens.is_empty()
                     && tokens.iter().all(|t| is_valid_ncname(t))
-                    && len.is_valid(value)
+                    && len.is_valid_count(tokens.len())
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
-            XsdDatatypes::Entity(len) => len.is_valid(value) && is_valid_ncname(value),
-            XsdDatatypes::Entities(len) => {
+            XsdDatatypes::Entity(str_facets) => {
+                is_valid_ncname(value) && str_facets.is_valid(value)
+            }
+            XsdDatatypes::Entities(len, patt) => {
                 let tokens: Vec<&str> = value.split_whitespace().collect();
                 !tokens.is_empty()
                     && tokens.iter().all(|t| is_valid_ncname(t))
-                    && len.is_valid(value)
+                    && len.is_valid_count(tokens.len())
+                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
         }
     }
@@ -451,7 +489,10 @@ pub enum LengthFacet {
 }
 impl LengthFacet {
     fn is_valid(&self, value: &str) -> bool {
-        let actual = value.chars().count();
+        self.is_valid_count(value.chars().count())
+    }
+
+    fn is_valid_count(&self, actual: usize) -> bool {
         match self {
             LengthFacet::Unbounded => true,
             LengthFacet::MinLength(min) => *min <= actual,
@@ -1367,12 +1408,14 @@ impl Compiler {
 
     fn nmtokens(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
         let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -1382,17 +1425,19 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::NmTokens(len))
+        Ok(XsdDatatypes::NmTokens(len, pattern))
     }
 
     fn nmtoken(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
         let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -1402,17 +1447,19 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::NmToken(len))
+        Ok(XsdDatatypes::NmToken(StringFacets { len, pattern }))
     }
 
     fn ncname(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
         let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -1422,17 +1469,19 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::NcName(len))
+        Ok(XsdDatatypes::NcName(StringFacets { len, pattern }))
     }
 
     fn token(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
         let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -1442,7 +1491,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Token(len))
+        Ok(XsdDatatypes::Token(StringFacets { len, pattern }))
     }
 
     fn duration(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -1500,10 +1549,14 @@ impl Compiler {
     }
 
     fn any_uri(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1514,14 +1567,18 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::AnyURI(pattern))
+        Ok(XsdDatatypes::AnyURI(StringFacets { len, pattern }))
     }
 
     fn language(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1532,7 +1589,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Language(pattern))
+        Ok(XsdDatatypes::Language(StringFacets { len, pattern }))
     }
 
     fn boolean(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -1608,10 +1665,14 @@ impl Compiler {
     }
 
     fn id(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1622,14 +1683,18 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Id(pattern))
+        Ok(XsdDatatypes::Id(StringFacets { len, pattern }))
     }
 
     fn idref(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1640,7 +1705,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::IdRef(pattern))
+        Ok(XsdDatatypes::IdRef(StringFacets { len, pattern }))
     }
 
     fn byte(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -1967,12 +2032,14 @@ impl Compiler {
 
     fn name(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
         let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -1982,17 +2049,19 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Name(len))
+        Ok(XsdDatatypes::Name(StringFacets { len, pattern }))
     }
 
     fn idrefs(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
         let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -2002,17 +2071,19 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::IdRefs(len))
+        Ok(XsdDatatypes::IdRefs(len, pattern))
     }
 
     fn entity(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
         let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -2022,17 +2093,19 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Entity(len))
+        Ok(XsdDatatypes::Entity(StringFacets { len, pattern }))
     }
 
     fn entities(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
         let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
                 "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
                 "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -2042,7 +2115,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Entities(len))
+        Ok(XsdDatatypes::Entities(len, pattern))
     }
 
     fn i8(ctx: &Context, param: &types::Param) -> Result<i8, FacetError> {
@@ -2330,14 +2403,20 @@ mod test {
 
     #[test]
     fn token_is_valid() {
-        let dt = XsdDatatypes::Token(LengthFacet::Unbounded);
+        let dt = XsdDatatypes::Token(StringFacets {
+            len: LengthFacet::Unbounded,
+            pattern: None,
+        });
         assert!(dt.is_valid("hello world"));
         assert!(dt.is_valid("  spaced  "));
     }
 
     #[test]
     fn token_length_facet() {
-        let dt = XsdDatatypes::Token(LengthFacet::MaxLength(5));
+        let dt = XsdDatatypes::Token(StringFacets {
+            len: LengthFacet::MaxLength(5),
+            pattern: None,
+        });
         assert!(dt.is_valid("hello"));
         // " a b " normalizes to "a b" (3 chars)
         assert!(dt.is_valid(" a b "));
@@ -2345,7 +2424,10 @@ mod test {
 
     #[test]
     fn nmtoken_valid() {
-        let dt = XsdDatatypes::NmToken(LengthFacet::Unbounded);
+        let dt = XsdDatatypes::NmToken(StringFacets {
+            len: LengthFacet::Unbounded,
+            pattern: None,
+        });
         assert!(dt.is_valid("hello"));
         assert!(dt.is_valid("a-b.c"));
         assert!(dt.is_valid("123"));
@@ -2355,11 +2437,18 @@ mod test {
 
     #[test]
     fn nmtokens_valid() {
-        let dt = XsdDatatypes::NmTokens(LengthFacet::Unbounded);
+        let dt = XsdDatatypes::NmTokens(LengthFacet::Unbounded, None);
         assert!(dt.is_valid("hello"));
         assert!(dt.is_valid("hello world"));
         assert!(!dt.is_valid(""));
         assert!(!dt.is_valid("hello @invalid"));
+    }
+
+    #[test]
+    fn nmtokens_length_counts_items() {
+        let dt = XsdDatatypes::NmTokens(LengthFacet::MaxLength(2), None);
+        assert!(dt.is_valid("a b"));
+        assert!(!dt.is_valid("a b c"));
     }
 
     #[test]

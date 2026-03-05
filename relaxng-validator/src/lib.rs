@@ -847,7 +847,7 @@ fn describe_datatype(dt: &datatype::Datatypes) -> String {
                 Decimal { .. } => "xsd:decimal",
                 Float(..) => "xsd:float",
                 Double(..) => "xsd:double",
-                NmTokens(_) => "xsd:NMTOKENS",
+                NmTokens(..) => "xsd:NMTOKENS",
                 NmToken(_) => "xsd:NMTOKEN",
                 NcName(_) => "xsd:NCName",
                 Name(_) => "xsd:Name",
@@ -867,9 +867,9 @@ fn describe_datatype(dt: &datatype::Datatypes) -> String {
                 Boolean(_) => "xsd:boolean",
                 Id(_) => "xsd:ID",
                 IdRef(_) => "xsd:IDREF",
-                IdRefs(_) => "xsd:IDREFS",
+                IdRefs(..) => "xsd:IDREFS",
                 Entity(_) => "xsd:ENTITY",
-                Entities(_) => "xsd:ENTITIES",
+                Entities(..) => "xsd:ENTITIES",
             };
             name.to_string()
         }

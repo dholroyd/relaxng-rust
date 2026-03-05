@@ -1268,7 +1268,9 @@ impl<'a> Validator<'a> {
                         } else {
                             self.current_step
                         };
-                        Self::end_tag_deriv(next_pid, &mut self.schema)
+                        let result = Self::end_tag_deriv(next_pid, &mut self.schema);
+                        self.stack.pop();
+                        result
                     }
                     ElementEnd::Empty => {
                         let next_id = Self::close_element_start(
@@ -1288,7 +1290,9 @@ impl<'a> Validator<'a> {
                         // This fake text node is required for a pattern like 'element foo { token }'
                         // to match the input '<foo/>' or '<foo></foo>'
                         let p = Self::text_deriv(next_id, &mut self.schema, "");
-                        Self::end_tag_deriv(p, &mut self.schema)
+                        let result = Self::end_tag_deriv(p, &mut self.schema);
+                        self.stack.pop();
+                        result
                     }
                 }
             }
@@ -2326,6 +2330,9 @@ impl<'a> ElementStack<'a> {
             namespaces: vec![],
             attributes: vec![],
         })
+    }
+    fn pop(&mut self) {
+        self.elements.pop();
     }
     fn add_attr(
         &mut self,

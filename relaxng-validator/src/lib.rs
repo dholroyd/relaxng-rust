@@ -55,6 +55,11 @@ pub enum ValidatorError<'a> {
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 struct PatId(u16);
 
+/// Well-known pattern identifiers, always at fixed positions in the pattern list.
+const PAT_NOT_ALLOWED: PatId = PatId(0);
+const PAT_EMPTY: PatId = PatId(1);
+const PAT_TEXT: PatId = PatId(2);
+
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum Pat {
     Choice(PatId, PatId, bool),
@@ -161,9 +166,18 @@ struct SchemaBuilder {
 
 impl SchemaBuilder {
     fn new() -> Self {
+        let mut memo = HashMap::new();
+        let patterns = vec![
+            Some(Pat::NotAllowed), // PAT_NOT_ALLOWED = 0
+            Some(Pat::Empty),      // PAT_EMPTY = 1
+            Some(Pat::Text),       // PAT_TEXT = 2
+        ];
+        memo.insert(Pat::NotAllowed, PAT_NOT_ALLOWED);
+        memo.insert(Pat::Empty, PAT_EMPTY);
+        memo.insert(Pat::Text, PAT_TEXT);
         SchemaBuilder {
-            memo: HashMap::new(),
-            patterns: Vec::new(),
+            memo,
+            patterns,
             refs: HashMap::new(),
             span_map: HashMap::new(),
             deferred: Vec::new(),
@@ -174,7 +188,7 @@ impl SchemaBuilder {
     fn push(&mut self, p: Pat) -> PatId {
         if self.patterns.len() > 0xffff {
             self.overflowed = true;
-            return *self.memo.get(&Pat::NotAllowed).unwrap_or(&PatId(0));
+            return PAT_NOT_ALLOWED;
         }
         if let Some(id) = self.memo.get(&p) {
             *id
@@ -248,15 +262,15 @@ impl SchemaBuilder {
     }
 
     fn empty(&mut self) -> PatId {
-        self.push(Pat::Empty)
+        PAT_EMPTY
     }
 
     fn text(&mut self) -> PatId {
-        self.push(Pat::Text)
+        PAT_TEXT
     }
 
     fn not_allowed(&mut self) -> PatId {
-        self.push(Pat::NotAllowed)
+        PAT_NOT_ALLOWED
     }
 
     fn attribute(&mut self, name: model::NameClass, p: PatId) -> PatId {
@@ -356,9 +370,7 @@ impl Schema {
     fn push(&self, p: Pat) -> PatId {
         let mut inner = self.inner.borrow_mut();
         if inner.patterns.len() > 0xffff {
-            // Gracefully degrade: treat as not-allowed rather than panicking.
-            // The NotAllowed sentinel is always at index 0 or exists in the memo.
-            return *inner.memo.get(&Pat::NotAllowed).unwrap_or(&PatId(0));
+            return PAT_NOT_ALLOWED;
         }
         if let Some(id) = inner.memo.get(&p) {
             *id
@@ -487,13 +499,13 @@ impl Schema {
     }
 
     pub fn empty(&self) -> PatId {
-        self.push(Pat::Empty)
+        PAT_EMPTY
     }
     pub fn text(&self) -> PatId {
-        self.push(Pat::Text)
+        PAT_TEXT
     }
     pub fn not_allowed(&self) -> PatId {
-        self.push(Pat::NotAllowed)
+        PAT_NOT_ALLOWED
     }
     pub fn one_or_more(&self, pattern: PatId) -> PatId {
         let p = self.patt(pattern);
@@ -1037,7 +1049,14 @@ impl<'a> Validator<'a> {
                 Pat::Datatype(dt) => ("Datatype", describe_datatype(dt)),
                 Pat::DatatypeValue(dt) => ("DatatypeValue", describe_datatype_value(dt)),
                 Pat::DatatypeExcept(dt, _) => ("DatatypeExcept", describe_datatype(dt)),
-                Pat::Text => ("Text", "text".to_string()),
+                Pat::Text => {
+                    // The Text sentinel is always pre-populated; only report it
+                    // if the schema actually references it (has source spans).
+                    if !inner.span_map.contains_key(&(i as u16)) {
+                        continue;
+                    }
+                    ("Text", "text".to_string())
+                }
                 _ => continue,
             };
             let spans = inner.span_map.get(&(i as u16)).cloned().unwrap_or_default();

@@ -1,28 +1,210 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+<grammar xmlns="http://relaxng.org/ns/structure/1.0"
+         xmlns:app="http://example.com/app"
+         ns="http://example.com/ns"
+         datatypeLibrary="http://www.w3.org/2001/XMLSchema-datatypes">
   <start>
-    <element name="catalog">
-      <attribute name="version"><text/></attribute>
+    <element name="document">
+      <attribute name="version">
+        <choice>
+          <value>1.0</value>
+          <value>2.0</value>
+        </choice>
+      </attribute>
+      <optional>
+        <attribute name="app:generator"><text/></attribute>
+      </optional>
+      <ref name="metadata"/>
+      <ref name="body"/>
+    </element>
+  </start>
+
+  <define name="metadata">
+    <element name="metadata">
+      <element name="title">
+        <data type="token">
+          <param name="minLength">1</param>
+          <param name="maxLength">200</param>
+        </data>
+      </element>
+      <element name="created"><data type="date"/></element>
+      <optional><element name="modified"><data type="dateTime"/></element></optional>
+      <optional><element name="revision"><data type="positiveInteger"/></element></optional>
+      <optional>
+        <element name="score">
+          <data type="decimal">
+            <param name="fractionDigits">2</param>
+          </data>
+        </element>
+      </optional>
+      <optional>
+        <element name="tags">
+          <list><oneOrMore><data type="token"/></oneOrMore></list>
+        </element>
+      </optional>
       <oneOrMore>
-        <element name="item">
-          <attribute name="id"><text/></attribute>
-          <attribute name="type"><text/></attribute>
-          <attribute name="category"><text/></attribute>
-          <element name="name"><text/></element>
-          <optional>
-            <element name="description"><text/></element>
-          </optional>
-          <zeroOrMore>
-            <choice>
-              <element name="tag"><text/></element>
-              <element name="property">
-                <attribute name="key"><text/></attribute>
-                <text/>
-              </element>
-            </choice>
-          </zeroOrMore>
+        <element name="author">
+          <attribute name="email">
+            <data type="string">
+              <param name="pattern">.+@.+\..+</param>
+            </data>
+          </attribute>
+          <attribute name="active"><data type="boolean"/></attribute>
+          <text/>
         </element>
       </oneOrMore>
     </element>
-  </start>
+  </define>
+
+  <define name="body">
+    <element name="body">
+      <oneOrMore><ref name="section"/></oneOrMore>
+    </element>
+  </define>
+
+  <define name="section">
+    <element name="section">
+      <attribute name="id"><data type="ID"/></attribute>
+      <optional>
+        <attribute name="priority">
+          <data type="integer">
+            <param name="minInclusive">1</param>
+            <param name="maxInclusive">10</param>
+          </data>
+        </attribute>
+      </optional>
+      <element name="heading">
+        <mixed>
+          <zeroOrMore><element name="em"><text/></element></zeroOrMore>
+        </mixed>
+      </element>
+      <zeroOrMore><ref name="content-block"/></zeroOrMore>
+      <zeroOrMore><ref name="section"/></zeroOrMore>
+    </element>
+  </define>
+
+  <define name="content-block">
+    <choice>
+      <ref name="paragraph"/>
+      <ref name="table"/>
+      <ref name="code-block"/>
+      <ref name="figure"/>
+      <ref name="data-list"/>
+    </choice>
+  </define>
+
+  <define name="paragraph">
+    <element name="p">
+      <mixed>
+        <zeroOrMore>
+          <choice>
+            <ref name="inline-element"/>
+            <element name="br"><empty/></element>
+          </choice>
+        </zeroOrMore>
+      </mixed>
+    </element>
+  </define>
+
+  <define name="inline-element">
+    <choice>
+      <element name="strong">
+        <mixed><zeroOrMore><ref name="inline-element"/></zeroOrMore></mixed>
+      </element>
+      <element name="em">
+        <mixed><zeroOrMore><ref name="inline-element"/></zeroOrMore></mixed>
+      </element>
+      <element name="code"><text/></element>
+      <element name="a">
+        <attribute name="href"><data type="anyURI"/></attribute>
+        <optional><attribute name="title"><text/></attribute></optional>
+        <mixed><zeroOrMore><ref name="inline-element"/></zeroOrMore></mixed>
+      </element>
+      <element name="span">
+        <attribute name="class"><data type="token"/></attribute>
+        <mixed><zeroOrMore><ref name="inline-element"/></zeroOrMore></mixed>
+      </element>
+    </choice>
+  </define>
+
+  <define name="table">
+    <element name="table">
+      <optional><attribute name="border"><data type="nonNegativeInteger"/></attribute></optional>
+      <optional><element name="caption"><text/></element></optional>
+      <element name="thead">
+        <oneOrMore><ref name="table-row"/></oneOrMore>
+      </element>
+      <element name="tbody">
+        <oneOrMore><ref name="table-row"/></oneOrMore>
+      </element>
+    </element>
+  </define>
+
+  <define name="table-row">
+    <element name="tr">
+      <oneOrMore>
+        <choice>
+          <element name="th">
+            <optional><attribute name="colspan"><data type="positiveInteger"/></attribute></optional>
+            <optional><attribute name="rowspan"><data type="positiveInteger"/></attribute></optional>
+            <mixed><zeroOrMore><ref name="inline-element"/></zeroOrMore></mixed>
+          </element>
+          <element name="td">
+            <optional><attribute name="colspan"><data type="positiveInteger"/></attribute></optional>
+            <optional><attribute name="rowspan"><data type="positiveInteger"/></attribute></optional>
+            <mixed><zeroOrMore><ref name="inline-element"/></zeroOrMore></mixed>
+          </element>
+        </choice>
+      </oneOrMore>
+    </element>
+  </define>
+
+  <define name="code-block">
+    <element name="pre">
+      <attribute name="language">
+        <choice>
+          <value>rust</value>
+          <value>python</value>
+          <value>javascript</value>
+          <value>xml</value>
+          <value>json</value>
+          <value>sql</value>
+        </choice>
+      </attribute>
+      <optional><attribute name="line-numbers"><data type="boolean"/></attribute></optional>
+      <text/>
+    </element>
+  </define>
+
+  <define name="figure">
+    <element name="figure">
+      <element name="img">
+        <attribute name="src"><data type="anyURI"/></attribute>
+        <attribute name="alt"><text/></attribute>
+        <optional><attribute name="width"><data type="nonNegativeInteger"/></attribute></optional>
+        <optional><attribute name="height"><data type="nonNegativeInteger"/></attribute></optional>
+        <empty/>
+      </element>
+      <optional>
+        <element name="figcaption">
+          <mixed><zeroOrMore><ref name="inline-element"/></zeroOrMore></mixed>
+        </element>
+      </optional>
+    </element>
+  </define>
+
+  <define name="data-list">
+    <element name="dl">
+      <oneOrMore>
+        <group>
+          <element name="dt">
+            <mixed><zeroOrMore><ref name="inline-element"/></zeroOrMore></mixed>
+          </element>
+          <element name="dd">
+            <mixed><zeroOrMore><ref name="inline-element"/></zeroOrMore></mixed>
+          </element>
+        </group>
+      </oneOrMore>
+    </element>
+  </define>
 </grammar>

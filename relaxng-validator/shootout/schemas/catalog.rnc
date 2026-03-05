@@ -1,15 +1,102 @@
-start = element catalog {
-    attribute version { text },
-    element item {
-        attribute id { text },
-        attribute type { text },
-        attribute category { text },
-        element name { text },
-        element description { text }?,
-        (element tag { text }
-         | element property {
-             attribute key { text },
-             text
-           })*
+namespace app = "http://example.com/app"
+default namespace = "http://example.com/ns"
+
+start = element document {
+    attribute version { "1.0" | "2.0" },
+    attribute app:generator { text }?,
+    metadata,
+    body
+}
+
+metadata = element metadata {
+    element title { xsd:token { minLength = "1" maxLength = "200" } },
+    element created { xsd:date },
+    element modified { xsd:dateTime }?,
+    element revision { xsd:positiveInteger }?,
+    element score { xsd:decimal { fractionDigits = "2" } }?,
+    element tags { list { xsd:token+ } }?,
+    element author {
+        attribute email { xsd:string { pattern = ".+@.+\..+" } },
+        attribute active { xsd:boolean },
+        text
     }+
+}
+
+body = element body {
+    section+
+}
+
+section = element section {
+    attribute id { xsd:ID },
+    attribute priority { xsd:integer { minInclusive = "1" maxInclusive = "10" } }?,
+    element heading { mixed { element em { text }* } },
+    content-block*,
+    section*
+}
+
+content-block = paragraph | table | code-block | figure | data-list
+
+paragraph = element p {
+    mixed {
+        (inline-element | element br { empty })*
+    }
+}
+
+inline-element =
+    element strong { mixed { inline-element* } }
+  | element em { mixed { inline-element* } }
+  | element code { text }
+  | element a {
+        attribute href { xsd:anyURI },
+        attribute title { text }?,
+        mixed { inline-element* }
+    }
+  | element span {
+        attribute class { xsd:token },
+        mixed { inline-element* }
+    }
+
+table = element table {
+    attribute border { xsd:nonNegativeInteger }?,
+    element caption { text }?,
+    element thead {
+        table-row+
+    },
+    element tbody {
+        table-row+
+    }
+}
+
+table-row = element tr {
+    (element th {
+        attribute colspan { xsd:positiveInteger }?,
+        attribute rowspan { xsd:positiveInteger }?,
+        mixed { inline-element* }
+    } | element td {
+        attribute colspan { xsd:positiveInteger }?,
+        attribute rowspan { xsd:positiveInteger }?,
+        mixed { inline-element* }
+    })+
+}
+
+code-block = element pre {
+    attribute language { "rust" | "python" | "javascript" | "xml" | "json" | "sql" },
+    attribute line-numbers { xsd:boolean }?,
+    text
+}
+
+figure = element figure {
+    element img {
+        attribute src { xsd:anyURI },
+        attribute alt { text },
+        attribute width { xsd:nonNegativeInteger }?,
+        attribute height { xsd:nonNegativeInteger }?,
+        empty
+    },
+    element figcaption { mixed { inline-element* } }?
+}
+
+data-list = element dl {
+    (element dt { mixed { inline-element* } },
+     element dd { mixed { inline-element* } })+
 }

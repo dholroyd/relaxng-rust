@@ -781,9 +781,14 @@ struct Attr<'a> {
 fn describe_nameclass(nc: &NameClass, desc: &mut String) {
     match nc {
         NameClass::Named {
-            namespace_uri: _,
+            namespace_uri,
             name,
         } => {
+            if !namespace_uri.is_empty() {
+                desc.push('{');
+                desc.push_str(namespace_uri);
+                desc.push('}');
+            }
             desc.push_str(name);
         }
         NameClass::NsName {
@@ -2796,6 +2801,105 @@ mod tests {
         report1.merge(&report2);
         // After merging, more patterns should be covered
         assert!(report1.covered_count() > before);
+    }
+
+    #[test]
+    fn default_namespace_compact_syntax() {
+        // default namespace declaration must apply to unqualified element names
+        let schema = "default namespace = \"urn:example:books\" \
+                      start = element catalog { \
+                          element book { \
+                              element title { text }, \
+                              element author { text } \
+                          }+ \
+                      }";
+        let f = Fixture::correct(schema);
+
+        // Document with matching namespace should be valid
+        f.valid(
+            "<catalog xmlns=\"urn:example:books\">\
+               <book><title>T</title><author>A</author></book>\
+             </catalog>",
+        );
+
+        // Document with no namespace should be invalid
+        f.invalid("<catalog><book><title>T</title><author>A</author></book></catalog>");
+
+        // Document with wrong namespace should be invalid
+        f.invalid(
+            "<catalog xmlns=\"urn:wrong\">\
+               <book><title>T</title><author>A</author></book>\
+             </catalog>",
+        );
+    }
+
+    #[test]
+    fn default_namespace_with_prefix_alias() {
+        // default namespace with prefix alias should set both the default and the prefix binding
+        let schema = "default namespace books = \"urn:example:books\" \
+                      start = element catalog { \
+                          element books:book { text } \
+                      }";
+        let f = Fixture::correct(schema);
+
+        // Unqualified element uses default namespace; prefixed element uses same namespace
+        f.valid(
+            "<catalog xmlns=\"urn:example:books\">\
+               <book>text</book>\
+             </catalog>",
+        );
+
+        // No namespace should be invalid
+        f.invalid("<catalog><book>text</book></catalog>");
+    }
+
+    #[test]
+    fn error_message_includes_namespace() {
+        let schema = "namespace foo = \"urn:foo\" \
+                      start = element foo:root { \
+                          element foo:child { text } \
+                      }";
+        let f = Fixture::correct(schema);
+
+        let xml = "<root xmlns=\"urn:foo\"><wrong xmlns=\"urn:bar\">text</wrong></root>";
+        let reader = xmlparser::Tokenizer::from(xml);
+        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
+        let mut diagnostics = vec![];
+        while let Some(i) = v.validate_next() {
+            if let Err(err) = i {
+                let (_, d) = v.diagnostic("test.xml".to_string(), xml.to_string(), &err);
+                diagnostics.extend(d);
+            }
+        }
+        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("{urn:foo}child")),
+            "Error should mention namespace URI, got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn error_message_no_namespace_omits_braces() {
+        let schema = "start = element root { element child { text } }";
+        let f = Fixture::correct(schema);
+
+        let xml = "<root><wrong>text</wrong></root>";
+        let reader = xmlparser::Tokenizer::from(xml);
+        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
+        let mut diagnostics = vec![];
+        while let Some(i) = v.validate_next() {
+            if let Err(err) = i {
+                let (_, d) = v.diagnostic("test.xml".to_string(), xml.to_string(), &err);
+                diagnostics.extend(d);
+            }
+        }
+        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("child") && !m.contains('{')),
+            "Error for no-namespace element should not have braces, got: {messages:?}"
+        );
     }
 
     #[test]

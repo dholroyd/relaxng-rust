@@ -347,6 +347,22 @@ impl<'a> Context<'a> {
         }
     }
 
+    fn set_default_namespace(&mut self, uri: String) {
+        match self {
+            Context::Root {
+                default_namespace, ..
+            }
+            | Context::Include {
+                default_namespace, ..
+            } => {
+                *default_namespace = uri;
+            }
+            _ => {
+                unreachable!("Not expecting to see namespace declarations in this context")
+            }
+        }
+    }
+
     fn declare_namespace(&mut self, prefix: String, uri: String) -> Result<(), RelaxError> {
         match self {
             Context::Root { namespaces, .. } | Context::Include { namespaces, .. } => {
@@ -1964,6 +1980,7 @@ impl<FS: Files> Compiler<FS> {
                         panic!("Can't inherit namespace {prefix:?} at top level, I think?")
                     }
                     NamespaceUriLiteral::Uri(uri) => {
+                        ctx.set_default_namespace(uri.as_string_value());
                         if let Some(p) = prefix {
                             ctx.declare_namespace(p.clone(), uri.as_string_value())
                         } else {

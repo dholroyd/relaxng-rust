@@ -71,9 +71,25 @@ pub enum Syntax {
     Xml,
     /// Use the RelaxNG 'compact' schema syntax
     Compact,
+    /// Auto-detect syntax from the file extension (`.rng` → XML, otherwise compact)
+    Auto,
 }
 
 impl Syntax {
+    fn resolve(&self, name: &Path) -> Syntax {
+        match self {
+            Syntax::Auto => {
+                if name.extension().and_then(|e| e.to_str()) == Some("rng") {
+                    Syntax::Xml
+                } else {
+                    Syntax::Compact
+                }
+            }
+            Syntax::Xml => Syntax::Xml,
+            Syntax::Compact => Syntax::Compact,
+        }
+    }
+
     fn parse(&self, file: &Arc<codemap::File>) -> Result<Schema, RelaxError> {
         match self {
             Syntax::Xml => relaxng_syntax::xml::parse(file.source()).map_err(|e| {
@@ -112,6 +128,7 @@ impl Syntax {
                 })?;
                 Ok(schema)
             }
+            Syntax::Auto => unreachable!("Auto syntax must be resolved before parsing"),
         }
     }
 }
@@ -686,7 +703,7 @@ pub struct Compiler<FS: Files> {
 }
 impl Default for Compiler<FsFiles> {
     fn default() -> Self {
-        Self::new(FsFiles, Syntax::Compact)
+        Self::new(FsFiles, Syntax::Auto)
     }
 }
 impl<FS: Files> Compiler<FS> {
@@ -1314,7 +1331,7 @@ impl<FS: Files> Compiler<FS> {
         let file = self
             .codemap
             .add_file(name.to_string_lossy().to_string(), data);
-        let schema = self.syntax.parse(&file)?;
+        let schema = self.syntax.resolve(name).parse(&file)?;
         let schema = Rc::new(schema);
         self.loaded
             .insert(name.to_path_buf(), (file.clone(), schema.clone()));

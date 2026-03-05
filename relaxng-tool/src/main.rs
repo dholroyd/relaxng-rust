@@ -1,5 +1,5 @@
 use codemap::CodeMap;
-use relaxng_model::Compiler;
+use relaxng_model::{Compiler, Syntax};
 use relaxng_validator::{CoverageReport, Validator};
 
 use std::fs::File;
@@ -10,7 +10,17 @@ use std::process::exit;
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
-enum Cli {
+struct Cli {
+    /// Schema syntax: auto, compact, xml (default: auto, detects from file extension)
+    #[structopt(long, default_value = "auto", possible_values = &["auto", "compact", "xml"])]
+    syntax: String,
+
+    #[structopt(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, StructOpt)]
+enum Command {
     /// Validate XML documents against a RELAX NG schema
     Validate { schema: PathBuf, xml: Vec<PathBuf> },
     /// Validate XML documents and report schema coverage
@@ -24,20 +34,34 @@ enum Cli {
     Lint { schema: PathBuf },
 }
 
-fn main() {
-    match Cli::from_args() {
-        Cli::Validate { schema, xml } => validate(schema, xml),
-        Cli::Coverage {
-            schema,
-            xml,
-            format,
-        } => coverage(schema, xml, &format),
-        Cli::Lint { schema } => lint(schema),
+fn parse_syntax(s: &str) -> Syntax {
+    match s {
+        "xml" => Syntax::Xml,
+        "compact" => Syntax::Compact,
+        _ => Syntax::Auto,
     }
 }
 
-fn compile_schema(schema: &Path) -> relaxng_model::CompileResult {
-    let mut compiler = Compiler::default();
+fn main() {
+    let cli = Cli::from_args();
+    let syntax = parse_syntax(&cli.syntax);
+    match cli.command {
+        Command::Validate { schema, xml } => validate(syntax, schema, xml),
+        Command::Coverage {
+            schema,
+            xml,
+            format,
+        } => coverage(syntax, schema, xml, &format),
+        Command::Lint { schema } => lint(syntax, schema),
+    }
+}
+
+fn make_compiler(syntax: Syntax) -> Compiler<relaxng_model::FsFiles> {
+    Compiler::new(relaxng_model::FsFiles, syntax)
+}
+
+fn compile_schema(syntax: Syntax, schema: &Path) -> relaxng_model::CompileResult {
+    let mut compiler = make_compiler(syntax);
     match compiler.compile(schema) {
         Ok(m) => m,
         Err(err) => {
@@ -65,8 +89,8 @@ fn run_validation<'a>(v: &mut Validator<'a>, xml: &Path, doc: String) {
     }
 }
 
-fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
-    let result = compile_schema(&schema);
+fn validate(syntax: Syntax, schema: PathBuf, xmls: Vec<PathBuf>) {
+    let result = compile_schema(syntax, &schema);
     let model = result.start;
     for xml in &xmls {
         let mut f = File::open(xml).expect("open example xml");
@@ -80,8 +104,8 @@ fn validate(schema: PathBuf, xmls: Vec<PathBuf>) {
     }
 }
 
-fn coverage(schema: PathBuf, xmls: Vec<PathBuf>, format: &str) {
-    let mut compiler = Compiler::default();
+fn coverage(syntax: Syntax, schema: PathBuf, xmls: Vec<PathBuf>, format: &str) {
+    let mut compiler = make_compiler(syntax);
     let result = match compiler.compile(&schema) {
         Ok(m) => m,
         Err(err) => {
@@ -115,8 +139,8 @@ fn coverage(schema: PathBuf, xmls: Vec<PathBuf>, format: &str) {
     }
 }
 
-fn lint(schema: PathBuf) {
-    let mut compiler = Compiler::default();
+fn lint(syntax: Syntax, schema: PathBuf) {
+    let mut compiler = make_compiler(syntax);
     let result = match compiler.compile(&schema) {
         Ok(m) => m,
         Err(err) => {

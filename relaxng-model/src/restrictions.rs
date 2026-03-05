@@ -714,7 +714,7 @@ fn contains_text(pattern: &Pattern, seen_refs: &mut HashSet<usize>) -> bool {
 }
 
 /// Check if two name classes can accept the same name.
-fn name_class_overlaps(a: &NameClass, b: &NameClass) -> bool {
+pub(crate) fn name_class_overlaps(a: &NameClass, b: &NameClass) -> bool {
     match (a, b) {
         (
             NameClass::Named {

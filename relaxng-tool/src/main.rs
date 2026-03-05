@@ -183,6 +183,44 @@ fn lint(schema: PathBuf) {
             }
             warning_count += 1;
         }
+
+        // Check for grammar ambiguity
+        let ambiguity_warnings = relaxng_model::ambiguity::check_ambiguity(rule.pattern());
+        for w in &ambiguity_warnings {
+            match &w.kind {
+                relaxng_model::ambiguity::AmbiguityKind::AmbiguousGrammar { ambiguous_pairs } => {
+                    for (span_a, span_b) in ambiguous_pairs {
+                        let mut spans = Vec::new();
+                        if let Some(s) = span_a {
+                            spans.push(codemap_diagnostic::SpanLabel {
+                                span: *s,
+                                style: codemap_diagnostic::SpanStyle::Primary,
+                                label: Some("this element".to_string()),
+                            });
+                        }
+                        if let Some(s) = span_b {
+                            spans.push(codemap_diagnostic::SpanLabel {
+                                span: *s,
+                                style: codemap_diagnostic::SpanStyle::Primary,
+                                label: Some("ambiguous with this element".to_string()),
+                            });
+                        }
+                        let d = codemap_diagnostic::Diagnostic {
+                            level: codemap_diagnostic::Level::Warning,
+                            message: "grammar is ambiguous: elements with overlapping names have ambiguous content models".to_string(),
+                            code: None,
+                            spans,
+                        };
+                        let mut emitter = codemap_diagnostic::Emitter::stderr(
+                            codemap_diagnostic::ColorConfig::Auto,
+                            Some(compiler.code_map()),
+                        );
+                        emitter.emit(&[d]);
+                        warning_count += 1;
+                    }
+                }
+            }
+        }
     }
 
     if warning_count == 0 {

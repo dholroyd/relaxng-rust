@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+pub mod ambiguity;
 pub mod datatype;
 pub mod lint;
 pub mod model;

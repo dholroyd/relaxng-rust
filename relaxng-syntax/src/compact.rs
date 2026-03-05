@@ -70,15 +70,68 @@ pub struct EscapeError {
     pub message: String,
 }
 
-/// Resolve `\x{N}` escape sequences per the compact syntax spec (section 2.4).
-///
-/// Call this on the input before parsing with [`schema()`].
+/// Resolve a single `\x{N}` escape sequence, returning the character and the
+/// byte length consumed from `input` (which must start with `\x`).
+fn resolve_one_escape(input: &str) -> Result<(char, usize), EscapeError> {
+    let bytes = input.as_bytes();
+    let hex_start = is_escape_at(bytes, 0).ok_or_else(|| EscapeError {
+        span: 0..input.len().min(2),
+        message: "not an escape sequence".into(),
+    })?;
+    let mut i = hex_start;
+    while i < bytes.len() && bytes[i] != b'}' {
+        if !bytes[i].is_ascii_hexdigit() {
+            return Err(EscapeError {
+                span: 0..i + 1,
+                message: format!(
+                    "invalid character '{}' in escape sequence",
+                    bytes[i] as char
+                ),
+            });
+        }
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return Err(EscapeError {
+            span: 0..i,
+            message: "unterminated escape sequence".into(),
+        });
+    }
+    let hex = &input[hex_start..i];
+    let end = i + 1; // include closing '}'
+    if hex.is_empty() {
+        return Err(EscapeError {
+            span: 0..end,
+            message: "empty escape sequence".into(),
+        });
+    }
+    let code = u32::from_str_radix(hex, 16).map_err(|_| EscapeError {
+        span: 0..end,
+        message: "escape value too large".into(),
+    })?;
+    let c = char::from_u32(code).ok_or_else(|| EscapeError {
+        span: 0..end,
+        message: format!("\\x{{{hex}}} is not a valid Unicode value"),
+    })?;
+    if !is_xml_char(c) {
+        return Err(EscapeError {
+            span: 0..end,
+            message: format!("\\x{{{hex}}} is not a valid XML character"),
+        });
+    }
+    Ok((c, end))
+}
+
+/// Resolve `\x{N}` escape sequences in a string.
 ///
 /// The escape format is `\x+{hex_digits}` where one or more `x` characters
 /// may appear. The hex value must be a valid XML 1.0 Char.
 pub fn resolve_escapes(input: &str) -> Result<Cow<'_, str>, EscapeError> {
+    resolve_escapes_inner(input, 0)
+}
+
+fn resolve_escapes_inner(input: &str, span_offset: usize) -> Result<Cow<'_, str>, EscapeError> {
     let bytes = input.as_bytes();
-    // Scan for the first escape sequence; if none, return borrowed input
     let first_escape = find_escape(bytes, 0);
     let Some(first_escape) = first_escape else {
         return Ok(Cow::Borrowed(input));
@@ -88,55 +141,89 @@ pub fn resolve_escapes(input: &str) -> Result<Cow<'_, str>, EscapeError> {
     let mut i = first_escape;
     while i < bytes.len() {
         if bytes[i] == b'\\' {
-            if let Some(hex_start) = is_escape_at(bytes, i) {
-                let start = i;
-                i = hex_start;
-                while i < bytes.len() && bytes[i] != b'}' {
-                    if !bytes[i].is_ascii_hexdigit() {
-                        return Err(EscapeError {
-                            span: start..i + 1,
-                            message: format!(
-                                "invalid character '{}' in escape sequence",
-                                bytes[i] as char
-                            ),
-                        });
-                    }
-                    i += 1;
-                }
-                if i >= bytes.len() {
-                    return Err(EscapeError {
-                        span: start..i,
-                        message: "unterminated escape sequence".into(),
-                    });
-                }
-                let hex = &input[hex_start..i];
-                let end = i + 1; // include closing '}'
-                i = end;
-                if hex.is_empty() {
-                    return Err(EscapeError {
-                        span: start..end,
-                        message: "empty escape sequence".into(),
-                    });
-                }
-                let code = u32::from_str_radix(hex, 16).map_err(|_| EscapeError {
-                    span: start..end,
-                    message: "escape value too large".into(),
+            if is_escape_at(bytes, i).is_some() {
+                let (c, len) = resolve_one_escape(&input[i..]).map_err(|mut e| {
+                    e.span.start += i + span_offset;
+                    e.span.end += i + span_offset;
+                    e
                 })?;
-                let c = char::from_u32(code).ok_or_else(|| EscapeError {
-                    span: start..end,
-                    message: format!("\\x{{{hex}}} is not a valid Unicode value"),
-                })?;
-                if !is_xml_char(c) {
-                    return Err(EscapeError {
-                        span: start..end,
-                        message: format!("\\x{{{hex}}} is not a valid XML character"),
-                    });
-                }
                 result.push(c);
+                i += len;
                 continue;
             }
             result.push('\\');
             i += 1;
+        } else {
+            let c = input[i..].chars().next().unwrap();
+            result.push(c);
+            i += c.len_utf8();
+        }
+    }
+    Ok(Cow::Owned(result))
+}
+
+/// Resolve `\x{N}` escape sequences per the compact syntax spec (section 2.4),
+/// skipping the bodies of string literals so that escapes producing control
+/// characters (like `\x{a}`) do not break the parser.
+///
+/// Call this on the input before parsing with [`schema()`].
+/// Escapes inside string literals are resolved later by the parser.
+pub fn resolve_escapes_outside_literals(input: &str) -> Result<Cow<'_, str>, EscapeError> {
+    let bytes = input.as_bytes();
+    // Quick check: if no escapes at all, return borrowed
+    if find_escape(bytes, 0).is_none() {
+        return Ok(Cow::Borrowed(input));
+    }
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Check for string literal delimiters and skip their bodies
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            // Check for triple-quoted strings
+            if i + 2 < bytes.len() && bytes[i + 1] == quote && bytes[i + 2] == quote {
+                let delim = &bytes[i..i + 3];
+                result.push_str(&input[i..i + 3]);
+                i += 3;
+                // Copy body verbatim until closing triple quote
+                while i < bytes.len() {
+                    if i + 2 < bytes.len() && &bytes[i..i + 3] == delim {
+                        result.push_str(&input[i..i + 3]);
+                        i += 3;
+                        break;
+                    }
+                    let c = input[i..].chars().next().unwrap();
+                    result.push(c);
+                    i += c.len_utf8();
+                }
+            } else {
+                // Single-quoted string: copy until matching quote or newline
+                result.push(quote as char);
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote && bytes[i] != b'\n' {
+                    let c = input[i..].chars().next().unwrap();
+                    result.push(c);
+                    i += c.len_utf8();
+                }
+                if i < bytes.len() && bytes[i] == quote {
+                    result.push(quote as char);
+                    i += 1;
+                }
+            }
+        } else if bytes[i] == b'#' {
+            // Comment: copy verbatim until end of line
+            while i < bytes.len() && bytes[i] != b'\n' {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+        } else if bytes[i] == b'\\' && is_escape_at(bytes, i).is_some() {
+            let (c, len) = resolve_one_escape(&input[i..]).map_err(|mut e| {
+                e.span.start += i;
+                e.span.end += i;
+                e
+            })?;
+            result.push(c);
+            i += len;
         } else {
             let c = input[i..].chars().next().unwrap();
             result.push(c);
@@ -343,10 +430,19 @@ fn literal_segment(input: Span) -> IResult<Span, LiteralSegment> {
     ))
     .parse(input)?;
 
+    let body_offset = body.location_offset();
+    let body_str = body.fragment();
+    let resolved = resolve_escapes_inner(body_str, body_offset).map_err(|_| {
+        nom::Err::Failure(Error {
+            input: body,
+            code: ErrorKind::Char,
+        })
+    })?;
+
     IResult::Ok((
         input,
         LiteralSegment {
-            body: body.to_string(),
+            body: resolved.into_owned(),
         },
     ))
 }
@@ -2019,5 +2115,109 @@ mod test {
         let input = resolve_escapes(r"element \x{66}\x{6f}\x{6f} { empty }").unwrap();
         let result = schema(LocatedSpan::new(&input));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn escape_outside_literals_skips_strings() {
+        // \x{a} in a double-quoted string should be left as-is
+        let input = r#"element foo { text "\x{a}" }"#;
+        let result = resolve_escapes_outside_literals(input).unwrap();
+        assert!(
+            result.contains(r"\x{a}"),
+            "escape in string should be preserved"
+        );
+    }
+
+    #[test]
+    fn escape_outside_literals_resolves_outside() {
+        // \x{66} outside a string should be resolved
+        let input = r"element \x{66}oo { empty }";
+        let result = resolve_escapes_outside_literals(input).unwrap();
+        assert_eq!(result.as_ref(), "element foo { empty }");
+    }
+
+    #[test]
+    fn escape_outside_literals_skips_single_quoted() {
+        let input = r"element foo { text '\x{a}' }";
+        let result = resolve_escapes_outside_literals(input).unwrap();
+        assert!(result.contains(r"\x{a}"));
+    }
+
+    #[test]
+    fn escape_outside_literals_skips_triple_double() {
+        let input = r#"element foo { text """\x{a}""" }"#;
+        let result = resolve_escapes_outside_literals(input).unwrap();
+        assert!(result.contains(r"\x{a}"));
+    }
+
+    #[test]
+    fn escape_outside_literals_skips_triple_single() {
+        let input = r"element foo { text '''\x{a}''' }";
+        let result = resolve_escapes_outside_literals(input).unwrap();
+        assert!(result.contains(r"\x{a}"));
+    }
+
+    #[test]
+    fn escape_outside_literals_skips_comments() {
+        let input = "element foo { empty } # \\x{a} in comment\n";
+        let result = resolve_escapes_outside_literals(input).unwrap();
+        assert!(result.contains(r"\x{a}"));
+    }
+
+    #[test]
+    fn escape_newline_in_string_literal() {
+        // \x{a} (newline) in a string literal should parse successfully
+        // and produce the newline character in the literal value
+        let input =
+            resolve_escapes_outside_literals(r#"element foo { attribute bar { "\x{a}" } }"#)
+                .unwrap();
+        let result = schema(LocatedSpan::new(input.as_ref()));
+        assert!(
+            result.is_ok(),
+            "schema with \\x{{a}} in string should parse: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn escape_newline_in_triple_quoted_string() {
+        let input =
+            resolve_escapes_outside_literals(r#"element foo { attribute bar { """\x{a}""" } }"#)
+                .unwrap();
+        let result = schema(LocatedSpan::new(input.as_ref()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn escape_tab_in_string_literal() {
+        // \x{9} (tab) should also work in string literals
+        let input =
+            resolve_escapes_outside_literals(r#"element foo { attribute bar { "\x{9}" } }"#)
+                .unwrap();
+        let result = schema(LocatedSpan::new(input.as_ref()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn literal_segment_resolves_escape() {
+        // literal_segment should resolve \x{41} to 'A'
+        let input = LocatedSpan::new(r#""\x{41}""#);
+        let (_, seg) = literal_segment(input).unwrap();
+        assert_eq!(seg.body, "A");
+    }
+
+    #[test]
+    fn literal_segment_resolves_newline_escape() {
+        // \x{a} should produce a newline in the literal body
+        let input = LocatedSpan::new(r#""hello\x{a}world""#);
+        let (_, seg) = literal_segment(input).unwrap();
+        assert_eq!(seg.body, "hello\nworld");
+    }
+
+    #[test]
+    fn literal_segment_mixed_text_and_escapes() {
+        let input = LocatedSpan::new(r#""a\x{62}c""#);
+        let (_, seg) = literal_segment(input).unwrap();
+        assert_eq!(seg.body, "abc");
     }
 }

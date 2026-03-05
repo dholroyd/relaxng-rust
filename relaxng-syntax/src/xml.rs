@@ -23,8 +23,9 @@ pub fn parse(text: &str) -> Result<Schema> {
             .take(e.pos().row as _)
             .fold((0, 0), |(acc, _), line| (acc + line.len(), line.len()));
 
-        let start = off + e.pos().col as usize;
-        let end = len - e.pos().col as usize;
+        let col = e.pos().col as usize;
+        let start = off + col;
+        let end = if col <= len { len - col } else { 0 };
         Error::Xml(start..end, e.to_string())
     })?;
     Ok(Schema {
@@ -791,7 +792,7 @@ fn resolve(result: &mut Option<PathBuf>, new: &str) {
     } else {
         match *result {
             Some(ref mut old) => {
-                if !old.to_str().unwrap().ends_with("/") {
+                if !new.is_empty() && !old.as_os_str().as_encoded_bytes().ends_with(b"/") {
                     old.pop();
                 }
                 old.push(new);

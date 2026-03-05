@@ -539,8 +539,11 @@ impl<'a> Context<'a> {
                 {
                     let mut overrides = overrides.borrow_mut();
                     if overrides.contains_key(id) {
-                        // TODO: return Err, not panic
-                        panic!("TODO: redefined override {id:?}")
+                        return Err(RelaxError::DuplicateDefinition {
+                            name: id.to_string(),
+                            duplicate: *rule.span(),
+                            original: overrides[id].0,
+                        });
                     } else {
                         overrides.insert(id.to_string(), (*rule.span(), false));
                         parant_of_include.define(id, rule)?;
@@ -1440,10 +1443,9 @@ impl<FS: Files> Compiler<FS> {
         ctx: &mut Context,
         inc: &types::Include,
     ) -> Result<(), RelaxError> {
-        let path = Path::new(ctx.file().name())
-            .parent()
-            .expect("TODO: no parent?")
-            .join(inc.uri.as_string_value());
+        let file = ctx.file();
+        let parent_dir = Path::new(file.name()).parent().unwrap_or(Path::new("."));
+        let path = parent_dir.join(inc.uri.as_string_value());
         let span = ctx
             .file()
             .span
@@ -1799,10 +1801,9 @@ impl<FS: Files> Compiler<FS> {
                 Some(ns.to_string())
             }
         });
-        let path = Path::new(ctx.file().name())
-            .parent()
-            .expect("TODO: no parent?")
-            .join(external.0.as_string_value());
+        let file = ctx.file();
+        let parent_dir = Path::new(file.name()).parent().unwrap_or(Path::new("."));
+        let path = parent_dir.join(external.0.as_string_value());
         let span = ctx.convert_span(&(external.0).0);
         let (file, s) = self
             .get_schema(&path)

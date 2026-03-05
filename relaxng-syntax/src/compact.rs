@@ -7,14 +7,14 @@ use nom::sequence::preceded;
 use nom::{
     AsChar, IResult,
     branch::alt,
-    bytes::complete::{is_not, tag, take_until},
+    bytes::complete::{is_not, tag, take, take_until},
     character::{
         complete::{char, multispace1},
         streaming::not_line_ending,
     },
     combinator::{all_consuming, map, not, opt, peek, recognize},
     error::ErrorKind,
-    multi::{fold_many0, fold_many1, many0, separated_list0},
+    multi::{fold_many0, fold_many1, separated_list0},
     sequence::delimited,
 };
 use nom::{Input, Parser};
@@ -162,77 +162,6 @@ fn resolve_escapes_inner(input: &str, span_offset: usize) -> Result<Cow<'_, str>
     Ok(Cow::Owned(result))
 }
 
-/// Resolve `\x{N}` escape sequences per the compact syntax spec (section 2.4),
-/// skipping the bodies of string literals so that escapes producing control
-/// characters (like `\x{a}`) do not break the parser.
-///
-/// Call this on the input before parsing with [`schema()`].
-/// Escapes inside string literals are resolved later by the parser.
-pub fn resolve_escapes_outside_literals(input: &str) -> Result<Cow<'_, str>, EscapeError> {
-    let bytes = input.as_bytes();
-    // Quick check: if no escapes at all, return borrowed
-    if find_escape(bytes, 0).is_none() {
-        return Ok(Cow::Borrowed(input));
-    }
-    let mut result = String::with_capacity(input.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        // Check for string literal delimiters and skip their bodies
-        if bytes[i] == b'"' || bytes[i] == b'\'' {
-            let quote = bytes[i];
-            // Check for triple-quoted strings
-            if i + 2 < bytes.len() && bytes[i + 1] == quote && bytes[i + 2] == quote {
-                let delim = &bytes[i..i + 3];
-                result.push_str(&input[i..i + 3]);
-                i += 3;
-                // Copy body verbatim until closing triple quote
-                while i < bytes.len() {
-                    if i + 2 < bytes.len() && &bytes[i..i + 3] == delim {
-                        result.push_str(&input[i..i + 3]);
-                        i += 3;
-                        break;
-                    }
-                    let c = input[i..].chars().next().unwrap();
-                    result.push(c);
-                    i += c.len_utf8();
-                }
-            } else {
-                // Single-quoted string: copy until matching quote or newline
-                result.push(quote as char);
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote && bytes[i] != b'\n' {
-                    let c = input[i..].chars().next().unwrap();
-                    result.push(c);
-                    i += c.len_utf8();
-                }
-                if i < bytes.len() && bytes[i] == quote {
-                    result.push(quote as char);
-                    i += 1;
-                }
-            }
-        } else if bytes[i] == b'#' {
-            // Comment: copy verbatim until end of line
-            while i < bytes.len() && bytes[i] != b'\n' {
-                result.push(bytes[i] as char);
-                i += 1;
-            }
-        } else if bytes[i] == b'\\' && is_escape_at(bytes, i).is_some() {
-            let (c, len) = resolve_one_escape(&input[i..]).map_err(|mut e| {
-                e.span.start += i;
-                e.span.end += i;
-                e
-            })?;
-            result.push(c);
-            i += len;
-        } else {
-            let c = input[i..].chars().next().unwrap();
-            result.push(c);
-            i += c.len_utf8();
-        }
-    }
-    Ok(Cow::Owned(result))
-}
-
 /// If `bytes[pos]` is `\` followed by `x+{`, returns the byte index of the
 /// first hex digit (just after `{`). Otherwise returns `None`.
 fn is_escape_at(bytes: &[u8], pos: usize) -> Option<usize> {
@@ -268,6 +197,26 @@ fn is_xml_char(c: char) -> bool {
         '\u{E000}'..='\u{FFFD}' |
         '\u{10000}'..='\u{10FFFF}'
     )
+}
+
+/// Parse a `\x+{hex}` escape sequence and return the resolved character.
+fn escape_char(input: Span) -> IResult<Span, char> {
+    let frag = input.fragment();
+    let bytes = frag.as_bytes();
+    if bytes.is_empty() || bytes[0] != b'\\' || is_escape_at(bytes, 0).is_none() {
+        return Err(nom::Err::Error(Error {
+            input,
+            code: ErrorKind::Char,
+        }));
+    }
+    let (c, len) = resolve_one_escape(frag).map_err(|_| {
+        nom::Err::Failure(Error {
+            input,
+            code: ErrorKind::Char,
+        })
+    })?;
+    let (rest, _) = take(len).parse(input)?;
+    Ok((rest, c))
 }
 
 pub fn schema(input: Span) -> Result<Schema, nom::Err<Error<Span>>> {
@@ -457,27 +406,34 @@ fn span(start: LocatedSpan<&str>, end: LocatedSpan<&str>) -> Range<usize> {
 // identifier	  ::=  	(NCName - keyword)
 //                   | quotedIdentifier
 fn identifier(input: Span) -> IResult<Span, Identifier> {
-    let res = alt((
-        recognize((tag("\\"), keyword)),
-        recognize((not(peek(keyword)), nc_name)),
+    let (input, start) = position(input)?;
+    let (input, text) = alt((
+        map(recognize((tag("\\"), keyword)), |v: Span| v.to_string()),
+        map(preceded(not(peek(keyword)), nc_name), |name: NcName| name.1),
     ))
-    .parse(input);
-
-    res.map(|(input, v)| (input, Identifier(span(v, input), v.to_string())))
+    .parse(input)?;
+    let (input, end) = position(input)?;
+    Ok((input, Identifier(span(start, end), text)))
 }
 
 pub fn nc_name(input: Span) -> IResult<Span, NcName> {
-    let parse = (
-        position,
-        recognize((nc_name_start_char, many0(nc_name_char))),
-        position,
-    );
-
-    let mut parser = map(parse, |(start, v, end)| {
-        NcName(span(start, end), v.fragment().to_string())
-    });
-
-    parser.parse(input)
+    let (mut input, start) = position(input)?;
+    let (rest, first) = alt((nc_name_start_char, escape_char)).parse(input)?;
+    input = rest;
+    let mut name = String::new();
+    name.push(first);
+    loop {
+        match alt((nc_name_char, escape_char)).parse(input) {
+            Ok((rest, c)) => {
+                name.push(c);
+                input = rest;
+            }
+            Err(nom::Err::Error(_)) => break,
+            Err(e) => return Err(e),
+        }
+    }
+    let (input, end) = position(input)?;
+    Ok((input, NcName(span(start, end), name)))
 }
 
 fn nc_name_start_char(input: Span) -> IResult<Span, char> {
@@ -2115,68 +2071,19 @@ mod test {
     }
 
     #[test]
-    fn escape_in_schema() {
+    fn escape_in_element_name() {
         // element \x{66}\x{6f}\x{6f} { empty } -- from the spec
-        let input = resolve_escapes(r"element \x{66}\x{6f}\x{6f} { empty }").unwrap();
-        let result = schema(LocatedSpan::new(&input));
+        // Escapes in NCName position are resolved by the parser directly
+        let input = LocatedSpan::new(r"element \x{66}\x{6f}\x{6f} { empty }");
+        let result = schema(input);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn escape_outside_literals_skips_strings() {
-        // \x{a} in a double-quoted string should be left as-is
-        let input = r#"element foo { text "\x{a}" }"#;
-        let result = resolve_escapes_outside_literals(input).unwrap();
-        assert!(
-            result.contains(r"\x{a}"),
-            "escape in string should be preserved"
-        );
-    }
-
-    #[test]
-    fn escape_outside_literals_resolves_outside() {
-        // \x{66} outside a string should be resolved
-        let input = r"element \x{66}oo { empty }";
-        let result = resolve_escapes_outside_literals(input).unwrap();
-        assert_eq!(result.as_ref(), "element foo { empty }");
-    }
-
-    #[test]
-    fn escape_outside_literals_skips_single_quoted() {
-        let input = r"element foo { text '\x{a}' }";
-        let result = resolve_escapes_outside_literals(input).unwrap();
-        assert!(result.contains(r"\x{a}"));
-    }
-
-    #[test]
-    fn escape_outside_literals_skips_triple_double() {
-        let input = r#"element foo { text """\x{a}""" }"#;
-        let result = resolve_escapes_outside_literals(input).unwrap();
-        assert!(result.contains(r"\x{a}"));
-    }
-
-    #[test]
-    fn escape_outside_literals_skips_triple_single() {
-        let input = r"element foo { text '''\x{a}''' }";
-        let result = resolve_escapes_outside_literals(input).unwrap();
-        assert!(result.contains(r"\x{a}"));
-    }
-
-    #[test]
-    fn escape_outside_literals_skips_comments() {
-        let input = "element foo { empty } # \\x{a} in comment\n";
-        let result = resolve_escapes_outside_literals(input).unwrap();
-        assert!(result.contains(r"\x{a}"));
     }
 
     #[test]
     fn escape_newline_in_string_literal() {
         // \x{a} (newline) in a string literal should parse successfully
-        // and produce the newline character in the literal value
-        let input =
-            resolve_escapes_outside_literals(r#"element foo { attribute bar { "\x{a}" } }"#)
-                .unwrap();
-        let result = schema(LocatedSpan::new(input.as_ref()));
+        let input = LocatedSpan::new(r#"element foo { attribute bar { "\x{a}" } }"#);
+        let result = schema(input);
         assert!(
             result.is_ok(),
             "schema with \\x{{a}} in string should parse: {:?}",
@@ -2186,26 +2093,20 @@ mod test {
 
     #[test]
     fn escape_newline_in_triple_quoted_string() {
-        let input =
-            resolve_escapes_outside_literals(r#"element foo { attribute bar { """\x{a}""" } }"#)
-                .unwrap();
-        let result = schema(LocatedSpan::new(input.as_ref()));
+        let input = LocatedSpan::new(r#"element foo { attribute bar { """\x{a}""" } }"#);
+        let result = schema(input);
         assert!(result.is_ok());
     }
 
     #[test]
     fn escape_tab_in_string_literal() {
-        // \x{9} (tab) should also work in string literals
-        let input =
-            resolve_escapes_outside_literals(r#"element foo { attribute bar { "\x{9}" } }"#)
-                .unwrap();
-        let result = schema(LocatedSpan::new(input.as_ref()));
+        let input = LocatedSpan::new(r#"element foo { attribute bar { "\x{9}" } }"#);
+        let result = schema(input);
         assert!(result.is_ok());
     }
 
     #[test]
     fn literal_segment_resolves_escape() {
-        // literal_segment should resolve \x{41} to 'A'
         let input = LocatedSpan::new(r#""\x{41}""#);
         let (_, seg) = literal_segment(input).unwrap();
         assert_eq!(seg.body, "A");
@@ -2224,5 +2125,21 @@ mod test {
         let input = LocatedSpan::new(r#""a\x{62}c""#);
         let (_, seg) = literal_segment(input).unwrap();
         assert_eq!(seg.body, "abc");
+    }
+
+    #[test]
+    fn escape_char_in_ncname() {
+        // \x{41} should resolve to 'A' and be usable in an NCName
+        let input = LocatedSpan::new(r"\x{41}bc");
+        let (rest, name) = nc_name(input).unwrap();
+        assert_eq!(name.1, "Abc");
+        assert_eq!(*rest.fragment(), "");
+    }
+
+    #[test]
+    fn escape_char_mid_ncname() {
+        let input = LocatedSpan::new(r"a\x{62}c");
+        let (_, name) = nc_name(input).unwrap();
+        assert_eq!(name.1, "abc");
     }
 }

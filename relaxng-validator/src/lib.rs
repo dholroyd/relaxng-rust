@@ -119,8 +119,10 @@ struct Schema {
     coverage: Option<Box<[u64]>>,
     compile_time_count: u16,
     /// Namespace context for QName resolution during text_deriv.
-    /// Set by the validator before calls to text_deriv.
+    /// Lazily populated: rebuilt on demand when `ns_context_dirty` is set.
     ns_context: Option<NsContext>,
+    /// When true, `ns_context` needs rebuilding before use.
+    ns_context_dirty: bool,
 }
 
 /// Captured namespace context for resolving prefixes in document text.
@@ -1171,6 +1173,18 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Ensure ns_context is up to date if it has been invalidated.
+    fn ensure_ns_context(&mut self) {
+        if self.schema.ns_context_dirty {
+            self.schema.ns_context = if self.stack.elements.is_empty() {
+                None
+            } else {
+                Some(self.stack.capture_ns_context())
+            };
+            self.schema.ns_context_dirty = false;
+        }
+    }
+
     /// Flush any buffered text by applying text_deriv.
     /// Returns true if the result was NotAllowed.
     fn flush_text(&mut self) -> bool {
@@ -1191,11 +1205,7 @@ impl<'a> Validator<'a> {
     }
 
     fn validate(&mut self, evt: Token<'a>) -> Result<(), ValidatorError<'a>> {
-        self.schema.ns_context = if self.stack.elements.is_empty() {
-            None
-        } else {
-            Some(self.stack.capture_ns_context())
-        };
+        self.ensure_ns_context();
         let new = match evt {
             Token::EmptyDtd { .. }
             | Token::Comment { .. }
@@ -1237,6 +1247,11 @@ impl<'a> Validator<'a> {
                 value,
                 span,
             } => {
+                if prefix.as_str() == "xmlns"
+                    || (prefix.as_str() == "" && local.as_str() == "xmlns")
+                {
+                    self.schema.ns_context_dirty = true;
+                }
                 self.stack.add_attr(prefix, local, value, span);
                 // does not change current_step state
                 return Ok(());
@@ -1269,7 +1284,9 @@ impl<'a> Validator<'a> {
                             self.current_step
                         };
                         let result = Self::end_tag_deriv(next_pid, &mut self.schema);
-                        self.stack.pop();
+                        if self.stack.pop_has_namespaces() {
+                            self.schema.ns_context_dirty = true;
+                        }
                         result
                     }
                     ElementEnd::Empty => {
@@ -1291,7 +1308,9 @@ impl<'a> Validator<'a> {
                         // to match the input '<foo/>' or '<foo></foo>'
                         let p = Self::text_deriv(next_id, &mut self.schema, "");
                         let result = Self::end_tag_deriv(p, &mut self.schema);
-                        self.stack.pop();
+                        if self.stack.pop_has_namespaces() {
+                            self.schema.ns_context_dirty = true;
+                        }
                         result
                     }
                 }
@@ -2331,8 +2350,10 @@ impl<'a> ElementStack<'a> {
             attributes: vec![],
         })
     }
-    fn pop(&mut self) {
-        self.elements.pop();
+    fn pop_has_namespaces(&mut self) -> bool {
+        self.elements
+            .pop()
+            .is_some_and(|e| !e.namespaces.is_empty())
     }
     fn add_attr(
         &mut self,

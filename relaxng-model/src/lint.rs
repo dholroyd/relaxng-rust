@@ -142,7 +142,7 @@ fn check_redundant_wrapping(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DefineRule, NameClass, PatRef};
+    use crate::model::{DefineRule, PatRef};
     use std::cell::RefCell;
     use std::rc::Rc;
 

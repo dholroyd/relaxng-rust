@@ -2384,6 +2384,32 @@ mod tests {
     }
 
     #[test]
+    fn ref_to_attributes_grouped_with_data() {
+        // Regression test: a ref to an attributes-only definition grouped with
+        // a data type should not trigger the section 7.2 StringSequence restriction.
+        // This mirrors the Atom RFC 4287 pattern: atomDateConstruct = atomCommonAttributes, xsd:dateTime
+        struct FS;
+        impl Files for FS {
+            fn load(&self, name: &Path) -> Result<String, RelaxError> {
+                let t = match name.to_str().unwrap() {
+                    "test.rnc" => {
+                        "
+                        start = element root { commonAttrs, xsd:dateTime }
+                        commonAttrs = attribute id { text }?, attribute class { text }?
+                        "
+                    }
+                    other => panic!("No {other:?}"),
+                };
+                Ok(t.to_string())
+            }
+        }
+        let mut c = Compiler::new(FS, Syntax::Compact);
+        c.compile(Path::new("test.rnc")).expect(
+            "schema with ref to attributes grouped with data type should compile without error",
+        );
+    }
+
+    #[test]
     fn all_definitions_reachable() {
         struct FS;
         impl Files for FS {

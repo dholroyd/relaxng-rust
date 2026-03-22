@@ -1,5 +1,5 @@
 use crate::model::{NameClass, Pattern};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Content type per RelaxNG spec section 7.2
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -242,7 +242,7 @@ impl std::fmt::Display for RestrictionKind {
 
 /// Check all section 7 restrictions on a compiled schema.
 pub fn check_restrictions(start: &Pattern) -> Result<(), RestrictionKind> {
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::new();
     walk(&mut seen, Flags::start(), start)?;
     Ok(())
 }
@@ -277,7 +277,7 @@ fn is_infinite_name_class(nc: &NameClass) -> bool {
 
 /// Main recursive walk. Returns the content type of the pattern.
 fn walk(
-    seen: &mut HashSet<usize>,
+    seen: &mut HashMap<usize, Option<ContentType>>,
     flags: Flags,
     pattern: &Pattern,
 ) -> Result<ContentType, RestrictionKind> {
@@ -313,19 +313,28 @@ fn walk(
         }
 
         Pattern::Ref(_, _, pat_ref) => {
-            // Refs are allowed in lists, attributes, and data/except — the spec says
-            // to check what the ref expands to, not reject refs outright.
-            // walk() follows the ref with the same flags, so forbidden content
-            // (element, text, list, etc.) will be caught in the expanded pattern.
             let ptr = pat_ref.0.as_ptr() as usize;
-            if !seen.contains(&ptr) {
-                seen.insert(ptr);
-                let borrowed = pat_ref.0.borrow();
-                if let Some(rule) = borrowed.as_ref() {
-                    walk(seen, flags, rule.pattern())?;
+            match seen.get(&ptr) {
+                Some(Some(ct)) => Ok(*ct),
+                Some(None) => {
+                    // Currently being computed — recursive reference.
+                    Ok(ContentType::Complex)
+                }
+                None => {
+                    // First visit: insert sentinel, walk, cache result.
+                    seen.insert(ptr, None);
+                    let ct = {
+                        let borrowed = pat_ref.0.borrow();
+                        if let Some(rule) = borrowed.as_ref() {
+                            walk(seen, flags, rule.pattern())?
+                        } else {
+                            ContentType::Empty
+                        }
+                    };
+                    seen.insert(ptr, Some(ct));
+                    Ok(ct)
                 }
             }
-            Ok(ContentType::Complex)
         }
 
         Pattern::Element(_, body, _, _) => {
@@ -495,7 +504,7 @@ fn walk(
 
 /// Walk a group or interleave, checking 7.2, 7.3, 7.4
 fn walk_group_or_interleave(
-    seen: &mut HashSet<usize>,
+    seen: &mut HashMap<usize, Option<ContentType>>,
     flags: Flags,
     children: &[Pattern],
     is_interleave: bool,

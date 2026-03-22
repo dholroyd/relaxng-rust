@@ -33,6 +33,7 @@ impl std::hash::Hash for FiniteF32 {
 pub enum XsdDatatypeValues {
     String(String),
     Token(String),
+    Name(String),
     QName(QNameVal),
 }
 
@@ -49,6 +50,10 @@ impl XsdDatatypeValues {
         match self {
             XsdDatatypeValues::String(s) => s == value,
             XsdDatatypeValues::Token(s) => s == &normalize_whitespace(value),
+            XsdDatatypeValues::Name(s) => {
+                let normalized = normalize_whitespace(value);
+                is_valid_name(&normalized) && s == &normalized
+            }
             XsdDatatypeValues::QName(v) => QNameVal::resolve(value, default_ns, lookup_ns)
                 .is_some_and(|resolved| &resolved == v),
         }
@@ -60,6 +65,10 @@ impl super::Datatype for XsdDatatypeValues {
         match self {
             XsdDatatypeValues::String(s) => s == value,
             XsdDatatypeValues::Token(s) => s == &normalize_whitespace(value),
+            XsdDatatypeValues::Name(s) => {
+                let normalized = normalize_whitespace(value);
+                is_valid_name(&normalized) && s == &normalized
+            }
             XsdDatatypeValues::QName(_) => {
                 // QName comparison requires namespace context; fall back to false
                 // when called without context. Use is_valid_with_ns instead.
@@ -1131,6 +1140,16 @@ impl Compiler {
         match name {
             "string" => Ok(XsdDatatypeValues::String(value.to_string())),
             "token" => Ok(XsdDatatypeValues::Token(normalize_whitespace(value))),
+            "Name" => {
+                let normalized = normalize_whitespace(value);
+                if !is_valid_name(&normalized) {
+                    return Err(XsdDatatypeError::InvalidValueOfType {
+                        span: ctx.convert_span(span),
+                        type_name: "Name",
+                    });
+                }
+                Ok(XsdDatatypeValues::Name(normalized))
+            }
             "QName" => {
                 // Use the ns attribute from <value> if present, otherwise fall back to context
                 let default_ns = ns.unwrap_or(ctx.default_namespace_uri()).to_string();
@@ -1152,7 +1171,10 @@ impl Compiler {
                 })?;
                 Ok(XsdDatatypeValues::QName(qname))
             }
-            _ => unimplemented!("{:?} not yet supported", name),
+            _ => Err(XsdDatatypeError::UnsupportedDatatype {
+                span: ctx.convert_span(span),
+                name: name.to_string(),
+            }),
         }
     }
 

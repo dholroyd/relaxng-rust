@@ -899,7 +899,7 @@ fn describe_datatype_value(dt: &datatype::DatatypeValues) -> String {
         datatype::DatatypeValues::Xsd(x) => {
             use datatype::xsd::XsdDatatypeValues::*;
             match x {
-                String(s) | Token(s) => format!("\"{}\"", s),
+                String(s) | Token(s) | Name(s) => format!("\"{}\"", s),
                 QName(q) => format!("{:?}", q),
             }
         }

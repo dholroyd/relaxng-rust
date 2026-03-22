@@ -4,6 +4,7 @@ use relaxng_syntax::types::{DatatypeName, NamespacedName};
 
 pub mod relax;
 pub mod xsd;
+pub mod xsd_regex;
 
 pub trait Namespaces {
     fn resolve(&self, prefix: &str) -> Option<&str>;

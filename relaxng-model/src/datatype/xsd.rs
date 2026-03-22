@@ -2300,8 +2300,12 @@ impl Compiler {
     }
 
     fn pattern(&self, ctx: &Context, param: &types::Param) -> Result<PatternFacet, FacetError> {
-        regex::Regex::new(&param.value.as_string_value())
-            .map(|re| PatternFacet(param.value.as_string_value(), re))
+        let xsd_pat = param.value.as_string_value();
+        let rust_pat = super::xsd_regex::translate(&xsd_pat).map_err(|msg| {
+            FacetError::InvalidPattern(ctx.convert_span(&param.span), regex::Error::Syntax(msg))
+        })?;
+        regex::Regex::new(&rust_pat)
+            .map(|re| PatternFacet(xsd_pat, re))
             .map_err(|e| FacetError::InvalidPattern(ctx.convert_span(&param.span), e))
     }
 }

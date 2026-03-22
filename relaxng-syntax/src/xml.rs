@@ -15,17 +15,26 @@ pub enum Error {
 }
 
 pub fn parse(text: &str) -> Result<Schema> {
-    let doc = roxmltree::Document::parse(text).map_err(|e| {
-        // Gah!  The interface we want to expose is in terms of byte-offset + len pairs, but
-        // the errors from roxmltree give us
-        let (off, len) = text
-            .lines()
-            .take(e.pos().row as _)
-            .fold((0, 0), |(acc, _), line| (acc + line.len(), line.len()));
-
-        let col = e.pos().col as usize;
-        let start = off + col;
-        let end = if col <= len { len - col } else { 0 };
+    let doc = roxmltree::Document::parse_with_options(
+        text,
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| {
+        // Convert roxmltree's 1-based row/col position to a byte offset range
+        let pos = e.pos();
+        let mut offset = 0;
+        for (i, line) in text.split('\n').enumerate() {
+            if i + 1 == pos.row as usize {
+                offset += (pos.col as usize).saturating_sub(1);
+                break;
+            }
+            offset += line.len() + 1; // +1 for the newline
+        }
+        let start = offset.min(text.len());
+        let end = start;
         Error::Xml(start..end, e.to_string())
     })?;
     Ok(Schema {

@@ -32,6 +32,23 @@ enum Command {
     },
     /// Check a schema for potential issues
     Lint { schema: PathBuf },
+    /// Generate example XML documents from a schema
+    Example {
+        schema: PathBuf,
+        #[structopt(long, default_value = "20")]
+        fuel: usize,
+        #[structopt(long)]
+        seed: Option<u64>,
+        #[structopt(long, default_value = "1")]
+        count: usize,
+        #[structopt(long)]
+        out_dir: Option<PathBuf>,
+        #[structopt(long)]
+        coverage: bool,
+        /// Emit compact single-line XML instead of indented output
+        #[structopt(long)]
+        compact: bool,
+    },
 }
 
 fn parse_syntax(s: &str) -> Syntax {
@@ -53,6 +70,17 @@ fn main() {
             format,
         } => coverage(syntax, schema, xml, &format),
         Command::Lint { schema } => lint(syntax, schema),
+        Command::Example {
+            schema,
+            fuel,
+            seed,
+            count,
+            out_dir,
+            coverage,
+            compact,
+        } => example(
+            syntax, schema, fuel, seed, count, out_dir, coverage, compact,
+        ),
     }
 }
 
@@ -382,4 +410,60 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn example(
+    syntax: Syntax,
+    schema: PathBuf,
+    fuel: usize,
+    seed: Option<u64>,
+    count: usize,
+    out_dir: Option<PathBuf>,
+    coverage: bool,
+    compact: bool,
+) {
+    if coverage && (seed.is_some() || count != 1) {
+        eprintln!("error: --coverage cannot be used with --seed or --count");
+        exit(1);
+    }
+
+    let result = compile_schema(syntax, &schema);
+    let model = result.start;
+    let generator = relaxng_exemplifier::Generator::new(model.clone(), fuel).pretty(!compact);
+    if let Some(ref dir) = out_dir {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let docs: Vec<String> = if coverage {
+        let docs = generator.coverage_tour();
+        eprintln!("Generated {} coverage documents", docs.len());
+        docs
+    } else {
+        use rand::RngCore;
+        let mut rng = rand::rng();
+        (0..count)
+            .map(|i| {
+                let doc_seed = seed.map(|s| s + i as u64).unwrap_or_else(|| rng.next_u64());
+                generator.generate_with_seed(doc_seed)
+            })
+            .collect()
+    };
+
+    for (i, doc) in docs.iter().enumerate() {
+        emit_doc(doc, i, &out_dir);
+    }
+}
+
+fn emit_doc(doc: &str, idx: usize, out_dir: &Option<PathBuf>) {
+    match out_dir {
+        Some(dir) => {
+            std::fs::write(dir.join(format!("doc-{:04}.xml", idx)), doc).expect("write doc");
+        }
+        None => {
+            if idx > 0 {
+                println!("---");
+            }
+            println!("{}", doc);
+        }
+    }
 }

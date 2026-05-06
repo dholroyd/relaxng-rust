@@ -47,3 +47,4 @@ All 44 XML Schema built-in datatypes are supported (except `NOTATION`, which the
  - [`relaxng-validator`](relaxng-validator) able to perform validation of instance documents.  Uses
    [xmlparser](https://crates.io/crates/xmlparser).
  - [`relaxng-tool`](relaxng-tool) - a demo CLI program to validate XML documents against a RELAX NG schema.
+ - [`relaxng-exemplifier`](relaxng-exemplifier) - generate random example XML documents from a schema, for testing

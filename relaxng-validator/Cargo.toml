@@ -9,7 +9,7 @@ edition = "2024"
 [dependencies]
 relaxng-model = { path = "../relaxng-model" }
 relaxng-syntax = { path = "../relaxng-syntax" }
-xmlparser = "0.13.3"
+xml-syntax-reader = { version = "0.2", features = ["dtd"] }
 codemap = "0.1.3"
 codemap-diagnostic = "0.1.1"
 fnv = "1.0.7"

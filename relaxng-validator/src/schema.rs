@@ -70,7 +70,35 @@ impl Pat {
 // Schema internals
 // ---------------------------------------------------------------------------
 
-pub(crate) type NameCache = HashMap<(PatId, Box<str>, Option<Box<str>>), PatId>;
+/// Interned namespace URI identifier. Comparing two `NsId` values is equivalent
+/// to comparing the URI strings they represent, but costs a single u32 comparison
+/// instead of hashing/comparing the full URI.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct NsId(u32);
+
+/// Interns namespace URI strings so that repeated lookups use a cheap integer key.
+#[derive(Default)]
+pub(crate) struct NamespaceInterner {
+    uris: Vec<String>,
+}
+
+impl NamespaceInterner {
+    pub(crate) fn intern(&mut self, uri: &str) -> NsId {
+        if let Some(pos) = self.uris.iter().position(|u| u == uri) {
+            NsId(pos as u32)
+        } else {
+            let id = NsId(self.uris.len() as u32);
+            self.uris.push(uri.to_owned());
+            id
+        }
+    }
+
+    pub(crate) fn intern_opt(&mut self, uri: Option<&str>) -> Option<NsId> {
+        uri.map(|u| self.intern(u))
+    }
+}
+
+pub(crate) type NameCache = HashMap<(PatId, Box<[u8]>, Option<NsId>), PatId>;
 
 #[derive(Default)]
 pub(crate) struct Inner {
@@ -119,6 +147,8 @@ pub(crate) struct Schema {
     pub(crate) ns_context: Option<NsContext>,
     /// When true, `ns_context` needs rebuilding before use.
     pub(crate) ns_context_dirty: bool,
+    /// Interner for namespace URI strings used in derivative cache keys.
+    pub(crate) ns_interner: NamespaceInterner,
 }
 
 impl Schema {
@@ -275,67 +305,6 @@ impl Schema {
     }
     pub(crate) fn patt(&self, id: PatId) -> Pat {
         self.inner.borrow().patterns[id.0 as usize].clone()
-    }
-
-    pub(crate) fn check_choice(
-        &self,
-        id: PatId,
-        seen: &mut Vec<PatId>,
-        seen_choices: &mut Vec<PatId>,
-    ) -> bool {
-        if seen_choices.contains(&id) {
-            println!(
-                "Choice contains duplicate pattern {:?} {:?}",
-                id,
-                self.patt(id)
-            );
-        }
-        seen.push(id);
-        match self.patt(id) {
-            Pat::Choice(l, r, _) => {
-                self.check_choice(l, seen, seen_choices);
-                self.check_choice(r, seen, seen_choices);
-            }
-            Pat::Interleave(l, r, _) | Pat::Group(l, r, _) => {
-                self.check_choices(l, seen);
-                self.check_choices(r, seen);
-            }
-            Pat::Empty => {}
-            Pat::Text => {}
-            Pat::NotAllowed => {}
-            Pat::OneOrMore(p, _) | Pat::Attribute(_, p) | Pat::Element(_, p) | Pat::List(p) => {
-                self.check_choices(p, seen)
-            }
-            Pat::Datatype(_) => {}
-            Pat::DatatypeValue(_) => {}
-            Pat::DatatypeExcept(_, _) => {}
-            Pat::After(_, _) => unreachable!(),
-        }
-        false
-    }
-
-    pub(crate) fn check_choices(&self, id: PatId, seen: &mut Vec<PatId>) {
-        if seen.contains(&id) {
-            return;
-        }
-        seen.push(id);
-        match self.patt(id) {
-            Pat::Choice(_, _, _) => {
-                let mut seen_choices = vec![];
-                self.check_choice(id, seen, &mut seen_choices);
-            }
-            Pat::Interleave(l, r, _) | Pat::Group(l, r, _) => {
-                self.check_choices(l, seen);
-                self.check_choices(r, seen);
-            }
-            Pat::OneOrMore(p, _) | Pat::Attribute(_, p) | Pat::Element(_, p) | Pat::List(p) => {
-                self.check_choices(p, seen)
-            }
-            Pat::Empty | Pat::Text | Pat::NotAllowed | Pat::Datatype(_) | Pat::DatatypeValue(_) => {
-            }
-            Pat::DatatypeExcept(_, p) => self.check_choices(p, seen),
-            Pat::After(_, _) => unreachable!(),
-        }
     }
 
     #[allow(unused)]
@@ -546,6 +515,9 @@ struct SchemaBuilder {
 
 impl SchemaBuilder {
     fn new() -> Self {
+        // `Pat` contains regex caches (atomics, mutexes) that the lint flags as
+        // interior-mutable. We never mutate keys after insertion, so this is safe.
+        #[allow(clippy::mutable_key_type)]
         let mut memo = HashMap::new();
         let patterns = vec![
             Some(Pat::NotAllowed), // PAT_NOT_ALLOWED = 0

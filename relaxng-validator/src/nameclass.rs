@@ -119,6 +119,7 @@ pub(crate) fn describe_datatype(dt: &datatype::Datatypes) -> String {
                 NmTokens(..) => "xsd:NMTOKENS",
                 NmToken(_) => "xsd:NMTOKEN",
                 NcName(_) => "xsd:NCName",
+                QName(_) => "xsd:QName",
                 Name(_) => "xsd:Name",
                 Duration(_) => "xsd:duration",
                 Date(_) => "xsd:date",

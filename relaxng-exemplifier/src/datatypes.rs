@@ -37,9 +37,10 @@ fn generate_relax_datatype(dt: &BuiltinDatatype, u: &mut Unstructured) -> String
 fn generate_xsd_datatype(dt: &XsdDatatypes, u: &mut Unstructured) -> String {
     use relaxng_model::datatype::xsd::*;
     match dt {
-        XsdDatatypes::String(_) | XsdDatatypes::NormalizedString(_) | XsdDatatypes::Token(_) => {
-            gen_short_ascii(u)
-        }
+        XsdDatatypes::String(_)
+        | XsdDatatypes::NormalizedString(_)
+        | XsdDatatypes::Token(_)
+        | XsdDatatypes::QName(_) => gen_short_ascii(u),
         XsdDatatypes::Boolean(_) => {
             if u.arbitrary::<bool>().unwrap_or(false) {
                 "true".to_string()

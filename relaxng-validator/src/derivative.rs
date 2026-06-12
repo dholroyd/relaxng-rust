@@ -1,4 +1,4 @@
-use relaxng_model::datatype::Datatype;
+use relaxng_model::datatype::{Datatype, Datatypes};
 
 use crate::nameclass::{QualifiedName, contains};
 use crate::schema::{Pat, PatId, Schema};
@@ -12,6 +12,13 @@ pub(crate) fn is_whitespace_str(s: &str) -> bool {
 }
 
 impl Schema {
+    fn datatype_is_valid(&self, dt: &Datatypes, text: &str) -> bool {
+        match self.ns_context {
+            Some(ref ns_ctx) => dt.is_valid_with_ns(text, |p| ns_ctx.lookup(p)),
+            None => dt.is_valid(text),
+        }
+    }
+
     pub(crate) fn text_deriv(&mut self, pid: PatId, text: &str) -> PatId {
         let current = self.patt(pid);
         match current {
@@ -52,7 +59,7 @@ impl Schema {
                 self.text()
             }
             Pat::Datatype(dt) => {
-                if dt.is_valid(text) {
+                if self.datatype_is_valid(&dt, text) {
                     self.mark_covered(pid);
                     self.empty()
                 } else {
@@ -76,7 +83,7 @@ impl Schema {
             Pat::DatatypeExcept(dt, except) => {
                 let d = self.text_deriv(except, text);
                 let pat2 = self.patt(d);
-                if dt.is_valid(text) && !pat2.is_nullable() {
+                if self.datatype_is_valid(&dt, text) && !pat2.is_nullable() {
                     self.mark_covered(pid);
                     self.empty()
                 } else {

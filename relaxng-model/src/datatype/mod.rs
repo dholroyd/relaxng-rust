@@ -69,6 +69,18 @@ pub enum Datatypes {
     Relax(relax::BuiltinDatatype),
     Xsd(xsd::XsdDatatypes),
 }
+impl Datatypes {
+    pub fn is_valid_with_ns(
+        &self,
+        value: &str,
+        lookup_ns: impl Fn(&str) -> Option<String>,
+    ) -> bool {
+        match self {
+            Datatypes::Relax(relax) => relax.is_valid(value),
+            Datatypes::Xsd(xsd) => xsd.is_valid_with_ns(value, lookup_ns),
+        }
+    }
+}
 impl Datatype for Datatypes {
     fn is_valid(&self, value: &str) -> bool {
         match self {

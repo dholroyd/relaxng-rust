@@ -528,17 +528,10 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
     let type_attr = node
         .attribute_node("type")
         .ok_or(Error::Expected(node.range(), "type attribute"))?;
-    let type_name = match type_attr.value().trim() {
-        // TODO: check datatypeLibrary namespace!
-        "token" => DatatypeName::Token,
-        val => {
-            let name = ncname(type_attr.range_value(), val)?;
-            DatatypeName::NamespacedName(NamespacedName {
-                namespace_uri: datatype_ns,
-                localname: name,
-            })
-        }
-    };
+    let type_name = DatatypeName::NamespacedName(NamespacedName {
+        namespace_uri: datatype_ns,
+        localname: ncname(type_attr.range_value(), type_attr.value().trim())?,
+    });
     if let Some(a) = node
         .attributes()
         .find(|a| is_rng_att(a) && a.name() != "type" && a.name() != "datatypeLibrary")

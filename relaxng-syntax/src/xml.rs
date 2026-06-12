@@ -529,8 +529,9 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
         .attribute_node("type")
         .ok_or(Error::Expected(node.range(), "type attribute"))?;
     let type_name = match type_attr.value().trim() {
-        // TODO: check datatypeLibrary namespace!
-        "token" => DatatypeName::Token,
+        // The bare 'token' shortcut only applies to the relaxng built-in datatype library;
+        // with an inherited datatypeLibrary (e.g. XML Schema), 'token' is that library's type.
+        "token" if datatype_ns.as_string_value().is_empty() => DatatypeName::Token,
         val => {
             let name = ncname(type_attr.range_value(), val)?;
             DatatypeName::NamespacedName(NamespacedName {
@@ -1226,6 +1227,41 @@ mod tests {
                 el.name_class,
                 NameClass::Name(Name::NamespacedName(NamespacedName { namespace_uri: ns, localname: NcName(_, name)}))
                     if ns.as_string_value() == "http://example.com/ns" && name == "foo"
+            )
+        } else {
+            panic!("Expected an <element>")
+        }
+    }
+
+    #[test]
+    fn data_token_with_inherited_datatype_library_is_namespaced() {
+        let doc = roxmltree::Document::parse(
+            "<element xmlns=\"http://relaxng.org/ns/structure/1.0\" name=\"foo\" datatypeLibrary=\"http://www.w3.org/2001/XMLSchema-datatypes\"><data type=\"token\"/></element>",
+        )
+        .expect("Parsing XML");
+        let result = super::pattern(doc.root_element()).unwrap();
+        if let Pattern::Element(el) = result {
+            assert_matches!(
+                *el.pattern,
+                Pattern::DatatypeName(DatatypeNamePattern(_, DatatypeName::NamespacedName(NamespacedName { namespace_uri: ref ns, localname: NcName(_, ref name) }), _, _))
+                    if ns.as_string_value() == "http://www.w3.org/2001/XMLSchema-datatypes" && name == "token"
+            )
+        } else {
+            panic!("Expected an <element>")
+        }
+    }
+
+    #[test]
+    fn data_token_without_datatype_library_is_builtin() {
+        let doc = roxmltree::Document::parse(
+            "<element xmlns=\"http://relaxng.org/ns/structure/1.0\" name=\"foo\"><data type=\"token\"/></element>",
+        )
+        .expect("Parsing XML");
+        let result = super::pattern(doc.root_element()).unwrap();
+        if let Pattern::Element(el) = result {
+            assert_matches!(
+                *el.pattern,
+                Pattern::DatatypeName(DatatypeNamePattern(_, DatatypeName::Token, _, _))
             )
         } else {
             panic!("Expected an <element>")

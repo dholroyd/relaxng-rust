@@ -6841,6 +6841,20 @@ before string sequence checking.</documentation>
 <foo/>
 </invalid>
 </testCase>
+<testCase>
+<correct>
+<element xmlns="http://relaxng.org/ns/structure/1.0" xmlns:eg="http://example.com/ns">
+  <name>eg:foo</name>
+  <text/>
+</element>
+</correct>
+<valid>
+<eg:foo xmlns:eg="http://example.com/ns">hello</eg:foo>
+</valid>
+<invalid>
+<foo>hello</foo>
+</invalid>
+</testCase>
 </testSuite>
 <testSuite>
 <documentation>Validation error reporting</documentation>

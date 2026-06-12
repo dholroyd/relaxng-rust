@@ -914,6 +914,15 @@ fn qname_el(name: Node) -> Result<Name> {
         if let Some(pos) = val.find(':') {
             let start = name.range().start;
             let end = name.range().end;
+            // Resolve the prefix against in-scope xmlns declarations, as qname_att() does for
+            // name attributes; fall back to a CName for the model to resolve from declarations.
+            if let Some(namespace) = lookup_namespace_def(name, Some(val[0..pos].trim())) {
+                let localname = ncname(start + pos + 1..end, val[pos + 1..].trim())?;
+                return Ok(Name::NamespacedName(NamespacedName {
+                    namespace_uri: Literal::new(start..(start + pos), namespace.to_string()),
+                    localname,
+                }));
+            }
             let prefix = ncname(start..(start + pos), val[0..pos].trim())?;
             let localname = ncname(start + pos + 1..end, val[pos + 1..].trim())?;
             Ok(Name::CName(QName(prefix, localname)))
@@ -1199,6 +1208,42 @@ mod tests {
             assert_matches!(
                 el.name_class,
                 NameClass::Name(Name::NamespacedName(NamespacedName { namespace_uri: _, localname: NcName(_, name)})) if name == "library"
+            )
+        } else {
+            panic!("Expected an <element>")
+        }
+    }
+
+    #[test]
+    fn prefixed_name_element_resolves_against_xmlns() {
+        let doc = roxmltree::Document::parse(
+            "<element xmlns=\"http://relaxng.org/ns/structure/1.0\" xmlns:eg=\"http://example.com/ns\"><name>eg:foo</name><text/></element>",
+        )
+        .expect("Parsing XML");
+        let result = super::pattern(doc.root_element()).unwrap();
+        if let Pattern::Element(el) = result {
+            assert_matches!(
+                el.name_class,
+                NameClass::Name(Name::NamespacedName(NamespacedName { namespace_uri: ns, localname: NcName(_, name)}))
+                    if ns.as_string_value() == "http://example.com/ns" && name == "foo"
+            )
+        } else {
+            panic!("Expected an <element>")
+        }
+    }
+
+    #[test]
+    fn prefixed_name_element_with_undeclared_prefix_falls_back_to_cname() {
+        let doc = roxmltree::Document::parse(
+            "<element xmlns=\"http://relaxng.org/ns/structure/1.0\"><name>eg:foo</name><text/></element>",
+        )
+        .expect("Parsing XML");
+        let result = super::pattern(doc.root_element()).unwrap();
+        if let Pattern::Element(el) = result {
+            assert_matches!(
+                el.name_class,
+                NameClass::Name(Name::CName(QName(NcName(_, prefix), NcName(_, name))))
+                    if prefix == "eg" && name == "foo"
             )
         } else {
             panic!("Expected an <element>")

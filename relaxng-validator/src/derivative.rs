@@ -1,4 +1,5 @@
 use relaxng_model::datatype::Datatype;
+use std::collections::HashMap;
 
 use crate::nameclass::{QualifiedName, contains};
 use crate::schema::{Pat, PatId, Schema};
@@ -391,6 +392,9 @@ impl Schema {
         }
     }
 
+    /// See [`Self::force_start_tag_close_deriv`] for the error-recovery counterpart of this
+    /// function — keep the `Attribute` arm of the two in sync; every other arm must stay
+    /// structurally identical.
     pub(crate) fn start_tag_close_deriv(&mut self, pid: PatId) -> PatId {
         {
             let inner = self.inner.borrow();
@@ -433,10 +437,68 @@ impl Schema {
         result
     }
 
+    /// As [`Self::start_tag_close_deriv`], but treats still-outstanding required attributes as
+    /// satisfied rather than as an error. Keep the `Attribute` arm of the two functions in
+    /// sync with each other; every other arm must stay structurally identical.
+    ///
+    /// This is only used to recover a usable content-model position after an error has
+    /// already been reported for this start tag, so that the element's children can still be
+    /// checked. It deliberately shares no cache with `start_tag_close_deriv`: that function is
+    /// always called first and will have memoized `NotAllowed` for these same pattern ids, so a
+    /// shared cache would short-circuit straight back to `NotAllowed`. It keeps its own
+    /// call-local memo instead — required because, unlike `start_tag_close_deriv`, this
+    /// function recurses into *both* children of `Group`/`Interleave`/`Choice` regardless of
+    /// nullability, so an unmemoized walk of a heavily-shared pattern DAG can be exponential in
+    /// the DAG's depth.
+    pub(crate) fn force_start_tag_close_deriv(&mut self, pid: PatId) -> PatId {
+        self.force_start_tag_close_deriv_memo(pid, &mut HashMap::new())
+    }
+
+    fn force_start_tag_close_deriv_memo(
+        &mut self,
+        pid: PatId,
+        memo: &mut HashMap<PatId, PatId>,
+    ) -> PatId {
+        if let Some(&cached) = memo.get(&pid) {
+            return cached;
+        }
+        let result = match self.patt(pid) {
+            Pat::After(p1, p2) => {
+                let a1 = self.force_start_tag_close_deriv_memo(p1, memo);
+                self.after(a1, p2)
+            }
+            Pat::Choice(p1, p2, _) => {
+                let c1 = self.force_start_tag_close_deriv_memo(p1, memo);
+                let c2 = self.force_start_tag_close_deriv_memo(p2, memo);
+                self.choice(c1, c2)
+            }
+            Pat::Group(p1, p2, _) => {
+                let c1 = self.force_start_tag_close_deriv_memo(p1, memo);
+                let c2 = self.force_start_tag_close_deriv_memo(p2, memo);
+                self.group(c1, c2)
+            }
+            Pat::Interleave(p1, p2, _) => {
+                let c1 = self.force_start_tag_close_deriv_memo(p1, memo);
+                let c2 = self.force_start_tag_close_deriv_memo(p2, memo);
+                self.interleave(c1, c2)
+            }
+            // Mirrors `start_tag_close_deriv`, which likewise leaves the body untouched; an
+            // attribute nested under a repeat is therefore not force-matched here either.
+            Pat::OneOrMore(p, _) => self.one_or_more(p),
+            Pat::Attribute(_, _) => self.empty(),
+            _ => pid,
+        };
+        memo.insert(pid, result);
+        result
+    }
+
     // Note: the spec lists endTagDeriv as efficiently memoizable, but benchmarking showed
     // that both HashMap and Vec caches regressed performance by 7-15%. The function body
     // is only ~3 ops (RefCell borrow + array index + match), so the RefCell borrow overhead
     // of any cache lookup exceeds the savings from avoiding recomputation.
+    //
+    // See `force_end_tag_deriv` below for the error-recovery counterpart of this function —
+    // keep the two structurally in sync.
     pub(crate) fn end_tag_deriv(&mut self, pid: PatId) -> PatId {
         let pat = self.patt(pid);
         match pat {
@@ -453,6 +515,50 @@ impl Schema {
                 }
             }
             _ => self.not_allowed(),
+        }
+    }
+
+    /// As [`Self::end_tag_deriv`], but treats the element's outstanding content requirements
+    /// (e.g. a missing required child) as already satisfied instead of leaving it unclosed.
+    /// Mirrors `end_tag_deriv`'s structure with only the `After` arm's nullability check
+    /// dropped — keep the two in sync.
+    ///
+    /// Used only to recover a continuation position for validating what follows a self-closing
+    /// element that failed to close, after that element's own error has already been reported.
+    /// Never used on the happy path. Not memoized, matching `end_tag_deriv` above: by this
+    /// point the pattern is Choice/After nesting only (no Group/Interleave/OneOrMore, which are
+    /// already gone by the time a start tag has closed), so an unmemoized walk stays bounded by
+    /// the same reasoning that already applies to `end_tag_deriv`.
+    pub(crate) fn force_end_tag_deriv(&mut self, pid: PatId) -> PatId {
+        match self.patt(pid) {
+            Pat::Choice(p1, p2, _) => {
+                let c1 = self.force_end_tag_deriv(p1);
+                let c2 = self.force_end_tag_deriv(p2);
+                self.choice(c1, c2)
+            }
+            Pat::After(_, p2) => p2,
+            _ => self.not_allowed(),
+        }
+    }
+
+    /// Complete a self-closing element from `pid`.
+    ///
+    /// Per <https://relaxng.org/jclark/derivative.html>, "The case where the list of children
+    /// is empty is treated as if there were a text node whose value were the empty string" —
+    /// required for a pattern like `element foo { token }` to match `<foo/>` or `<foo></foo>`.
+    ///
+    /// When `force` is true and the strict derivation still doesn't close, additionally tries
+    /// [`Self::force_end_tag_deriv`] so that outstanding content requirements are treated as
+    /// satisfied. Only meaningful on the error-recovery path, once this element's own error has
+    /// already been reported — forcing it on the happy path would let genuinely-incomplete
+    /// content through undetected.
+    pub(crate) fn close_empty_element(&mut self, pid: PatId, force: bool) -> PatId {
+        let p = self.text_deriv(pid, "");
+        let closed = self.end_tag_deriv(p);
+        if force && matches!(self.patt(closed), Pat::NotAllowed) {
+            self.force_end_tag_deriv(p)
+        } else {
+            closed
         }
     }
 }

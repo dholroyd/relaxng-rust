@@ -11,6 +11,9 @@ use std::rc::Rc;
 use xmlparser::{ElementEnd, EntityDefinition, StrSpan, Token, Tokenizer};
 
 pub use coverage::{CoverageReport, TrackablePattern};
+// Re-exported so downstream crates can match `ValidatorError::Schema(..)` exhaustively.
+pub use schema::SchemaError;
+
 use nameclass::*;
 use schema::*;
 
@@ -217,22 +220,13 @@ impl<'a> Validator<'a> {
                         }
                     },
                     ElementEnd::Close(_, _) => {
-                        let next_pid = if self.last_was_start_element {
-                            // The last event was XmlEvent::StartElement with no child elements or child
-                            // text nodes.
-                            //
-                            // Per https://relaxng.org/jclark/derivative.html ,
-                            //     "The case where the list of children is empty is
-                            //      treated as if there were a text node whose value
-                            //      were the empty string."
-                            //
-                            // This fake text node is required for a pattern like 'element foo { token }'
-                            // to match the input '<foo/>' or '<foo></foo>'
-                            self.schema.text_deriv(self.current_step, "")
+                        let result = if self.last_was_start_element {
+                            // The element had no child elements or text nodes, so complete it
+                            // through the same empty-content rule as a self-closing tag.
+                            self.schema.close_empty_element(self.current_step, false)
                         } else {
-                            self.current_step
+                            self.schema.end_tag_deriv(self.current_step)
                         };
-                        let result = self.schema.end_tag_deriv(next_pid);
                         if self.stack.pop_has_namespaces() {
                             self.schema.ns_context_dirty = true;
                         }
@@ -244,7 +238,7 @@ impl<'a> Validator<'a> {
                             &mut self.schema,
                             evt,
                             self.current_step,
-                    ) {
+                        ) {
                             Ok(next_id) => self.schema.close_empty_element(next_id, false),
                             Err(CloseStartError { error, recovery }) => {
                                 if let Some(recovered) = recovery {
@@ -401,7 +395,9 @@ impl<'a> Validator<'a> {
         evt: Token<'b>,
         pat_id: PatId,
     ) -> Result<PatId, CloseStartError<'b>> {
-        let elem = stack.current_element().map_err(CloseStartError::unrecoverable)?;
+        let elem = stack
+            .current_element()
+            .map_err(CloseStartError::unrecoverable)?;
         let next_pat = schema.start_tag_open_deriv(pat_id, elem.name);
         if let Pat::NotAllowed = schema.patt(next_pat) {
             // The element name itself is not allowed here, so there is no content model to

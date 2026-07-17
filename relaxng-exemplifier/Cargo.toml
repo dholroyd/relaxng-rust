@@ -1,0 +1,16 @@
+[package]
+name = "relaxng-exemplifier"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+relaxng-model = { path = "../relaxng-model" }
+arbitrary = "1"
+rand = { version = "0.9", features = ["small_rng"] }
+num-bigint = "0.4"
+bigdecimal = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+relaxng-validator = { path = "../relaxng-validator" }
+xmlparser = "0.13"

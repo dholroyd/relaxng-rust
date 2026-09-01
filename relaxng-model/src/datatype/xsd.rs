@@ -3,7 +3,6 @@ use crate::datatype::relax::normalize_whitespace;
 use lazy_static::lazy_static;
 use relaxng_syntax::types;
 use relaxng_syntax::types::DatatypeName;
-use std::convert::TryFrom;
 use std::fmt;
 use std::str::FromStr;
 
@@ -340,7 +339,10 @@ impl super::Datatype for XsdDatatypes {
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::AnyURI(str_facets) => {
-                uriparse::URIReference::try_from(value).is_ok() && str_facets.is_valid(value)
+                // XSD 1.0 anyURI only requires a valid URI reference after
+                // XLink-style %-escaping, so any finite string is lexically
+                // valid; Jing accepts accordingly.
+                str_facets.is_valid(value)
             }
             XsdDatatypes::Language(str_facets) => {
                 LANG_RE.is_match(value) && str_facets.is_valid(value)
@@ -2354,6 +2356,21 @@ mod test {
     use assert_matches::assert_matches;
     use codemap::CodeMap;
     use relaxng_syntax::types;
+
+    #[test]
+    fn any_uri_accepts_the_full_xsd_lexical_space() {
+        let mut map = CodeMap::new();
+        let file = map.add_file("main.rnc".to_string(), "just testing".to_string());
+        let ctx = Context::new(file);
+        let c = Compiler;
+        let dt = c.any_uri(&ctx, &[]).unwrap();
+        for value in ["https://example.com/x", "a name with spaces", "100%"] {
+            assert!(
+                crate::datatype::Datatype::is_valid(&dt, value),
+                "anyURI must accept {value:?}"
+            );
+        }
+    }
 
     #[test]
     fn it_works() {

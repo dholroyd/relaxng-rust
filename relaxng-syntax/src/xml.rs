@@ -509,12 +509,16 @@ fn value(node: Node) -> Result<DatatypeValuePattern> {
         .collect();
     Ok(DatatypeValuePattern(
         node.range(),
-        type_name.map(|name| {
-            DatatypeName::NamespacedName(NamespacedName {
-                namespace_uri: datatype_ns,
-                localname: name,
-            })
-        }),
+        type_name.map(
+            |name| match (&datatype_ns.as_string_value()[..], &name.1[..]) {
+                ("", "string") => DatatypeName::String,
+                ("", "token") => DatatypeName::Token,
+                _ => DatatypeName::NamespacedName(NamespacedName {
+                    namespace_uri: datatype_ns,
+                    localname: name,
+                }),
+            },
+        ),
         val,
         ns,
         ns_bindings,
@@ -528,10 +532,12 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
     let type_attr = node
         .attribute_node("type")
         .ok_or(Error::Expected(node.range(), "type attribute"))?;
-    let type_name = match type_attr.value().trim() {
-        // TODO: check datatypeLibrary namespace!
-        "token" => DatatypeName::Token,
-        val => {
+    // 'string' and 'token' name the built-in datatypes only under the empty
+    // datatypeLibrary; under any other library they are that library's types.
+    let type_name = match (&datatype_ns.as_string_value()[..], type_attr.value().trim()) {
+        ("", "string") => DatatypeName::String,
+        ("", "token") => DatatypeName::Token,
+        (_, val) => {
             let name = ncname(type_attr.range_value(), val)?;
             DatatypeName::NamespacedName(NamespacedName {
                 namespace_uri: datatype_ns,
@@ -1186,6 +1192,71 @@ fn no_element_children(node: Node) -> Result<()> {
 mod tests {
     use crate::types::*;
     use assert_matches::*;
+
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema-datatypes";
+
+    fn parse_pattern(xml: &str) -> Pattern {
+        let doc = roxmltree::Document::parse(xml).expect("Parsing XML");
+        super::pattern(doc.root_element()).unwrap()
+    }
+
+    #[test]
+    fn data_token_resolves_against_inherited_datatype_library() {
+        let pat = parse_pattern(&format!(
+            "<element xmlns=\"http://relaxng.org/ns/structure/1.0\" \
+                      datatypeLibrary=\"{XSD}\" name=\"d\">\
+               <data type=\"token\"><param name=\"pattern\">[a-z]+</param></data>\
+             </element>"
+        ));
+        let Pattern::Element(el) = pat else {
+            panic!("Expected an <element>")
+        };
+        assert_matches!(
+            *el.pattern,
+            Pattern::DatatypeName(DatatypeNamePattern(
+                _,
+                DatatypeName::NamespacedName(NamespacedName { ref namespace_uri, .. }),
+                Some(_),
+                _,
+            )) if namespace_uri.as_string_value() == XSD
+        );
+    }
+
+    #[test]
+    fn data_token_is_builtin_without_datatype_library() {
+        let pat =
+            parse_pattern("<data xmlns=\"http://relaxng.org/ns/structure/1.0\" type=\"token\"/>");
+        assert_matches!(
+            pat,
+            Pattern::DatatypeName(DatatypeNamePattern(_, DatatypeName::Token, Some(ref p), _)) if p.is_empty()
+        );
+    }
+
+    #[test]
+    fn data_string_is_builtin_without_datatype_library() {
+        let pat =
+            parse_pattern("<data xmlns=\"http://relaxng.org/ns/structure/1.0\" type=\"string\"/>");
+        assert_matches!(
+            pat,
+            Pattern::DatatypeName(DatatypeNamePattern(_, DatatypeName::String, Some(ref p), _)) if p.is_empty()
+        );
+    }
+
+    #[test]
+    fn value_token_resolves_against_inherited_datatype_library() {
+        let pat = parse_pattern(&format!(
+            "<value xmlns=\"http://relaxng.org/ns/structure/1.0\" \
+                    datatypeLibrary=\"{XSD}\" type=\"token\">x</value>"
+        ));
+        assert_matches!(
+            pat,
+            Pattern::DatatypeValue(DatatypeValuePattern(
+                _,
+                Some(DatatypeName::NamespacedName(NamespacedName { ref namespace_uri, .. })),
+                ..
+            )) if namespace_uri.as_string_value() == XSD
+        );
+    }
 
     #[test]
     fn it_works() {

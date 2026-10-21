@@ -912,11 +912,20 @@ fn qname_el(name: Node) -> Result<Name> {
     no_element_children(name)?;
     if let Some(val) = name.text() {
         if let Some(pos) = val.find(':') {
-            let start = name.range().start;
-            let end = name.range().end;
-            let prefix = ncname(start..(start + pos), val[0..pos].trim())?;
-            let localname = ncname(start + pos + 1..end, val[pos + 1..].trim())?;
-            Ok(Name::CName(QName(prefix, localname)))
+            let text_range = name.first_child().unwrap().range();
+            let start = text_range.start;
+            let end = text_range.end;
+            let prefix = &val[0..pos];
+            let prefix_span = start..(start + pos);
+            let namespace = lookup_namespace_def(name, Some(prefix.trim())).ok_or_else(|| {
+                Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix")
+            })?;
+            let localname = ncname(start + pos + 1..end, &val[pos + 1..])?;
+            let ns = Literal::new(prefix_span, namespace.to_string());
+            Ok(Name::NamespacedName(NamespacedName {
+                namespace_uri: ns,
+                localname,
+            }))
         } else {
             let ns = get_ns(name).unwrap_or(Literal::new(0..0, "".to_string())); // TODO allow None or something rather than inventing an 'empty' NcName
             let localname = ncname(name.first_child().unwrap().range(), val)?;
@@ -1203,5 +1212,55 @@ mod tests {
         } else {
             panic!("Expected an <element>")
         }
+    }
+
+    fn name_element(schema: &str) -> super::Result<Name> {
+        let doc = roxmltree::Document::parse(schema).expect("Parsing XML");
+        match super::pattern(doc.root_element())? {
+            Pattern::Element(el) => match el.name_class {
+                NameClass::Name(name) => Ok(name),
+                other => panic!("Expected a name, got {other:?}"),
+            },
+            _ => panic!("Expected an <element>"),
+        }
+    }
+
+    #[test]
+    fn prefixed_name_element_resolves_against_xmlns() {
+        let name = name_element(
+            "<element xmlns=\"http://relaxng.org/ns/structure/1.0\" xmlns:eg=\"http://example.com/ns\"><name>eg:foo</name><text/></element>",
+        );
+        assert_matches!(
+            name,
+            Ok(Name::NamespacedName(NamespacedName { namespace_uri: ns, localname: NcName(_, local) }))
+                if ns.as_string_value() == "http://example.com/ns" && local == "foo"
+        )
+    }
+
+    #[test]
+    fn prefixed_name_element_resolves_against_ancestor_xmlns() {
+        let doc = roxmltree::Document::parse(
+            "<grammar xmlns=\"http://relaxng.org/ns/structure/1.0\" xmlns:eg=\"http://example.com/ns\"><start><element><name> eg:foo </name><text/></element></start></grammar>",
+        )
+        .expect("Parsing XML");
+        let name_node = doc.descendants().find(|n| n.has_tag_name("name")).unwrap();
+        let name = super::qname_el(name_node);
+        assert_matches!(
+            name,
+            Ok(Name::NamespacedName(NamespacedName { namespace_uri: ns, localname: NcName(_, local) }))
+                if ns.as_string_value() == "http://example.com/ns" && local == "foo"
+        )
+    }
+
+    #[test]
+    fn prefixed_name_element_with_undeclared_prefix_is_an_error() {
+        let schema = "<element xmlns=\"http://relaxng.org/ns/structure/1.0\"><name>eg:foo</name><text/></element>";
+        let name = name_element(schema);
+        let prefix_start = schema.find("eg:").unwrap();
+        assert_matches!(
+            name,
+            Err(super::Error::Unexpected(span, "Unknown namespace prefix"))
+                if span == (prefix_start..prefix_start + 2)
+        )
     }
 }

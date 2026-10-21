@@ -3,7 +3,6 @@ use relaxng_model::model::DefineRule;
 use relaxng_model::{Compiler, FsFiles, Syntax};
 use relaxng_validator::Validator;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::rc::Rc;
 
 fn compile(rnc: &str) -> Rc<RefCell<Option<DefineRule>>> {
@@ -15,14 +14,9 @@ fn compile(rnc: &str) -> Rc<RefCell<Option<DefineRule>>> {
 }
 
 fn assert_valid(model: Rc<RefCell<Option<DefineRule>>>, doc: &str) {
-    let reader = xmlparser::Tokenizer::from(doc);
-    let mut v = Validator::new(model, reader).expect("compile validator");
-    loop {
-        match v.validate_next() {
-            Some(Ok(())) => {}
-            Some(Err(e)) => panic!("validation error: {e:?}\ndoc:\n{doc}"),
-            None => break,
-        }
+    let mut v = Validator::new(model).expect("compile validator");
+    if let Err(e) = v.validate(doc.as_bytes()) {
+        panic!("validation error: {e:?}\ndoc:\n{doc}");
     }
 }
 
@@ -157,45 +151,10 @@ fn coverage_nested_choice() {
     }
 }
 
-/// Parse `doc` and return every `(local_name, prefix)` pair that appears more
-/// than once on the same element.
-fn duplicate_attrs(doc: &str) -> Vec<(String, String)> {
-    let mut duplicates = Vec::new();
-    let mut stack: Vec<HashSet<(String, String)>> = Vec::new();
-    for token in xmlparser::Tokenizer::from(doc) {
-        match token.unwrap() {
-            xmlparser::Token::ElementStart { .. } => {
-                stack.push(HashSet::new());
-            }
-            xmlparser::Token::Attribute { prefix, local, .. } => {
-                let key = (local.as_str().to_string(), prefix.as_str().to_string());
-                if let Some(seen) = stack.last_mut() {
-                    if !seen.insert(key.clone()) {
-                        duplicates.push(key);
-                    }
-                }
-            }
-            xmlparser::Token::ElementEnd { .. } => {
-                stack.pop();
-            }
-            _ => {}
-        }
-    }
-    duplicates
-}
-
-fn assert_no_duplicate_attrs(doc: &str) {
-    let dups = duplicate_attrs(doc);
-    assert!(
-        dups.is_empty(),
-        "duplicate attributes {:?} in:\n{}",
-        dups,
-        doc
-    );
-}
-
-// A schema where ZeroOrMore wraps a named attribute - the most direct way to
-// trigger duplicates before the fix.
+// A schema where ZeroOrMore wraps a named attribute — the most direct way to
+// trigger duplicates before the fix. The validator rejects duplicate attributes
+// at `attribute_end`, so `assert_valid` covers what the old custom xmlparser
+// walk used to.
 const REPEATED_ATTR: &str =
     "start = element root { attribute tag { text }*, element body { empty } }";
 
@@ -205,7 +164,6 @@ fn no_duplicate_attrs_repeated_attr() {
     let generator = Generator::new(model.clone(), 20);
     for seed in 0..64 {
         let doc = generator.generate_with_seed(seed);
-        assert_no_duplicate_attrs(&doc);
         assert_valid(model.clone(), &doc);
     }
 }
@@ -215,7 +173,6 @@ fn no_duplicate_attrs_coverage_repeated() {
     let model = compile(REPEATED_ATTR);
     let generator = Generator::new(model.clone(), 20);
     for doc in generator.coverage_tour() {
-        assert_no_duplicate_attrs(&doc);
         assert_valid(model.clone(), &doc);
     }
 }

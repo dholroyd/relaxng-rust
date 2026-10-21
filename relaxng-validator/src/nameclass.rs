@@ -4,7 +4,10 @@ use relaxng_model::model::NameClass;
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct QualifiedName<'a> {
     pub(crate) namespace_uri: Option<&'a str>,
-    pub(crate) local_name: &'a str,
+    /// Local name as raw bytes. For `Named` matches, byte equality against the
+    /// schema's UTF-8 name is sufficient. For wildcard matches (`AnyName`/`NsName`),
+    /// `contains()` validates that this is a legal XML NCName.
+    pub(crate) local_name: &'a [u8],
 }
 
 fn is_ns_match(namespace_uri: &str, target_namespace: Option<&str>) -> bool {
@@ -15,22 +18,78 @@ fn is_ns_match(namespace_uri: &str, target_namespace: Option<&str>) -> bool {
     }
 }
 
-pub(crate) fn contains(nc: &NameClass, target_name: QualifiedName) -> bool {
+/// Check if `bytes` is a valid XML NCName (Name without colons).
+/// See <https://www.w3.org/TR/xml-names/#NT-NCName>.
+pub(crate) fn is_ncname(bytes: &[u8]) -> bool {
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if is_name_start_char(c) => {}
+        _ => return false,
+    }
+    chars.all(is_name_char)
+}
+
+/// XML NameStartChar (excluding ':'): Letter | '_'
+/// See <https://www.w3.org/TR/xml/#NT-NameStartChar>.
+fn is_name_start_char(c: char) -> bool {
+    matches!(c,
+        'A'..='Z'
+        | '_'
+        | 'a'..='z'
+        | '\u{C0}'..='\u{D6}'
+        | '\u{D8}'..='\u{F6}'
+        | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}'
+        | '\u{37F}'..='\u{1FFF}'
+        | '\u{200C}'..='\u{200D}'
+        | '\u{2070}'..='\u{218F}'
+        | '\u{2C00}'..='\u{2FEF}'
+        | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}'
+        | '\u{FDF0}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{EFFFF}'
+    )
+}
+
+/// XML NameChar (excluding ':'): NameStartChar | '-' | '.' | digit | combining/extender
+/// See <https://www.w3.org/TR/xml/#NT-NameChar>.
+fn is_name_char(c: char) -> bool {
+    is_name_start_char(c)
+        || matches!(c,
+            '-'
+            | '.'
+            | '0'..='9'
+            | '\u{B7}'
+            | '\u{0300}'..='\u{036F}'
+            | '\u{203F}'..='\u{2040}'
+        )
+}
+
+pub(crate) fn contains(nc: &NameClass, target_name: &QualifiedName) -> bool {
     match nc {
         NameClass::Named {
             namespace_uri,
             name,
         } => {
-            if let Some(ref target_namespace) = target_name.namespace_uri {
-                *target_namespace == namespace_uri && target_name.local_name == name
+            // Byte equality: if the schema name is a valid NCName (guaranteed by
+            // the schema compiler), matching bytes implies a valid name.
+            if let Some(target_namespace) = target_name.namespace_uri {
+                target_namespace == namespace_uri && target_name.local_name == name.as_bytes()
             } else {
-                namespace_uri.is_empty() && target_name.local_name == name
+                namespace_uri.is_empty() && target_name.local_name == name.as_bytes()
             }
         }
         NameClass::NsName {
             namespace_uri,
             except,
         } => {
+            if !is_ncname(target_name.local_name) {
+                return false;
+            }
             if is_ns_match(namespace_uri, target_name.namespace_uri) {
                 if let Some(except_nameclass) = except {
                     !contains(except_nameclass, target_name)
@@ -41,10 +100,15 @@ pub(crate) fn contains(nc: &NameClass, target_name: QualifiedName) -> bool {
                 false
             }
         }
-        NameClass::AnyName { except } => match except {
-            None => true,
-            Some(nc) => !contains(nc, target_name),
-        },
+        NameClass::AnyName { except } => {
+            if !is_ncname(target_name.local_name) {
+                return false;
+            }
+            match except {
+                None => true,
+                Some(nc) => !contains(nc, target_name),
+            }
+        }
         NameClass::Alt { a, b } => contains(a, target_name) || contains(b, target_name),
     }
 }

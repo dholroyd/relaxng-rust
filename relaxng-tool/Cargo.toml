@@ -1,5 +1,6 @@
 [package]
 name = "relaxng-tool"
+license.workspace = true
 version = "0.1.0"
 authors = ["David Holroyd <dave@badgers-in-foil.co.uk>"]
 edition = "2024"

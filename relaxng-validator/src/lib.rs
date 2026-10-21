@@ -1839,6 +1839,14 @@ mod tests {
     }
 
     #[test]
+    fn cdata_with_leading_whitespace() {
+        let f = Fixture::correct("start = element Data { element a { xsd:string } }");
+        f.valid("<Data>\n    <a>\n      <![CDATA[my_test_data]]>\n    </a>\n</Data>");
+        f.valid("<Data><a> <![CDATA[my_test_data]]></a></Data>");
+        f.valid("<Data><a><![CDATA[my_test_data]]> </a></Data>");
+    }
+
+    #[test]
     fn invalid_utf8_in_attribute_value_rejected() {
         // Schema accepts any text in attribute — must still reject malformed UTF-8.
         let f = Fixture::correct("start = element a { attribute x { text } }");

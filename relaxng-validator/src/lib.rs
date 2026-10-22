@@ -11,6 +11,9 @@ use std::rc::Rc;
 use xmlparser::{ElementEnd, EntityDefinition, StrSpan, Token, Tokenizer};
 
 pub use coverage::{CoverageReport, TrackablePattern};
+// Re-exported so downstream crates can match `ValidatorError::Schema(..)` exhaustively.
+pub use schema::SchemaError;
+
 use nameclass::*;
 use schema::*;
 
@@ -30,6 +33,26 @@ pub enum ValidatorError<'a> {
     },
     TextBufferOverflow,
     Schema(SchemaError),
+}
+
+/// The outcome of a failed attempt to close an element's start tag (see
+/// [`Validator::close_element_start`]).
+struct CloseStartError<'b> {
+    error: ValidatorError<'b>,
+    /// A position to continue validating from despite the error, when a sound one exists.
+    /// `None` means the caller must leave its current position untouched.
+    recovery: Option<PatId>,
+}
+
+impl<'b> CloseStartError<'b> {
+    /// An error with no recovery position — the caller must leave its current position
+    /// untouched.
+    fn unrecoverable(error: ValidatorError<'b>) -> Self {
+        CloseStartError {
+            error,
+            recovery: None,
+        }
+    }
 }
 
 pub struct Validator<'a> {
@@ -181,53 +204,66 @@ impl<'a> Validator<'a> {
                     return Err(ValidatorError::NotAllowed(evt));
                 }
                 match end {
-                    ElementEnd::Open => Self::close_element_start(
+                    ElementEnd::Open => match Self::close_element_start(
                         &self.stack,
                         &mut self.schema,
                         evt,
                         self.current_step,
-                    )?,
+                    ) {
+                        Ok(next_pat) => next_pat,
+                        Err(CloseStartError { error, recovery }) => {
+                            if let Some(recovered) = recovery {
+                                self.current_step = recovered;
+                                self.last_was_start_element = true;
+                            }
+                            return Err(error);
+                        }
+                    },
                     ElementEnd::Close(_, _) => {
-                        let next_pid = if self.last_was_start_element {
-                            // The last event was XmlEvent::StartElement with no child elements or child
-                            // text nodes.
-                            //
-                            // Per https://relaxng.org/jclark/derivative.html ,
-                            //     "The case where the list of children is empty is
-                            //      treated as if there were a text node whose value
-                            //      were the empty string."
-                            //
-                            // This fake text node is required for a pattern like 'element foo { token }'
-                            // to match the input '<foo/>' or '<foo></foo>'
-                            self.schema.text_deriv(self.current_step, "")
+                        let result = if self.last_was_start_element {
+                            // The element had no child elements or text nodes, so complete it
+                            // through the same empty-content rule as a self-closing tag.
+                            self.schema.close_empty_element(self.current_step, false)
                         } else {
-                            self.current_step
+                            self.schema.end_tag_deriv(self.current_step)
                         };
-                        let result = self.schema.end_tag_deriv(next_pid);
                         if self.stack.pop_has_namespaces() {
                             self.schema.ns_context_dirty = true;
                         }
                         result
                     }
                     ElementEnd::Empty => {
-                        let next_id = Self::close_element_start(
+                        let result = match Self::close_element_start(
                             &self.stack,
                             &mut self.schema,
                             evt,
                             self.current_step,
-                        )?;
-                        // The last event was XmlEvent::StartElement with no child elements or child
-                        // text nodes.
-                        //
-                        // Per https://relaxng.org/jclark/derivative.html ,
-                        //     "The case where the list of children is empty is
-                        //      treated as if there were a text node whose value
-                        //      were the empty string."
-                        //
-                        // This fake text node is required for a pattern like 'element foo { token }'
-                        // to match the input '<foo/>' or '<foo></foo>'
-                        let p = self.schema.text_deriv(next_id, "");
-                        let result = self.schema.end_tag_deriv(p);
+                        ) {
+                            Ok(next_id) => self.schema.close_empty_element(next_id, false),
+                            Err(CloseStartError { error, recovery }) => {
+                                if let Some(recovered) = recovery {
+                                    // `recovered` sits inside the element, but the tag is
+                                    // already complete, so close it too — otherwise following
+                                    // siblings would be matched at the wrong depth. Force
+                                    // through any outstanding content requirements (e.g. a
+                                    // missing required child) as well, since this element's
+                                    // own error has already been reported and there is nothing
+                                    // more to gain from cascading that into every sibling. If
+                                    // even that can't produce a sound position, leave it alone.
+                                    let closed = self.schema.close_empty_element(recovered, true);
+                                    if !matches!(self.schema.patt(closed), Pat::NotAllowed) {
+                                        self.current_step = closed;
+                                        self.last_was_start_element = false;
+                                    }
+                                }
+                                // The start tag was consumed regardless of the error, so the
+                                // element stack has to be unwound to keep it balanced.
+                                if self.stack.pop_has_namespaces() {
+                                    self.schema.ns_context_dirty = true;
+                                }
+                                return Err(error);
+                            }
+                        };
                         if self.stack.pop_has_namespaces() {
                             self.schema.ns_context_dirty = true;
                         }
@@ -344,49 +380,87 @@ impl<'a> Validator<'a> {
         }
     }
 
+    /// Derive the pattern across an element's start tag.
+    ///
+    /// On failure, [`CloseStartError::recovery`] is a *recovery* pattern: `Some(pid)` means the
+    /// caller should still advance to `pid` despite reporting the error, so that the element's
+    /// children are validated against the element's own content model rather than against the
+    /// position the element itself was expected at. `None` means there is no sound state to
+    /// continue from and the caller should leave its position untouched.
+    ///
+    /// See [`CloseStartError`] for the return type.
     fn close_element_start<'b: 'a>(
         stack: &ElementStack<'b>,
         schema: &mut Schema,
         evt: Token<'b>,
         pat_id: PatId,
-    ) -> Result<PatId, ValidatorError<'b>> {
-        let elem = stack.current_element()?;
+    ) -> Result<PatId, CloseStartError<'b>> {
+        let elem = stack
+            .current_element()
+            .map_err(CloseStartError::unrecoverable)?;
         let next_pat = schema.start_tag_open_deriv(pat_id, elem.name);
-        // TODO: refactor early-returns
-        let next_pat = match schema.patt(next_pat) {
-            Pat::NotAllowed => {
-                return Err(ValidatorError::NotAllowed(Token::ElementStart {
+        if let Pat::NotAllowed = schema.patt(next_pat) {
+            // The element name itself is not allowed here, so there is no content model to
+            // descend into and nothing to recover to.
+            return Err(CloseStartError::unrecoverable(ValidatorError::NotAllowed(
+                Token::ElementStart {
                     prefix: elem.raw_prefix,
                     local: elem.raw_local,
                     span: elem.raw_local,
-                }));
-            }
-            _p => {
-                let attributes: Vec<_> = stack.current_attributes()?;
-                let mut pat = next_pat;
-                for att in attributes {
-                    let mid = schema.start_att_deriv(pat, att.name);
-                    pat = schema.att_value_deriv(mid, att.value);
-                    if let Pat::NotAllowed = schema.patt(pat) {
-                        return Err(ValidatorError::NotAllowed(Token::Attribute {
-                            prefix: att.raw_prefix,
-                            local: att.raw_local,
-                            value: att.raw_value,
-                            span: att.raw_span,
-                        }));
-                    }
+                },
+            )));
+        }
+
+        // A rejected attribute is recorded but does not abandon the derivation: the
+        // remaining attributes are still applied, so that an element with one bad attribute
+        // still yields accurate diagnostics for its children.  Only the first bad attribute
+        // is reported, to keep one error per start tag.
+        let attributes = stack
+            .current_attributes()
+            .map_err(CloseStartError::unrecoverable)?;
+        let mut pat = next_pat;
+        let mut first_attr_error = None;
+        for att in attributes {
+            let mid = schema.start_att_deriv(pat, att.name);
+            let derived = schema.att_value_deriv(mid, att.value);
+            if let Pat::NotAllowed = schema.patt(derived) {
+                if first_attr_error.is_none() {
+                    first_attr_error = Some(ValidatorError::NotAllowed(Token::Attribute {
+                        prefix: att.raw_prefix,
+                        local: att.raw_local,
+                        value: att.raw_value,
+                        span: att.raw_span,
+                    }));
                 }
-                pat
+                // Leave `pat` alone: carry on as though the attribute were absent.
+            } else {
+                pat = derived;
             }
-        };
-        let next_pat = match schema.patt(next_pat) {
-            Pat::NotAllowed => return Err(ValidatorError::NotAllowed(evt)),
-            _p => schema.start_tag_close_deriv(next_pat),
-        };
-        Ok(match schema.patt(next_pat) {
-            Pat::NotAllowed => return Err(ValidatorError::NotAllowed(evt)),
-            _p => next_pat, //Self::children_deriv(next_pat, &mut self.schema)
-        })
+        }
+
+        let closed = schema.start_tag_close_deriv(pat);
+        if !matches!(schema.patt(closed), Pat::NotAllowed) {
+            return match first_attr_error {
+                None => Ok(closed),
+                // The bad attribute aside, the start tag is complete, so the children can be
+                // checked from here.
+                Some(error) => Err(CloseStartError {
+                    error,
+                    recovery: Some(closed),
+                }),
+            };
+        }
+
+        // The start tag did not close: a required attribute was left unsatisfied, either
+        // because it was invalid and skipped above, or because it was never given at all — the
+        // element name still matched either way. Force through any outstanding required
+        // attributes purely to reach the element's content model; the document is already
+        // known to be invalid (via `error` below), so this only affects which further errors
+        // get reported for the rest of the document.
+        let error = first_attr_error.unwrap_or(ValidatorError::NotAllowed(evt));
+        let recovered = schema.force_start_tag_close_deriv(pat);
+        let recovery = (!matches!(schema.patt(recovered), Pat::NotAllowed)).then_some(recovered);
+        Err(CloseStartError { error, recovery })
     }
 
     #[allow(clippy::mutable_key_type)] // false-positive
@@ -411,9 +485,9 @@ impl<'a> Validator<'a> {
             Pat::Group(p1, p2, _) => {
                 if self.schema.patt(p1).is_nullable() {
                     self.head(result, p1);
+                    self.head(result, p2);
                 } else {
                     self.head(result, p1);
-                    self.head(result, p2);
                 }
             }
             Pat::OneOrMore(p, _) => self.head(result, p),
@@ -1038,6 +1112,205 @@ mod tests {
             return Err(format!("{err:?}"));
         }
         Ok(())
+    }
+
+    const RECIPE: &str = r#"start = element recipe {
+        attribute servings { text },
+        element title { text },
+        element ingredient { text }+,
+        element step { text }*
+    }"#;
+
+    /// Validate `doc` to the end, collecting every error together with the "Expected .."
+    /// help text the diagnostics produce for it.
+    fn all_errors(schema: &str, doc: &str) -> Vec<(String, String)> {
+        let f = Fixture::correct(schema);
+        let reader = xmlparser::Tokenizer::from(doc);
+        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
+        let mut out = vec![];
+        while let Some(i) = v.validate_next() {
+            if let Err(err) = i {
+                let (_, diagnostics) = v.diagnostic("doc".to_string(), doc.to_string(), &err);
+                let help = diagnostics
+                    .iter()
+                    .find(|d| d.level == codemap_diagnostic::Level::Help)
+                    .map(|d| d.message.clone())
+                    .unwrap_or_default();
+                out.push((format!("{err:?}"), help));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn bad_attribute_does_not_cascade_into_children() {
+        // Apart from the misspelled attribute this document matches the schema, so the
+        // misspelling should be the only thing reported: the children must still be
+        // validated against `recipe`'s content model.
+        let errs = all_errors(
+            RECIPE,
+            r#"<recipe serving="2"><title>t</title><ingredient>i</ingredient></recipe>"#,
+        );
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected only the attribute error, got {errs:?}"
+        );
+        assert!(
+            errs[0].0.contains("local: StrSpan(\"serving\" "),
+            "expected the error to name the misspelled attribute 'serving' \
+             (not the schema's 'servings'), got {errs:?}"
+        );
+    }
+
+    /// The one error reported against a child element start tag.
+    fn child_element_error(errs: &[(String, String)]) -> &(String, String) {
+        match errs.iter().find(|(err, _)| err.contains("ElementStart")) {
+            Some(e) => e,
+            None => panic!("expected an error on a child element, got {errs:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_attribute_reports_accurate_expectation_for_children() {
+        // This document omits <title> too, so an error on <ingredient> is legitimate — but it
+        // must describe recipe's content model rather than expecting <recipe> all over again.
+        let errs = all_errors(
+            RECIPE,
+            r#"<recipe serving="2"><ingredient>i</ingredient></recipe>"#,
+        );
+        assert_eq!(
+            child_element_error(&errs).1,
+            "Expected Element title",
+            "got {errs:?}"
+        );
+        assert!(
+            !errs.iter().any(|(_, help)| help.contains("recipe")),
+            "no error should still be expecting <recipe>, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn expected_elements_respect_sequence_position() {
+        // `title` is the only element allowed first; `ingredient` and `step` come later in
+        // the sequence and must not be offered here.
+        let errs = all_errors(
+            RECIPE,
+            r#"<recipe servings="2"><ingredient>i</ingredient></recipe>"#,
+        );
+        assert_eq!(
+            child_element_error(&errs).1,
+            "Expected Element title",
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn bad_attribute_on_empty_element_leaves_stack_balanced() {
+        // The start tag is consumed whether or not it validates, so the element stack must
+        // still be unwound — otherwise every later element is seen at the wrong depth.
+        let f = Fixture::correct(
+            "start = element root { element a { attribute x { text } }, element b { empty } }",
+        );
+        let doc = r#"<root><a y="1"/><b/></root>"#;
+        let reader = xmlparser::Tokenizer::from(doc);
+        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
+        let mut errors = vec![];
+        while let Some(i) = v.validate_next() {
+            if let Err(err) = i {
+                errors.push(format!("{err:?}"));
+            }
+        }
+        assert_eq!(
+            errors.len(),
+            1,
+            "only the bad attribute should be reported, got {errors:?}"
+        );
+        assert_eq!(
+            v.stack.elements.len(),
+            0,
+            "element stack still holds frames after the document ended"
+        );
+    }
+
+    #[test]
+    fn wholly_missing_attribute_does_not_cascade_into_children() {
+        // Unlike a misspelled attribute, there is no bad `Attribute` token to blame here —
+        // `servings` is simply never given. Recovery must still kick in so <title> and
+        // <ingredient> are checked against recipe's real content model instead of cascading.
+        let errs = all_errors(
+            RECIPE,
+            r#"<recipe><title>t</title><ingredient>i</ingredient></recipe>"#,
+        );
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected only the missing-attribute error, got {errs:?}"
+        );
+        assert!(
+            !errs[0].1.contains("recipe"),
+            "the single error should not still be expecting <recipe>, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn self_closing_element_missing_required_child_does_not_cascade() {
+        // `<a y="1"/>` is invalid twice over (wrong attribute, missing required <b>), but
+        // since it can never be closed even after forcing the attribute, recovery has to fall
+        // back to forcing the element's content requirements too — otherwise the sibling <c/>
+        // gets wrongly rejected against a's stale, never-advanced position.
+        let f = Fixture::correct(
+            "start = element root { \
+                element a { attribute x { text }, element b { empty } }, \
+                element c { empty } \
+            }",
+        );
+        let doc = r#"<root><a y="1"/><c/></root>"#;
+        let reader = xmlparser::Tokenizer::from(doc);
+        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
+        let mut errors = vec![];
+        while let Some(i) = v.validate_next() {
+            if let Err(err) = i {
+                errors.push(format!("{err:?}"));
+            }
+        }
+        assert_eq!(
+            errors.len(),
+            1,
+            "only the bad attribute on <a> should be reported, got {errors:?}"
+        );
+        assert!(
+            errors[0].contains("\"y\""),
+            "expected the one error to be about attribute 'y', got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn abandoned_self_closing_recovery_does_not_let_a_later_element_steal_its_slot() {
+        // `a` is required exactly once. The first `<a y="1"/>` is invalid (wrong attribute,
+        // missing required <b>) and can't be recovered into a position *inside* a's content,
+        // so recovery instead advances past `a` entirely. A second `<a>` must then be rejected
+        // as an extra, disallowed element — not silently accepted as satisfying the same slot.
+        let f = Fixture::correct(
+            "start = element root { element a { attribute x { text }, element b { empty } } }",
+        );
+        let doc = r#"<root><a y="1"/><a x="1"><b/></a></root>"#;
+        let reader = xmlparser::Tokenizer::from(doc);
+        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
+        let mut errors = vec![];
+        while let Some(i) = v.validate_next() {
+            if let Err(err) = i {
+                errors.push(format!("{err:?}"));
+            }
+        }
+        assert!(
+            errors.len() >= 2,
+            "expected both the bad attribute and the illegal second <a> to be reported, got {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("ElementStart")),
+            "expected the second, schema-illegal <a> to be rejected outright, got {errors:?}"
+        );
     }
 
     #[test]

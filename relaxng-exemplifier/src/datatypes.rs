@@ -121,6 +121,8 @@ fn generate_xsd_datatype(dt: &XsdDatatypes, u: &mut Unstructured) -> String {
             format!("{}.0", v)
         }
         XsdDatatypes::NcName(_) => gen_ncname(u),
+        // Unprefixed, so that the value is valid without needing namespace declarations
+        XsdDatatypes::QName(_) => gen_ncname(u),
         XsdDatatypes::NmToken(_) => gen_ncname(u),
         XsdDatatypes::NmTokens(..) => {
             let n = u.int_in_range(1usize..=3usize).unwrap_or(1);

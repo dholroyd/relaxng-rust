@@ -120,6 +120,7 @@ pub enum XsdDatatypes {
     NmTokens(LengthFacet, Option<PatternFacet>),
     NmToken(StringFacets),
     NcName(StringFacets),
+    QName(StringFacets),
     Name(StringFacets),
     Token(StringFacets),
     Duration(Option<PatternFacet>),
@@ -141,6 +142,27 @@ pub enum XsdDatatypes {
     IdRefs(LengthFacet, Option<PatternFacet>),
     Entity(StringFacets),
     Entities(LengthFacet, Option<PatternFacet>),
+}
+impl XsdDatatypes {
+    /// Validate a value with namespace context, so that the prefix of a QName can be checked
+    /// against the namespace bindings in scope in the instance document.
+    pub fn is_valid_with_ns(
+        &self,
+        value: &str,
+        lookup_ns: impl Fn(&str) -> Option<String>,
+    ) -> bool {
+        use super::Datatype;
+        match self {
+            XsdDatatypes::QName(_) => {
+                self.is_valid(value)
+                    && match parse_qname(value) {
+                        Some((Some(prefix), _)) => lookup_ns(prefix).is_some(),
+                        _ => true,
+                    }
+            }
+            _ => self.is_valid(value),
+        }
+    }
 }
 impl super::Datatype for XsdDatatypes {
     fn is_valid(&self, value: &str) -> bool {
@@ -261,6 +283,10 @@ impl super::Datatype for XsdDatatypes {
             }
             XsdDatatypes::NcName(str_facets) => {
                 is_valid_ncname(value) && str_facets.is_valid(value)
+            }
+            XsdDatatypes::QName(str_facets) => {
+                let value = value.trim();
+                parse_qname(value).is_some() && str_facets.is_valid(value)
             }
             XsdDatatypes::Name(str_facets) => is_valid_name(value) && str_facets.is_valid(value),
             XsdDatatypes::Token(str_facets) => {
@@ -417,6 +443,20 @@ fn is_valid_ncname(text: &str) -> bool {
     match relaxng_syntax::compact::nc_name(relaxng_syntax::compact::Span::new(text)) {
         Ok((rest, _name)) => rest.fragment().is_empty(),
         Err(_) => false,
+    }
+}
+
+/// Split a QName into its optional prefix and local part, after collapsing surrounding
+/// whitespace.  Returns `None` if the text is not lexically a QName.
+fn parse_qname(text: &str) -> Option<(Option<&str>, &str)> {
+    let text = text.trim();
+    match text.split_once(':') {
+        Some((prefix, local)) if is_valid_ncname(prefix) && is_valid_ncname(local) => {
+            Some((Some(prefix), local))
+        }
+        Some(_) => None,
+        None if is_valid_ncname(text) => Some((None, text)),
+        None => None,
     }
 }
 
@@ -980,6 +1020,12 @@ impl Compiler {
                     type_name: "NCName",
                     facet,
                 }),
+            "QName" => self
+                .qname(ctx, params)
+                .map_err(|facet| XsdDatatypeError::Facet {
+                    type_name: "QName",
+                    facet,
+                }),
             "Name" => self
                 .name(ctx, params)
                 .map_err(|facet| XsdDatatypeError::Facet {
@@ -1492,6 +1538,28 @@ impl Compiler {
         }
 
         Ok(XsdDatatypes::NcName(StringFacets { len, pattern }))
+    }
+
+    fn qname(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
+        let mut len = LengthFacet::Unbounded;
+        let mut pattern = None;
+
+        for param in params {
+            match &param.name.to_string()[..] {
+                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
+                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
+                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "pattern" => pattern = Some(self.pattern(ctx, param)?),
+                _ => {
+                    return Err(FacetError::InvalidFacet(
+                        ctx.convert_span(&param.span),
+                        param.name.to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(XsdDatatypes::QName(StringFacets { len, pattern }))
     }
 
     fn token(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2325,26 +2393,15 @@ impl QNameVal {
         default_ns: &str,
         lookup_ns: impl Fn(&str) -> Option<String>,
     ) -> Option<Self> {
-        if let Some(pos) = val.find(':') {
-            let prefix = &val[0..pos];
-            let localname = &val[pos + 1..];
-            if is_valid_ncname(prefix) && is_valid_ncname(localname) {
-                let ns = lookup_ns(prefix)?;
-                Some(QNameVal {
-                    namespace_uri: ns,
-                    localname: localname.to_string(),
-                })
-            } else {
-                None
-            }
-        } else if is_valid_ncname(val) {
-            Some(QNameVal {
-                namespace_uri: default_ns.to_string(),
-                localname: val.to_string(),
-            })
-        } else {
-            None
-        }
+        let (prefix, localname) = parse_qname(val)?;
+        let namespace_uri = match prefix {
+            Some(prefix) => lookup_ns(prefix)?,
+            None => default_ns.to_string(),
+        };
+        Some(QNameVal {
+            namespace_uri,
+            localname: localname.to_string(),
+        })
     }
 }
 
@@ -2392,6 +2449,29 @@ mod test {
         let ctx = Context::new(file);
         let c = Compiler;
         c.compile(&ctx, &(0..0), name, &[]).unwrap()
+    }
+
+    // Helper: compile an XSD datatype with a single param
+    fn compile_one_param(name: &str, param_name: &str, param_value: &str) -> XsdDatatypes {
+        let mut map = CodeMap::new();
+        let file = map.add_file("test.rnc".to_string(), "test".to_string());
+        let ctx = Context::new(file);
+        let c = Compiler;
+        let param = types::Param {
+            span: 0..0,
+            annotations: None,
+            name: types::IdentifierOrKeyword::Identifier(types::Identifier(
+                0..0,
+                param_name.to_string(),
+            )),
+            value: types::Literal(
+                0..0,
+                vec![types::LiteralSegment {
+                    body: param_value.to_string(),
+                }],
+            ),
+        };
+        c.compile(&ctx, &(0..0), name, &[param]).unwrap()
     }
 
     use crate::datatype::Datatype;
@@ -2616,6 +2696,44 @@ mod test {
         assert!(dt.is_valid("_underscore"));
         assert!(!dt.is_valid("123"));
         assert!(!dt.is_valid(""));
+    }
+
+    #[test]
+    fn qname_valid() {
+        let dt = compile_no_params("QName");
+        assert!(dt.is_valid("foo"));
+        assert!(dt.is_valid("style:font-face"));
+        assert!(dt.is_valid(" eg:foo ")); // surrounding whitespace is collapsed
+        assert!(!dt.is_valid("a:b:c")); // at most one colon
+        assert!(!dt.is_valid(":foo")); // empty prefix
+        assert!(!dt.is_valid("eg:")); // empty local part
+        assert!(!dt.is_valid("1a:foo")); // prefix must be an NCName
+        assert!(!dt.is_valid(""));
+    }
+
+    #[test]
+    fn qname_pattern_facet() {
+        let dt = compile_one_param("QName", "pattern", "[a-z]+:[a-z\\-]+");
+        assert!(dt.is_valid("style:font-face"));
+        assert!(!dt.is_valid("font-face")); // pattern requires a prefix
+        assert!(dt.is_valid(" style:font-face ")); // facets see the collapsed value
+    }
+
+    #[test]
+    fn qname_length_facet_ignores_surrounding_whitespace() {
+        let dt = compile_one_param("QName", "length", "5");
+        assert!(dt.is_valid(" eg:ab "));
+        assert!(!dt.is_valid("eg:abc"));
+    }
+
+    #[test]
+    fn qname_prefix_resolution() {
+        let dt = compile_no_params("QName");
+        let lookup = |p: &str| (p == "eg").then(|| "http://example.com/ns".to_string());
+        assert!(dt.is_valid_with_ns("eg:foo", lookup));
+        assert!(dt.is_valid_with_ns("foo", lookup));
+        assert!(!dt.is_valid_with_ns("other:foo", lookup));
+        assert!(!dt.is_valid_with_ns("a:b:c", lookup));
     }
 
     #[test]

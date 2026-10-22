@@ -164,6 +164,11 @@ impl<'a> Validator<'a> {
                 if self.flush_text() {
                     return Err(ValidatorError::NotAllowed(evt));
                 }
+                if self.stack.elements.is_empty() {
+                    // Entering the document element; build a namespace context even if the
+                    // document declares no namespaces, so that QName prefixes can be checked
+                    self.schema.ns_context_dirty = true;
+                }
                 self.stack.push(prefix, local, span);
                 // does not change current_step state
                 return Ok(());

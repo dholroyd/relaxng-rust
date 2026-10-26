@@ -2,6 +2,7 @@ use libtest_mimic::{Arguments, Failed, Trial};
 use relaxng_model::Compiler;
 use relaxng_validator::Validator;
 use roxmltree::{ExpandedName, Node};
+use std::ops::ControlFlow;
 
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -168,7 +169,14 @@ fn run_test(test_case: TestCase) -> Result<(), Failed> {
 
             for (i, doc) in valid.iter().enumerate() {
                 let mut v = Validator::new(result.start.clone()).unwrap();
-                if let Err(err) = v.validate(doc.as_bytes()) {
+                let mut errors = vec![];
+                if v.validate_with(doc.as_bytes(), |_, err| {
+                    errors.push(err);
+                    ControlFlow::Continue(())
+                })
+                .is_err()
+                {
+                    let err = errors;
                     let schema = resources.get("correct.rng").unwrap();
                     return Err(format!(
                         "Valid document #{} rejected: {err:?}\nschema: {schema}\ndoc: {doc}",
@@ -180,7 +188,9 @@ fn run_test(test_case: TestCase) -> Result<(), Failed> {
 
             for (i, doc) in invalid.iter().enumerate() {
                 let mut v = Validator::new(result.start.clone()).unwrap();
-                if v.validate(doc.as_bytes()).is_ok() {
+                if v.validate_with(doc.as_bytes(), |_, _| ControlFlow::Break(()))
+                    .is_ok()
+                {
                     let schema = resources.get("correct.rng").unwrap();
                     return Err(format!(
                         "Invalid document #{} was accepted:\nschema: {schema}\ndoc: {doc}",

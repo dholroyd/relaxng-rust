@@ -3,6 +3,7 @@ use relaxng_model::model::DefineRule;
 use relaxng_model::{Compiler, FsFiles, Syntax};
 use relaxng_validator::Validator;
 use std::cell::RefCell;
+use std::ops::ControlFlow;
 use std::rc::Rc;
 
 fn compile(rnc: &str) -> Rc<RefCell<Option<DefineRule>>> {
@@ -15,8 +16,13 @@ fn compile(rnc: &str) -> Rc<RefCell<Option<DefineRule>>> {
 
 fn assert_valid(model: Rc<RefCell<Option<DefineRule>>>, doc: &str) {
     let mut v = Validator::new(model).expect("compile validator");
-    if let Err(e) = v.validate(doc.as_bytes()) {
-        panic!("validation error: {e:?}\ndoc:\n{doc}");
+    let mut errors = vec![];
+    let result = v.validate_with(doc.as_bytes(), |_, err| {
+        errors.push(err);
+        ControlFlow::Continue(())
+    });
+    if result.is_err() {
+        panic!("validation error: {errors:?}\ndoc:\n{doc}");
     }
 }
 

@@ -4,6 +4,7 @@ use relaxng_validator::{CoverageReport, Validator};
 
 use std::fs::File;
 use std::io::BufReader;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
@@ -104,18 +105,24 @@ fn run_validation(v: &mut Validator, xml: &Path) {
         eprintln!("Error opening {xml:?}: {e}");
         exit(1);
     });
-    if let Err(err) = v.validate_reader(BufReader::new(f)) {
-        // Re-read the file for diagnostic context
-        if let Ok(source) = std::fs::read(xml) {
-            let (map, d) = v.diagnostic(xml.to_string_lossy().to_string(), &source, &err);
-            let mut emitter = codemap_diagnostic::Emitter::stderr(
-                codemap_diagnostic::ColorConfig::Auto,
-                Some(&map),
-            );
-            emitter.emit(&d[..]);
-        } else {
-            eprintln!("Validation error in {xml:?}: {err}");
+    // The source is only needed for diagnostic context, so read it on the first error rather
+    // than holding valid documents in memory.
+    let mut source: Option<Option<Vec<u8>>> = None;
+    let result = v.validate_reader(BufReader::new(f), |v, err| {
+        match source.get_or_insert_with(|| std::fs::read(xml).ok()) {
+            Some(source) => {
+                let (map, d) = v.diagnostic(xml.to_string_lossy().to_string(), source, &err);
+                let mut emitter = codemap_diagnostic::Emitter::stderr(
+                    codemap_diagnostic::ColorConfig::Auto,
+                    Some(&map),
+                );
+                emitter.emit(&d[..]);
+            }
+            None => eprintln!("Validation error in {xml:?}: {err}"),
         }
+        ControlFlow::Continue(())
+    });
+    if result.is_err() {
         exit(2);
     }
 }

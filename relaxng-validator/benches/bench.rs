@@ -281,8 +281,8 @@ fn compile_schema() -> Rc<RefCell<Option<relaxng_model::model::DefineRule>>> {
 
 fn validate(schema: Rc<RefCell<Option<relaxng_model::model::DefineRule>>>, doc: &str) {
     let mut v = Validator::new(schema).unwrap();
-    v.validate(doc.as_bytes())
-        .unwrap_or_else(|e| panic!("Validation error: {e:?}"));
+    v.validate_with(doc.as_bytes(), |_, err| panic!("Validation error: {err:?}"))
+        .unwrap();
 }
 
 fn bench_compile(c: &mut Criterion) {

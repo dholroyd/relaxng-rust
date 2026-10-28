@@ -79,14 +79,14 @@ impl super::Datatype for XsdDatatypeValues {
 
 lazy_static! {
     static ref LANG_RE: regex::Regex = regex::Regex::new(r"^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$").unwrap();
-    static ref DATETIME_RE: regex::Regex = regex::Regex::new(r"^-?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z(?:(?:\+|-)\d{2}:\d{2})?)?$").unwrap();
-    static ref DURATION_RE: regex::Regex = regex::Regex::new(r"^P(([0-9]+([.,][0-9]*)?Y)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?D)?T?([0-9]+([.,][0-9]*)?H)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?S)?)|\d{4}-?(0[1-9]|11|12)-?(?:[0-2]\d|30|31)T((?:[0-1][0-9]|[2][0-3]):?(?:[0-5][0-9]):?(?:[0-5][0-9]|60)|2400|24:00)$").unwrap();
-    static ref TIME_RE: regex::Regex = regex::Regex::new(r"^\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$").unwrap();
-    static ref GYEARMONTH_RE: regex::Regex = regex::Regex::new(r"^-?\d{4,}-\d{2}(Z|[+-]\d{2}:\d{2})?$").unwrap();
-    static ref GYEAR_RE: regex::Regex = regex::Regex::new(r"^-?\d{4,}(Z|[+-]\d{2}:\d{2})?$").unwrap();
-    static ref GMONTHDAY_RE: regex::Regex = regex::Regex::new(r"^--\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$").unwrap();
-    static ref GDAY_RE: regex::Regex = regex::Regex::new(r"^---\d{2}(Z|[+-]\d{2}:\d{2})?$").unwrap();
-    static ref GMONTH_RE: regex::Regex = regex::Regex::new(r"^--\d{2}(Z|[+-]\d{2}:\d{2})?$").unwrap();
+    static ref DATETIME_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z(?:(?:\+|-)[0-9]{2}:[0-9]{2})?)?$").unwrap();
+    static ref DURATION_RE: regex::Regex = regex::Regex::new(r"^P(([0-9]+([.,][0-9]*)?Y)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?D)?T?([0-9]+([.,][0-9]*)?H)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?S)?)|[0-9]{4}-?(0[1-9]|11|12)-?(?:[0-2][0-9]|30|31)T((?:[0-1][0-9]|[2][0-3]):?(?:[0-5][0-9]):?(?:[0-5][0-9]|60)|2400|24:00)$").unwrap();
+    static ref TIME_RE: regex::Regex = regex::Regex::new(r"^[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
+    static ref GYEARMONTH_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4,}-[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
+    static ref GYEAR_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4,}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
+    static ref GMONTHDAY_RE: regex::Regex = regex::Regex::new(r"^--[0-9]{2}-[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
+    static ref GDAY_RE: regex::Regex = regex::Regex::new(r"^---[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
+    static ref GMONTH_RE: regex::Regex = regex::Regex::new(r"^--[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref HEX_RE: regex::Regex = regex::Regex::new(r"^([0-9a-fA-F]{2})*$").unwrap();
     static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^[A-Za-z0-9+/\s]*={0,2}$").unwrap();
 }
@@ -2425,6 +2425,33 @@ mod test {
             assert!(
                 crate::datatype::Datatype::is_valid(&dt, value),
                 "anyURI must accept {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn date_and_time_types_reject_non_ascii_digits() {
+        // XSD lexical spaces use only the ASCII digits 0-9, but the regex crate's `\d` matches
+        // every Unicode decimal digit (here Arabic-Indic U+0660..U+0669).
+        let cases = [
+            ("dateTime", "2025-01-01T10:30:00", "٢٠٢٥-٠١-٠١T١٠:٣٠:٠٠"),
+            ("time", "10:30:00", "١٠:٣٠:٠٠"),
+            ("gYearMonth", "2025-01", "٢٠٢٥-٠١"),
+            ("gYear", "2025", "٢٠٢٥"),
+            ("gMonthDay", "--01-31", "--٠١-٣١"),
+            ("gDay", "---31", "---٣١"),
+            ("gMonth", "--01", "--٠١"),
+            ("duration", "0001-01-01T10:30:00", "٠٠٠١-٠١-٠١T١٠:٣٠:٠٠"),
+        ];
+        for (type_name, ascii, non_ascii) in cases {
+            let dt = compile_no_params(type_name);
+            assert!(
+                crate::datatype::Datatype::is_valid(&dt, ascii),
+                "{type_name} must accept {ascii:?}"
+            );
+            assert!(
+                !crate::datatype::Datatype::is_valid(&dt, non_ascii),
+                "{type_name} must reject {non_ascii:?}"
             );
         }
     }

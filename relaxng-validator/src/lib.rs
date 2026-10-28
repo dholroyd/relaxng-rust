@@ -548,7 +548,7 @@ impl<'a> Validator<'a> {
                 // TODO: also provide namespace information; grouping by namespace to make the
                 //       information more succinct
                 let mut desc = String::new();
-                self.describe_nameclass(nameclass, &mut desc);
+                self.describe_nameclass(self.schema.name_class(*nameclass), &mut desc);
                 result.push_str(&desc);
             }
         }

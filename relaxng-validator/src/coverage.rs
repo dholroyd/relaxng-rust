@@ -76,17 +76,22 @@ impl Schema {
             let (kind, name) = match pat {
                 Pat::Element(nc, _) => {
                     let mut desc = String::new();
-                    describe_nameclass(nc, &mut desc);
+                    describe_nameclass(self.name_class(*nc), &mut desc);
                     ("Element", desc)
                 }
                 Pat::Attribute(nc, _) => {
                     let mut desc = String::new();
-                    describe_nameclass(nc, &mut desc);
+                    describe_nameclass(self.name_class(*nc), &mut desc);
                     ("Attribute", desc)
                 }
-                Pat::Datatype(dt) => ("Datatype", describe_datatype(dt)),
-                Pat::DatatypeValue(dt) => ("DatatypeValue", describe_datatype_value(dt)),
-                Pat::DatatypeExcept(dt, _) => ("DatatypeExcept", describe_datatype(dt)),
+                Pat::Datatype(dt) => ("Datatype", describe_datatype(self.datatype(*dt))),
+                Pat::DatatypeValue(dt) => (
+                    "DatatypeValue",
+                    describe_datatype_value(self.datatype_value(*dt)),
+                ),
+                Pat::DatatypeExcept(dt, _) => {
+                    ("DatatypeExcept", describe_datatype(self.datatype(*dt)))
+                }
                 Pat::Text => {
                     // The Text sentinel is always pre-populated; only report it
                     // if the schema actually references it (has source spans).

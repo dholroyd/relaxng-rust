@@ -60,7 +60,7 @@ impl Schema {
                 self.text()
             }
             Pat::Datatype(dt) => {
-                if self.datatype_is_valid(&dt, text) {
+                if self.datatype_is_valid(self.datatype(dt), text) {
                     self.mark_covered(pid);
                     self.empty()
                 } else {
@@ -68,6 +68,7 @@ impl Schema {
                 }
             }
             Pat::DatatypeValue(dt) => {
+                let dt = self.datatype_value(dt);
                 let valid = if let Some(ref ns_ctx) = self.ns_context {
                     let ns_ctx = ns_ctx.clone();
                     dt.is_valid_with_ns(text, &ns_ctx.default_ns, |p| ns_ctx.lookup(p))
@@ -84,7 +85,7 @@ impl Schema {
             Pat::DatatypeExcept(dt, except) => {
                 let d = self.text_deriv(except, text);
                 let pat2 = self.patt(d);
-                if self.datatype_is_valid(&dt, text) && !pat2.is_nullable() {
+                if self.datatype_is_valid(self.datatype(dt), text) && !pat2.is_nullable() {
                     self.mark_covered(pid);
                     self.empty()
                 } else {
@@ -247,8 +248,8 @@ impl Schema {
                     x
                 }
             }
-            Pat::Element(ref nc, inner_pat) => {
-                if contains(nc, name) {
+            Pat::Element(nc, inner_pat) => {
+                if contains(self.name_class(nc), name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
                     self.after(inner_pat, empty)
@@ -322,8 +323,8 @@ impl Schema {
                 let y = self.apply_after(self.patt(d2), |pat, s| s.group(pid1, pat));
                 self.choice(x, y)
             }
-            Pat::Attribute(ref nc, val_pat) => {
-                if contains(nc, name) {
+            Pat::Attribute(nc, val_pat) => {
+                if contains(self.name_class(nc), name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
                     self.after(val_pat, empty)

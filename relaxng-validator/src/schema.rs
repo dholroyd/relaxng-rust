@@ -27,7 +27,53 @@ pub(crate) const PAT_NOT_ALLOWED: PatId = PatId(0);
 pub(crate) const PAT_EMPTY: PatId = PatId(1);
 pub(crate) const PAT_TEXT: PatId = PatId(2);
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+/// Index into `Schema::names`.
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub(crate) struct NameClassId(u16);
+
+/// Index into `Schema::datatypes`.
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub(crate) struct DatatypeId(u16);
+
+/// Index into `Schema::datatype_values`.
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub(crate) struct DatatypeValueId(u16);
+
+/// Build-time deduplication of values, assigning dense `u16` ids.  [`Interner::into_table`]
+/// yields the values as a slice indexed by those ids.
+struct Interner<T> {
+    ids: HashMap<T, u16>,
+}
+
+impl<T> Default for Interner<T> {
+    fn default() -> Self {
+        Interner {
+            ids: HashMap::new(),
+        }
+    }
+}
+
+impl<T: Hash + Eq> Interner<T> {
+    /// Returns `None` if the `u16` id space is exhausted.
+    fn intern(&mut self, value: T) -> Option<u16> {
+        if let Some(&id) = self.ids.get(&value) {
+            return Some(id);
+        }
+        let id = u16::try_from(self.ids.len()).ok()?;
+        self.ids.insert(value, id);
+        Some(id)
+    }
+
+    fn into_table(self) -> Box<[T]> {
+        let mut slots: Vec<Option<T>> = (0..self.ids.len()).map(|_| None).collect();
+        for (value, id) in self.ids {
+            slots[id as usize] = Some(value);
+        }
+        slots.into_iter().map(|v| v.unwrap()).collect()
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub(crate) enum Pat {
     Choice(PatId, PatId, bool),
     Interleave(PatId, PatId, bool),
@@ -36,11 +82,11 @@ pub(crate) enum Pat {
     Empty,
     Text,
     NotAllowed,
-    Attribute(Box<NameClass>, PatId),
-    Element(Box<NameClass>, PatId),
-    Datatype(Box<datatype::Datatypes>),
-    DatatypeValue(Box<datatype::DatatypeValues>),
-    DatatypeExcept(Box<datatype::Datatypes>, PatId),
+    Attribute(NameClassId, PatId),
+    Element(NameClassId, PatId),
+    Datatype(DatatypeId),
+    DatatypeValue(DatatypeValueId),
+    DatatypeExcept(DatatypeId, PatId),
     List(PatId),
     After(PatId, PatId),
 }
@@ -112,6 +158,12 @@ impl NsContext {
 #[derive(Default)]
 pub(crate) struct Schema {
     pub(crate) inner: RefCell<Inner>,
+    // Payloads referenced by `Pat` variants, created while the schema is compiled and never
+    // changed afterwards.  Entries are interned, so equal payloads share an id.
+    names: Box<[NameClass]>,
+    datatypes: Box<[datatype::Datatypes]>,
+    datatype_values: Box<[datatype::DatatypeValues]>,
+
     pub(crate) coverage: Option<Box<[u64]>>,
     pub(crate) compile_time_count: u16,
     /// Namespace context for QName resolution during text_deriv.
@@ -122,6 +174,16 @@ pub(crate) struct Schema {
 }
 
 impl Schema {
+    pub(crate) fn name_class(&self, id: NameClassId) -> &NameClass {
+        &self.names[id.0 as usize]
+    }
+    pub(crate) fn datatype(&self, id: DatatypeId) -> &datatype::Datatypes {
+        &self.datatypes[id.0 as usize]
+    }
+    pub(crate) fn datatype_value(&self, id: DatatypeValueId) -> &datatype::DatatypeValues {
+        &self.datatype_values[id.0 as usize]
+    }
+
     pub(crate) fn push(&self, p: Pat) -> PatId {
         let mut inner = self.inner.borrow_mut();
         if inner.patterns.len() > 0xffff {
@@ -131,7 +193,7 @@ impl Schema {
             *id
         } else {
             let id = PatId(inner.patterns.len() as u16);
-            inner.memo.insert(p.clone(), id);
+            inner.memo.insert(p, id);
             inner.patterns.push(p);
             id
         }
@@ -274,7 +336,7 @@ impl Schema {
         self.push(Pat::List(p))
     }
     pub(crate) fn patt(&self, id: PatId) -> Pat {
-        self.inner.borrow().patterns[id.0 as usize].clone()
+        self.inner.borrow().patterns[id.0 as usize]
     }
 
     pub(crate) fn check_choice(
@@ -406,7 +468,7 @@ impl Schema {
                     writeln!(w, "NotAllowed{}", pat.0)
                 }
                 Pat::Attribute(nc, p) => {
-                    writeln!(w, "Att{}({:?}=", pat.0, nc)?;
+                    writeln!(w, "Att{}({:?}=", pat.0, self.name_class(nc))?;
                     self.dumpy_dump(depth + 1, p, w, seen)?;
                     for _ in 0..depth {
                         w.write_all(b"  ")?;
@@ -414,7 +476,7 @@ impl Schema {
                     writeln!(w, ")")
                 }
                 Pat::Element(nc, p) => {
-                    writeln!(w, "Elem{}({:?}=", pat.0, nc)?;
+                    writeln!(w, "Elem{}({:?}=", pat.0, self.name_class(nc))?;
                     self.dumpy_dump(depth + 1, p, w, seen)?;
                     for _ in 0..depth {
                         w.write_all(b"  ")?;
@@ -422,13 +484,13 @@ impl Schema {
                     writeln!(w, ")")
                 }
                 Pat::Datatype(dt) => {
-                    writeln!(w, "{:?}{}", dt, pat.0)
+                    writeln!(w, "{:?}{}", self.datatype(dt), pat.0)
                 }
                 Pat::DatatypeValue(dt) => {
-                    writeln!(w, "{:?}{}", dt, pat.0)
+                    writeln!(w, "{:?}{}", self.datatype_value(dt), pat.0)
                 }
                 Pat::DatatypeExcept(dt, p) => {
-                    writeln!(w, "{:?}{}-", dt, pat.0)?;
+                    writeln!(w, "{:?}{}-", self.datatype(dt), pat.0)?;
                     self.dumpy_dump(depth + 1, p, w, seen)
                 }
                 Pat::List(p) => {
@@ -479,13 +541,13 @@ impl Schema {
                     writeln!(w, "Elem{}!", pat.0)
                 }
                 Pat::Datatype(dt) => {
-                    writeln!(w, "{:?}{}!", dt, pat.0)
+                    writeln!(w, "{:?}{}!", self.datatype(dt), pat.0)
                 }
                 Pat::DatatypeValue(dt) => {
-                    writeln!(w, "{:?}{}!", dt, pat.0)
+                    writeln!(w, "{:?}{}!", self.datatype_value(dt), pat.0)
                 }
                 Pat::DatatypeExcept(dt, _p) => {
-                    writeln!(w, "{:?}{}!", dt, pat.0)
+                    writeln!(w, "{:?}{}!", self.datatype(dt), pat.0)
                 }
                 Pat::List(_p) => {
                     writeln!(w, "List{}!", pat.0)
@@ -535,6 +597,9 @@ impl Hash for DefineId {
 struct SchemaBuilder {
     memo: HashMap<Pat, PatId>,
     patterns: Vec<Option<Pat>>,
+    names: Interner<NameClass>,
+    datatypes: Interner<datatype::Datatypes>,
+    datatype_values: Interner<datatype::DatatypeValues>,
     refs: HashMap<DefineId, PatId>,
     span_map: HashMap<u16, Vec<codemap::Span>>,
     /// Deferred `(placeholder, target)` pairs where the target was still an
@@ -558,6 +623,9 @@ impl SchemaBuilder {
         SchemaBuilder {
             memo,
             patterns,
+            names: Interner::default(),
+            datatypes: Interner::default(),
+            datatype_values: Interner::default(),
             refs: HashMap::new(),
             span_map: HashMap::new(),
             deferred: Vec::new(),
@@ -574,7 +642,7 @@ impl SchemaBuilder {
             *id
         } else {
             let id = PatId(self.patterns.len() as u16);
-            self.memo.insert(p.clone(), id);
+            self.memo.insert(p, id);
             self.patterns.push(Some(p));
             id
         }
@@ -653,23 +721,41 @@ impl SchemaBuilder {
         PAT_NOT_ALLOWED
     }
 
+    // Interning fails only if a table outgrows the `u16` id space; flag that like pattern overflow.
     fn attribute(&mut self, name: NameClass, p: PatId) -> PatId {
-        self.push(Pat::Attribute(Box::new(name), p))
+        let Some(name) = self.names.intern(name) else {
+            self.overflowed = true;
+            return PAT_NOT_ALLOWED;
+        };
+        self.push(Pat::Attribute(NameClassId(name), p))
     }
 
     fn element(&mut self, name: NameClass, p: PatId) -> PatId {
-        self.push(Pat::Element(Box::new(name), p))
+        let Some(name) = self.names.intern(name) else {
+            self.overflowed = true;
+            return PAT_NOT_ALLOWED;
+        };
+        self.push(Pat::Element(NameClassId(name), p))
     }
 
     fn datatype_value(&mut self, dt: datatype::DatatypeValues) -> PatId {
-        self.push(Pat::DatatypeValue(Box::new(dt)))
+        let Some(dt) = self.datatype_values.intern(dt) else {
+            self.overflowed = true;
+            return PAT_NOT_ALLOWED;
+        };
+        self.push(Pat::DatatypeValue(DatatypeValueId(dt)))
     }
 
     fn datatype_name(&mut self, dt: datatype::Datatypes, except: Option<PatId>) -> PatId {
+        let Some(dt) = self.datatypes.intern(dt) else {
+            self.overflowed = true;
+            return PAT_NOT_ALLOWED;
+        };
+        let dt = DatatypeId(dt);
         if let Some(except) = except {
-            self.push(Pat::DatatypeExcept(Box::new(dt), except))
+            self.push(Pat::DatatypeExcept(dt, except))
         } else {
-            self.push(Pat::Datatype(Box::new(dt)))
+            self.push(Pat::Datatype(dt))
         }
     }
 
@@ -703,7 +789,7 @@ impl SchemaBuilder {
                 p, placeholder_id.0, id.0, name
             ),
         }
-        match self.patterns[id.0 as usize].clone() {
+        match self.patterns[id.0 as usize] {
             Some(target) => {
                 self.patterns[placeholder_id.0 as usize] = Some(target);
             }
@@ -715,14 +801,14 @@ impl SchemaBuilder {
         }
     }
 
-    fn finalize(mut self) -> Inner {
+    fn finalize(mut self) -> Schema {
         // Resolve deferred placeholders from mutual recursion.  Iterate until
         // no more progress is made to handle chains (A→B→C).
         let mut made_progress = true;
         while made_progress {
             made_progress = false;
             self.deferred.retain(|&(placeholder, target)| {
-                if let Some(pat) = self.patterns[target.0 as usize].clone() {
+                if let Some(pat) = self.patterns[target.0 as usize] {
                     self.patterns[placeholder.0 as usize] = Some(pat);
                     made_progress = true;
                     false // resolved, remove from list
@@ -737,10 +823,17 @@ impl SchemaBuilder {
             .enumerate()
             .map(|(i, p)| p.unwrap_or_else(|| panic!("unresolved slot at index {}", i)))
             .collect();
-        Inner {
+        let inner = Inner {
             memo: self.memo,
             patterns,
             span_map: self.span_map,
+            ..Default::default()
+        };
+        Schema {
+            inner: RefCell::new(inner),
+            names: self.names.into_table(),
+            datatypes: self.datatypes.into_table(),
+            datatype_values: self.datatype_values.into_table(),
             ..Default::default()
         }
     }
@@ -876,9 +969,5 @@ pub(crate) fn build_schema(
     if builder.overflowed {
         return Err(SchemaError::TooManyPatterns);
     }
-    let schema = Schema {
-        inner: RefCell::new(builder.finalize()),
-        ..Default::default()
-    };
-    Ok((schema, start))
+    Ok((builder.finalize(), start))
 }

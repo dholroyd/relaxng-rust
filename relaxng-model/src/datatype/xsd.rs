@@ -501,7 +501,7 @@ impl StringFacets {
         }
     }
 
-    pub fn regex(&self) -> Option<&regex::Regex> {
+    pub fn regex(&self) -> Option<&super::xsd_regex::XsdRegex> {
         self.pattern.as_ref().map(|pat| &pat.1)
     }
 }
@@ -526,7 +526,7 @@ pub enum FacetError {
     ConflictingFacet(&'static str),
     InvalidInt(codemap::Span, String),
     InvalidFloat(codemap::Span, String),
-    InvalidPattern(codemap::Span, regex::Error),
+    InvalidPattern(codemap::Span, super::xsd_regex::XsdRegexError),
     InvalidFacet(codemap::Span, String),
 }
 
@@ -828,7 +828,7 @@ where
 }
 
 #[derive(Clone)]
-pub struct PatternFacet(String, regex::Regex);
+pub struct PatternFacet(String, super::xsd_regex::XsdRegex);
 impl PartialEq for PatternFacet {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
@@ -2371,13 +2371,43 @@ impl Compiler {
 
     fn pattern(&self, ctx: &Context, param: &types::Param) -> Result<PatternFacet, FacetError> {
         let xsd_pat = param.value.as_string_value();
-        let rust_pat = super::xsd_regex::translate(&xsd_pat).map_err(|msg| {
-            FacetError::InvalidPattern(ctx.convert_span(&param.span), regex::Error::Syntax(msg))
-        })?;
-        regex::Regex::new(&rust_pat)
-            .map(|re| PatternFacet(xsd_pat, re))
-            .map_err(|e| FacetError::InvalidPattern(ctx.convert_span(&param.span), e))
+        super::xsd_regex::XsdRegex::new(&xsd_pat)
+            .map(|re| PatternFacet(xsd_pat.clone(), re))
+            .map_err(|e| {
+                let span = pattern_error_span(ctx, &param.value, &xsd_pat, e.span());
+                FacetError::InvalidPattern(span, e)
+            })
     }
+}
+
+/// Finds the part of the schema source to blame for a problem at the given byte range of a
+/// pattern.  This is only possible when the pattern text appears verbatim in the source, as it
+/// does unless the literal was built from several segments or contains escape sequences.  In
+/// other cases, the whole literal is blamed instead.
+fn pattern_error_span(
+    ctx: &Context,
+    literal: &types::Literal,
+    pattern: &str,
+    range: Option<std::ops::Range<usize>>,
+) -> codemap::Span {
+    let literal_span = ctx.convert_span(&literal.0);
+    let Some(range) = range else {
+        return literal_span;
+    };
+    let file = ctx.file();
+    let source = file.source_slice(literal_span);
+    // Whatever surrounds the pattern text within the literal (quotes), assume it to be the same
+    // length on each side
+    let Some(surround) = source.len().checked_sub(pattern.len()).map(|n| n / 2) else {
+        return literal_span;
+    };
+    if literal.1.len() != 1 || source.get(surround..surround + pattern.len()) != Some(pattern) {
+        return literal_span;
+    }
+    literal_span.subspan(
+        (surround + range.start) as u64,
+        (surround + range.end) as u64,
+    )
 }
 
 /// A resolved QName: (namespace_uri, localname)

@@ -4,50 +4,147 @@ mod nameclass;
 mod schema;
 
 use relaxng_model::model;
-use relaxng_model::model::NameClass;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::{ControlFlow, Range};
 use std::rc::Rc;
-use xmlparser::{ElementEnd, EntityDefinition, StrSpan, Token, Tokenizer};
+use xml_syntax_reader::{EntityKind, ErrorKind, ParseError, QName, ReadError, Span, Visitor};
 
 pub use coverage::{CoverageReport, TrackablePattern};
 // Re-exported so downstream crates can match `ValidatorError::Schema(..)` exhaustively.
 pub use schema::SchemaError;
 
-use nameclass::*;
+use nameclass::{is_ncname, *};
 use schema::*;
 
 #[derive(Debug)]
-pub enum ValidatorError<'a> {
-    Xml(xmlparser::Error),
-    NotAllowed(Token<'a>),
+pub enum ValidatorError {
+    /// XML well-formedness error from the parser.
+    Xml(xml_syntax_reader::Error),
+    /// The XML construct at the given span is not allowed by the schema.
+    NotAllowed {
+        span: Range<u64>,
+        kind: &'static str,
+        /// What the schema would have accepted at this point, used by
+        /// [`Explainer::diagnostic`].
+        expected: Expected,
+    },
     UndefinedNamespacePrefix {
-        prefix: StrSpan<'a>,
+        prefix: String,
+        span: Range<u64>,
     },
     UndefinedEntity {
-        name: &'a str,
-        span: std::ops::Range<usize>,
+        name: String,
+        span: Range<u64>,
     },
     InvalidOrUnclosedEntity {
-        span: std::ops::Range<usize>,
+        span: Range<u64>,
+    },
+    /// An element or attribute name is not a valid XML Name.
+    InvalidName {
+        span: Range<u64>,
+        kind: &'static str,
+    },
+    /// Duplicate attribute on the same element.
+    DuplicateAttribute {
+        span: Range<u64>,
+    },
+    /// Too many attributes on a single element.
+    TooManyAttributes {
+        span: Range<u64>,
+    },
+    /// Bytes that should be UTF-8 (e.g. a namespace prefix) were not valid UTF-8.
+    InvalidUtf8 {
+        span: Range<u64>,
+        kind: &'static str,
     },
     TextBufferOverflow,
+    /// The sink asked for validation to stop. Never passed to the sink.
+    Stopped,
+    Io(std::io::Error),
     Schema(SchemaError),
+}
+
+impl ValidatorError {
+    /// Whether validation can continue past this error. Schema errors are recoverable; errors
+    /// that leave the parser or element stack in an unknown state are not.
+    fn is_recoverable(&self) -> bool {
+        matches!(
+            self,
+            ValidatorError::NotAllowed { .. } | ValidatorError::InvalidName { .. }
+        )
+    }
+}
+
+/// The schema position at which a [`ValidatorError::NotAllowed`] occurred, captured when the
+/// error is found because error recovery may move the validator on before it is reported.
+#[derive(Debug, Clone, Copy)]
+pub struct Expected(PatId);
+
+/// Returned by [`Validator::validate`] and [`Validator::validate_reader`] when at least one
+/// error was passed to the sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Invalid;
+
+impl std::fmt::Display for Invalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "document is not valid")
+    }
+}
+
+impl std::error::Error for Invalid {}
+
+impl std::fmt::Display for ValidatorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidatorError::Xml(e) => write!(f, "XML error: {e:?}"),
+            ValidatorError::NotAllowed { kind, .. } => write!(f, "{kind} not expected here"),
+            ValidatorError::UndefinedNamespacePrefix { prefix, .. } => {
+                write!(f, "The prefix \"{prefix}\" is not defined")
+            }
+            ValidatorError::UndefinedEntity { name, .. } => {
+                write!(f, "The entity &{name}; is not defined")
+            }
+            ValidatorError::InvalidOrUnclosedEntity { .. } => {
+                write!(f, "Invalid or unclosed entity reference")
+            }
+            ValidatorError::InvalidName { kind, .. } => {
+                write!(f, "{kind} name is not a valid XML Name")
+            }
+            ValidatorError::DuplicateAttribute { .. } => {
+                write!(f, "duplicate attribute")
+            }
+            ValidatorError::TooManyAttributes { .. } => {
+                write!(f, "too many attributes on element (limit: 256)")
+            }
+            ValidatorError::InvalidUtf8 { kind, .. } => {
+                write!(f, "{kind} contains invalid UTF-8")
+            }
+            ValidatorError::TextBufferOverflow => {
+                write!(f, "Text content exceeds maximum buffer size")
+            }
+            ValidatorError::Stopped => write!(f, "validation stopped"),
+            ValidatorError::Io(e) => write!(f, "I/O error: {e}"),
+            ValidatorError::Schema(SchemaError::TooManyPatterns) => {
+                write!(f, "Schema exceeds maximum number of patterns (65535)")
+            }
+        }
+    }
 }
 
 /// The outcome of a failed attempt to close an element's start tag (see
 /// [`Validator::close_element_start`]).
-struct CloseStartError<'b> {
-    error: ValidatorError<'b>,
+struct CloseStartError {
+    error: ValidatorError,
     /// A position to continue validating from despite the error, when a sound one exists.
     /// `None` means the caller must leave its current position untouched.
     recovery: Option<PatId>,
 }
 
-impl<'b> CloseStartError<'b> {
+impl CloseStartError {
     /// An error with no recovery position — the caller must leave its current position
     /// untouched.
-    fn unrecoverable(error: ValidatorError<'b>) -> Self {
+    fn unrecoverable(error: ValidatorError) -> Self {
         CloseStartError {
             error,
             recovery: None,
@@ -55,22 +152,131 @@ impl<'b> CloseStartError<'b> {
     }
 }
 
-pub struct Validator<'a> {
-    schema: Schema,
-    tokenizer: Tokenizer<'a>,
-    current_step: PatId,
-    last_was_start_element: bool,
-    stack: ElementStack<'a>,
-    entity_definitions: HashMap<String, String>,
-    text_buffer: String,
-    max_text_buffer: usize,
+/// Arena for element/attribute names and attribute values within a single
+/// opening tag. All data is appended to one `Vec<u8>` and referenced by
+/// `(start, len)` ranges. Reset after `close_element_start` consumes everything.
+struct TagArena {
+    buf: Vec<u8>,
 }
 
-impl<'a> Validator<'a> {
+impl Default for TagArena {
+    fn default() -> Self {
+        TagArena {
+            buf: Vec::with_capacity(512),
+        }
+    }
+}
+
+/// Range into the `TagArena` for a short name (max 65535 bytes).
+type NameRange = (u32, u16);
+/// Range into the `TagArena` for an attribute value (may be longer).
+type ValueRange = (u32, u32);
+
+impl TagArena {
+    /// Append bytes and return a name-sized range.
+    fn push_name(&mut self, name: &[u8]) -> NameRange {
+        let start = self.buf.len() as u32;
+        self.buf.extend_from_slice(name);
+        (start, name.len() as u16)
+    }
+
+    /// Mark the start of an attribute value being accumulated.
+    fn begin_value(&self) -> u32 {
+        self.buf.len() as u32
+    }
+
+    /// Append bytes to the current attribute value.
+    fn push_value_bytes(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+    }
+
+    /// Append a single char (for entity/char ref expansion).
+    fn push_value_char(&mut self, c: char) {
+        let mut tmp = [0u8; 4];
+        let s = c.encode_utf8(&mut tmp);
+        self.buf.extend_from_slice(s.as_bytes());
+    }
+
+    /// Append a str to the current attribute value.
+    fn push_value_str(&mut self, s: &str) {
+        self.buf.extend_from_slice(s.as_bytes());
+    }
+
+    /// Finish an attribute value and return its range.
+    fn finish_value(&self, start: u32) -> ValueRange {
+        (start, self.buf.len() as u32)
+    }
+
+    /// Get the raw bytes for a name range.
+    fn get_name(&self, range: NameRange) -> &[u8] {
+        let start = range.0 as usize;
+        let end = start + range.1 as usize;
+        &self.buf[start..end]
+    }
+
+    /// Get a `&str` for a value range. Infallible by construction: every
+    /// `push_value_*` call site contributes valid UTF-8 (validated at the
+    /// `attribute_value` / `attribute_entity_ref` visitor boundaries, or
+    /// produced by `c.encode_utf8` / a `&str` source). Concatenation of
+    /// valid UTF-8 is valid UTF-8.
+    fn get_value(&self, range: ValueRange) -> &str {
+        let start = range.0 as usize;
+        let end = range.1 as usize;
+        let bytes = &self.buf[start..end];
+        debug_assert!(
+            std::str::from_utf8(bytes).is_ok(),
+            "TagArena value invariant violated"
+        );
+        std::str::from_utf8(bytes).expect("TagArena values are valid UTF-8 by construction")
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear();
+    }
+}
+
+/// Receives each error found while validating. Returning [`ControlFlow::Break`] stops validation.
+/// The [`Explainer`] argument lets the sink render details, such as [`Explainer::diagnostic`],
+/// only when it wants them.
+pub trait Sink: FnMut(&Explainer<'_>, ValidatorError) -> ControlFlow<()> {}
+impl<F> Sink for F where F: FnMut(&Explainer<'_>, ValidatorError) -> ControlFlow<()> {}
+
+/// Renders details of a [`ValidatorError`] that are costly to produce, using the schema the
+/// error was found against.
+pub struct Explainer<'a> {
+    schema: &'a Schema,
+}
+
+pub struct Validator<S> {
+    schema: Schema,
+    current_step: PatId,
+    last_was_start_element: bool,
+    stack: ElementStack,
+    entity_definitions: HashMap<String, String>,
+    /// Text content buffered for deferred `text_deriv`. UTF-8 is enforced at
+    /// the visitor boundary (`append_text_bytes`); pre-validated callers go
+    /// through `append_validated_text`.
+    text_buffer: String,
+    /// Source span covering the buffered text run, used for diagnostics on
+    /// `flush_text` failure. `None` when the buffer is empty.
+    text_buffer_span: Option<Span>,
+    max_text_buffer: usize,
+    arena: TagArena,
+    // Attribute accumulation state — names and value stored in the arena
+    current_attr_prefix: Option<NameRange>,
+    current_attr_local: NameRange,
+    current_attr_name_span: Span,
+    current_attr_value_start: u32,
+    skip_depth: u32,
+    sink: S,
+    invalid: bool,
+}
+
+impl<S: Sink> Validator<S> {
     pub fn new(
         model: Rc<RefCell<Option<model::DefineRule>>>,
-        tokenizer: Tokenizer<'a>,
-    ) -> Result<Validator<'a>, ValidatorError<'a>> {
+        sink: S,
+    ) -> Result<Validator<S>, ValidatorError> {
         let (schema, start) = build_schema(&model).map_err(ValidatorError::Schema)?;
         let mut entity_definitions = HashMap::default();
         entity_definitions.insert("lt".to_string(), "<".to_string());
@@ -80,22 +286,30 @@ impl<'a> Validator<'a> {
         entity_definitions.insert("quot".to_string(), "\"".to_string());
         Ok(Validator {
             schema,
-            tokenizer,
             current_step: start,
             last_was_start_element: false,
             stack: ElementStack::default(),
             entity_definitions,
             text_buffer: String::new(),
+            text_buffer_span: None,
             max_text_buffer: 1024 * 1024,
+            arena: TagArena::default(),
+            current_attr_prefix: None,
+            current_attr_local: (0, 0),
+            current_attr_name_span: Span::new(0, 0),
+            current_attr_value_start: 0,
+            skip_depth: 0,
+            sink,
+            invalid: false,
         })
     }
 
     /// Create a validator with coverage tracking enabled.
     pub fn new_with_coverage(
         model: Rc<RefCell<Option<model::DefineRule>>>,
-        tokenizer: Tokenizer<'a>,
-    ) -> Result<Validator<'a>, ValidatorError<'a>> {
-        let mut v = Self::new(model, tokenizer)?;
+        sink: S,
+    ) -> Result<Validator<S>, ValidatorError> {
+        let mut v = Self::new(model, sink)?;
         let compile_time_count = v.schema.inner.borrow().patterns.len() as u16;
         let word_count = (compile_time_count as usize).div_ceil(64);
         v.schema.compile_time_count = compile_time_count;
@@ -103,23 +317,61 @@ impl<'a> Validator<'a> {
         Ok(v)
     }
 
+    /// Validate an XML document already in memory.
+    pub fn validate(&mut self, source: &[u8]) -> Result<(), Invalid> {
+        self.invalid = false;
+        let failure = match xml_syntax_reader::Reader::new().parse_slice(source, self) {
+            Ok(_) | Err(ParseError::Visitor(_)) => None,
+            Err(ParseError::Xml(e)) => Some(map_xml_error(e)),
+        };
+        self.finish(failure)
+    }
+
+    /// Validate XML from a streaming reader, without loading the entire document into memory.
+    pub fn validate_reader<R: std::io::Read>(&mut self, reader: R) -> Result<(), Invalid> {
+        self.invalid = false;
+        let failure = match xml_syntax_reader::parse_read_with_capacity(reader, self, 64 * 1024) {
+            Ok(()) | Err(ReadError::Visitor(_)) => None,
+            Err(ReadError::Xml(e)) => Some(map_xml_error(e)),
+            Err(ReadError::Io(e)) => Some(ValidatorError::Io(e)),
+            Err(ReadError::BufferTooSmall { capacity }) => {
+                Some(ValidatorError::Io(std::io::Error::other(format!(
+                    "XML construct larger than the {capacity}-byte read buffer"
+                ))))
+            }
+        };
+        self.finish(failure)
+    }
+
+    /// Checks anything still pending when the document ends successfully. Called by the
+    /// parser as the `end_document` event.
+    fn end_document(&mut self) -> Result<(), ValidatorError> {
+        self.flush_text()
+    }
+
+    fn report(&mut self, err: ValidatorError) -> Result<(), ValidatorError> {
+        debug_assert!(err.is_recoverable(), "{err:?}");
+        self.invalid = true;
+        match (self.sink)(
+            &Explainer {
+                schema: &self.schema,
+            },
+            err,
+        ) {
+            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Break(()) => Err(ValidatorError::Stopped),
+        }
+    }
+
     /// Extract the coverage report. Returns `None` if coverage tracking was not enabled.
     pub fn coverage_report(&self) -> Option<CoverageReport> {
         self.schema.build_coverage_report()
     }
 
-    pub fn validate_next(&mut self) -> Option<Result<(), ValidatorError<'a>>> {
-        match self.tokenizer.next() {
-            Some(Ok(evt)) => Some(self.validate(evt)),
-            Some(Err(err)) => Some(Err(ValidatorError::Xml(err))),
-            None => None,
-        }
-    }
-
     /// Ensure ns_context is up to date if it has been invalidated.
     fn ensure_ns_context(&mut self) {
         if self.schema.ns_context_dirty {
-            self.schema.ns_context = if self.stack.elements.is_empty() {
+            self.schema.ns_context = if self.stack.scopes.is_empty() {
                 None
             } else {
                 Some(self.stack.capture_ns_context())
@@ -128,314 +380,168 @@ impl<'a> Validator<'a> {
         }
     }
 
-    /// Flush any buffered text by applying text_deriv.
-    /// Returns true if the result was NotAllowed.
-    fn flush_text(&mut self) -> bool {
-        if !self.text_buffer.is_empty() {
-            let next_id = self.schema.text_deriv(self.current_step, &self.text_buffer);
-            self.text_buffer.clear();
-            self.current_step = next_id;
-            matches!(self.schema.patt(next_id), Pat::NotAllowed)
-        } else {
-            false
+    /// Flush any buffered text by applying `text_deriv`. On `NotAllowed`,
+    /// reports a `text` error tagged with the buffered run's span and carries on
+    /// as though the text were absent.
+    fn flush_text(&mut self) -> Result<(), ValidatorError> {
+        if self.text_buffer.is_empty() {
+            return Ok(());
         }
+        let next_id = self.schema.text_deriv(self.current_step, &self.text_buffer);
+        let buf_span = self.text_buffer_span.take();
+        self.text_buffer.clear();
+        if matches!(self.schema.patt(next_id), Pat::NotAllowed) {
+            let span = buf_span.map(|s| s.start..s.end).unwrap_or(0..0);
+            return self.report(ValidatorError::NotAllowed {
+                span,
+                kind: "text",
+                expected: Expected(self.current_step),
+            });
+        }
+        self.current_step = next_id;
+        Ok(())
     }
 
-    #[allow(unused)]
-    fn assert_health(&self) {
-        let mut seen = vec![];
-        self.schema.check_choices(self.current_step, &mut seen);
-    }
-
-    fn validate(&mut self, evt: Token<'a>) -> Result<(), ValidatorError<'a>> {
-        self.ensure_ns_context();
-        let new = match evt {
-            Token::EmptyDtd { .. }
-            | Token::Comment { .. }
-            | Token::ProcessingInstruction { .. } => {
-                // does not change current_step state
-                return Ok(());
-            }
-            Token::ElementStart {
-                prefix,
-                local,
-                span,
-            } => {
-                if self.flush_text() {
-                    return Err(ValidatorError::NotAllowed(evt));
-                }
-                if self.stack.elements.is_empty() {
-                    // Entering the document element; build a namespace context even if the
-                    // document declares no namespaces, so that QName prefixes can be checked
-                    self.schema.ns_context_dirty = true;
-                }
-                self.stack.push(prefix, local, span);
-                // does not change current_step state
-                return Ok(());
-            }
-            /*
-                let next_pat = Self::start_tag_open_deriv(pat, &mut self.schema, namespace, &name);
-                // TODO: refactor early-returns
-                let next_pat = match self.schema.patt(next_pat) {
-                    Pat::NotAllowed => return Err(ValidatorError::NotAllowed(evt)),
-                    p => Self::attrs_deriv(next_pat, &mut self.schema, attributes)
-                };
-                let next_pat = match self.schema.patt(next_pat) {
-                    Pat::NotAllowed => return Err(ValidatorError::NotAllowed(evt)),
-                    p => Self::start_tag_close_deriv(next_pat, &mut self.schema)
-                };
-                match self.schema.patt(next_pat) {
-                    Pat::NotAllowed => return Err(ValidatorError::NotAllowed(evt)),
-                    p => next_pat //Self::children_deriv(next_pat, &mut self.schema)
-                }
-            */
-            Token::Attribute {
-                prefix,
-                local,
-                value,
-                span,
-            } => {
-                if prefix.as_str() == "xmlns"
-                    || (prefix.as_str() == "" && local.as_str() == "xmlns")
-                {
-                    self.schema.ns_context_dirty = true;
-                }
-                self.stack.add_attr(prefix, local, value, span);
-                // does not change current_step state
-                return Ok(());
-            }
-            Token::ElementEnd { end, span: _ } => {
-                if self.flush_text() {
-                    return Err(ValidatorError::NotAllowed(evt));
-                }
-                match end {
-                    ElementEnd::Open => match Self::close_element_start(
-                        &self.stack,
-                        &mut self.schema,
-                        evt,
-                        self.current_step,
-                    ) {
-                        Ok(next_pat) => next_pat,
-                        Err(CloseStartError { error, recovery }) => {
-                            if let Some(recovered) = recovery {
-                                self.current_step = recovered;
-                                self.last_was_start_element = true;
-                            }
-                            return Err(error);
-                        }
-                    },
-                    ElementEnd::Close(_, _) => {
-                        let result = if self.last_was_start_element {
-                            // The element had no child elements or text nodes, so complete it
-                            // through the same empty-content rule as a self-closing tag.
-                            self.schema.close_empty_element(self.current_step, false)
-                        } else {
-                            self.schema.end_tag_deriv(self.current_step)
-                        };
-                        if self.stack.pop_has_namespaces() {
-                            self.schema.ns_context_dirty = true;
-                        }
-                        result
-                    }
-                    ElementEnd::Empty => {
-                        let result = match Self::close_element_start(
-                            &self.stack,
-                            &mut self.schema,
-                            evt,
-                            self.current_step,
-                        ) {
-                            Ok(next_id) => self.schema.close_empty_element(next_id, false),
-                            Err(CloseStartError { error, recovery }) => {
-                                if let Some(recovered) = recovery {
-                                    // `recovered` sits inside the element, but the tag is
-                                    // already complete, so close it too — otherwise following
-                                    // siblings would be matched at the wrong depth. Force
-                                    // through any outstanding content requirements (e.g. a
-                                    // missing required child) as well, since this element's
-                                    // own error has already been reported and there is nothing
-                                    // more to gain from cascading that into every sibling. If
-                                    // even that can't produce a sound position, leave it alone.
-                                    let closed = self.schema.close_empty_element(recovered, true);
-                                    if !matches!(self.schema.patt(closed), Pat::NotAllowed) {
-                                        self.current_step = closed;
-                                        self.last_was_start_element = false;
-                                    }
-                                }
-                                // The start tag was consumed regardless of the error, so the
-                                // element stack has to be unwound to keep it balanced.
-                                if self.stack.pop_has_namespaces() {
-                                    self.schema.ns_context_dirty = true;
-                                }
-                                return Err(error);
-                            }
-                        };
-                        if self.stack.pop_has_namespaces() {
-                            self.schema.ns_context_dirty = true;
-                        }
-                        result
-                    }
-                }
-            }
-            Token::Cdata { text, span: _ } => {
-                if self.flush_text() {
-                    return Err(ValidatorError::NotAllowed(evt));
-                }
-                let mixed = self.schema.mixed_text_deriv(self.current_step);
-                if mixed == self.current_step {
-                    self.current_step
-                } else {
-                    self.schema.text_deriv(self.current_step, &text)
-                }
-            }
-            Token::Text { text } => {
-                let mut buffer = String::new();
-                for val in parse_entities(text.start(), text.as_str()) {
-                    match val {
-                        Ok(val) => {
-                            let txt = match val {
-                                Txt::Text(_pos, val) => val,
-                                Txt::Entity(pos, name) => {
-                                    if let Some(txt) = self.entity_definitions.get(name) {
-                                        txt
-                                    } else {
-                                        return Err(ValidatorError::UndefinedEntity {
-                                            name,
-                                            span: pos..pos + name.len(),
-                                        });
-                                    }
-                                }
-                                Txt::Char(_pos, val) => {
-                                    buffer.push(val);
-                                    continue;
-                                }
-                            };
-                            // we only reach this point for Txt::Text and Txt::Entity cases,
-                            if txt.len() == text.len() {
-                                // no need to copy data into the buffer, just process the whole input in one go
-                                break;
-                            } else {
-                                // the input contains entities, so we decode these and append to buffer
-                                buffer.push_str(txt);
-                            }
-                        }
-                        Err(err) => {
-                            return Err(err);
-                        }
-                    }
-                }
-                let data = if buffer.is_empty() {
-                    text.as_str()
-                } else {
-                    &buffer[..]
-                };
-                // Fast path: if mixed_text_deriv returns the same PatId, the pattern is a
-                // text fixed-point (e.g. After(Text, cont)) and text_deriv is a no-op.
-                let mixed = self.schema.mixed_text_deriv(self.current_step);
-                if mixed == self.current_step {
-                    self.current_step
-                } else {
-                    // Buffer text for deferred processing — text fragments split by
-                    // PIs/comments must be concatenated before validation (spec 6.2.7).
-                    self.text_buffer.push_str(data);
-                    if self.text_buffer.len() > self.max_text_buffer {
-                        return Err(ValidatorError::TextBufferOverflow);
-                    }
-                    self.last_was_start_element = false;
-                    return Ok(());
-                }
-            }
-            Token::EntityDeclaration {
-                name,
-                definition,
-                span: _,
-            } => {
-                match definition {
-                    EntityDefinition::EntityValue(val) => {
-                        self.entity_definitions
-                            .insert(name.to_string(), val.to_string());
-                        // does not change current_step state
-                        return Ok(());
-                    }
-                    EntityDefinition::ExternalId(_) => {
-                        // no support for resolving external ids
-                        // does not change current_step state
-                        return Err(ValidatorError::NotAllowed(evt));
-                    }
-                }
-            }
-            Token::Declaration { .. } | Token::DtdStart { .. } | Token::DtdEnd { .. } => {
-                // does not change current_step state
-                return Ok(());
-            }
-        };
-        if let Token::ElementEnd {
-            end: ElementEnd::Open,
-            ..
-        } = evt
+    /// Append a text fragment whose bytes came directly from the parser.
+    /// Validates UTF-8 (per fragment, so the diagnostic span is precise) and
+    /// then either skips storage on the fixed-point branch or buffers for
+    /// deferred `text_deriv`.
+    fn append_text_bytes(
+        &mut self,
+        bytes: &[u8],
+        span: Span,
+        kind: &'static str,
+    ) -> Result<(), ValidatorError> {
+        // Any text content (even fixed-point) means this element is not empty,
+        // so clear the flag that would trigger an empty-text derivative on close.
+        self.last_was_start_element = false;
+        // Validate UTF-8 unconditionally — the validator rejects malformed
+        // documents even when the schema's pattern accepts arbitrary text
+        // (e.g. `text` / mixed content). The fixed-point fast path below skips
+        // the buffer copy and the `text_deriv` walk, not the UTF-8 check.
+        let s = std::str::from_utf8(bytes).map_err(|_| ValidatorError::InvalidUtf8 {
+            span: span.start..span.end,
+            kind,
+        })?;
+        if self.skip_depth > 0
+            || self.schema.mixed_text_deriv(self.current_step) == self.current_step
         {
-            self.last_was_start_element = true;
-        } else {
-            self.last_was_start_element = false;
+            return Ok(());
         }
-        if let Pat::NotAllowed = self.schema.patt(new) {
-            Err(ValidatorError::NotAllowed(evt))
-        } else {
-            self.current_step = new;
-            Ok(())
-        }
+        self.append_str(s, span)
     }
 
-    /// Derive the pattern across an element's start tag.
+    /// Append text whose bytes are already known to be valid UTF-8 (an
+    /// expanded entity-reference value or an encoded character reference).
+    fn append_validated_text(&mut self, s: &str, span: Span) -> Result<(), ValidatorError> {
+        self.last_was_start_element = false;
+        if self.skip_depth > 0
+            || self.schema.mixed_text_deriv(self.current_step) == self.current_step
+        {
+            return Ok(());
+        }
+        self.append_str(s, span)
+    }
+
+    fn append_str(&mut self, s: &str, span: Span) -> Result<(), ValidatorError> {
+        // Buffer text for deferred processing — text fragments split by
+        // PIs/comments must be concatenated before validation (spec 6.2.7).
+        self.text_buffer.push_str(s);
+        if self.text_buffer.len() > self.max_text_buffer {
+            return Err(ValidatorError::TextBufferOverflow);
+        }
+        match self.text_buffer_span {
+            None => self.text_buffer_span = Some(span),
+            Some(ref mut existing) if span.end > existing.end => existing.end = span.end,
+            Some(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Derive the pattern across an element's start tag, returning the pattern for the
+    /// element's content.
     ///
     /// On failure, [`CloseStartError::recovery`] is a *recovery* pattern: `Some(pid)` means the
     /// caller should still advance to `pid` despite reporting the error, so that the element's
     /// children are validated against the element's own content model rather than against the
     /// position the element itself was expected at. `None` means there is no sound state to
     /// continue from and the caller should leave its position untouched.
-    ///
-    /// See [`CloseStartError`] for the return type.
-    fn close_element_start<'b: 'a>(
-        stack: &ElementStack<'b>,
-        schema: &mut Schema,
-        evt: Token<'b>,
-        pat_id: PatId,
-    ) -> Result<PatId, CloseStartError<'b>> {
-        let elem = stack
-            .current_element()
+    fn close_element_start(&mut self, span: Span) -> Result<PatId, CloseStartError> {
+        self.ensure_ns_context();
+        // Resolve element name — prefix/local borrow from the name arena
+        let curr = self.stack.scopes.last().unwrap();
+        let elem_name_span = curr.name_span;
+        let elem_prefix_bytes = curr.prefix.map(|r| self.arena.get_name(r));
+        let elem_ns = self
+            .stack
+            .resolve_element_namespace(elem_prefix_bytes, elem_name_span)
             .map_err(CloseStartError::unrecoverable)?;
-        let next_pat = schema.start_tag_open_deriv(pat_id, elem.name);
-        if let Pat::NotAllowed = schema.patt(next_pat) {
+
+        let elem_qname = QualifiedName {
+            namespace_uri: elem_ns,
+            local_name: self.arena.get_name(self.stack.scopes.last().unwrap().local),
+        };
+
+        let pat_id = self.current_step;
+        let next_pat = self.schema.start_tag_open_deriv(pat_id, elem_qname);
+        if matches!(self.schema.patt(next_pat), Pat::NotAllowed) {
+            let err = if !is_ncname(elem_qname.local_name) {
+                ValidatorError::InvalidName {
+                    span: elem_name_span.start..elem_name_span.end,
+                    kind: "element",
+                }
+            } else {
+                ValidatorError::NotAllowed {
+                    span: elem_name_span.start..elem_name_span.end,
+                    kind: "element-start",
+                    expected: Expected(pat_id),
+                }
+            };
             // The element name itself is not allowed here, so there is no content model to
             // descend into and nothing to recover to.
-            return Err(CloseStartError::unrecoverable(ValidatorError::NotAllowed(
-                Token::ElementStart {
-                    prefix: elem.raw_prefix,
-                    local: elem.raw_local,
-                    span: elem.raw_local,
-                },
-            )));
+            self.arena.clear();
+            return Err(CloseStartError::unrecoverable(err));
         }
 
         // A rejected attribute is recorded but does not abandon the derivation: the
         // remaining attributes are still applied, so that an element with one bad attribute
         // still yields accurate diagnostics for its children.  Only the first bad attribute
         // is reported, to keep one error per start tag.
-        let attributes = stack
-            .current_attributes()
-            .map_err(CloseStartError::unrecoverable)?;
+        //
+        // Process attributes — names borrow from the arena, attrs in flat buffer
         let mut pat = next_pat;
         let mut first_attr_error = None;
-        for att in attributes {
-            let mid = schema.start_att_deriv(pat, att.name);
-            let derived = schema.att_value_deriv(mid, att.value);
-            if let Pat::NotAllowed = schema.patt(derived) {
+        let attr_start = self.stack.scopes.last().unwrap().attr_start as usize;
+        let num_attrs = self.stack.attrs.len() - attr_start;
+        for i in 0..num_attrs {
+            let attr = &self.stack.attrs[attr_start + i];
+            let attr_name_span = attr.name_span;
+            let attr_prefix_bytes = attr.prefix.map(|r| self.arena.get_name(r));
+            let attr_ns = self
+                .stack
+                .resolve_attribute_namespace(attr_prefix_bytes, attr_name_span)
+                .map_err(CloseStartError::unrecoverable)?;
+            let attr_qname = QualifiedName {
+                namespace_uri: attr_ns,
+                local_name: self.arena.get_name(self.stack.attrs[attr_start + i].local),
+            };
+            let mid = self.schema.start_att_deriv(pat, attr_qname);
+            let attr_value = self.arena.get_value(self.stack.attrs[attr_start + i].value);
+            let derived = self.schema.att_value_deriv(mid, attr_value);
+            if matches!(self.schema.patt(derived), Pat::NotAllowed) {
                 if first_attr_error.is_none() {
-                    first_attr_error = Some(ValidatorError::NotAllowed(Token::Attribute {
-                        prefix: att.raw_prefix,
-                        local: att.raw_local,
-                        value: att.raw_value,
-                        span: att.raw_span,
-                    }));
+                    first_attr_error = Some(if !is_ncname(attr_qname.local_name) {
+                        ValidatorError::InvalidName {
+                            span: attr_name_span.start..attr_name_span.end,
+                            kind: "attribute",
+                        }
+                    } else {
+                        ValidatorError::NotAllowed {
+                            span: attr_name_span.start..attr_name_span.end,
+                            kind: "attribute",
+                            expected: Expected(pat_id),
+                        }
+                    });
                 }
                 // Leave `pat` alone: carry on as though the attribute were absent.
             } else {
@@ -443,8 +549,11 @@ impl<'a> Validator<'a> {
             }
         }
 
-        let closed = schema.start_tag_close_deriv(pat);
-        if !matches!(schema.patt(closed), Pat::NotAllowed) {
+        // Names are no longer needed — reset arena for the next opening tag
+        self.arena.clear();
+
+        let closed = self.schema.start_tag_close_deriv(pat);
+        if !matches!(self.schema.patt(closed), Pat::NotAllowed) {
             return match first_attr_error {
                 None => Ok(closed),
                 // The bad attribute aside, the start tag is complete, so the children can be
@@ -462,19 +571,180 @@ impl<'a> Validator<'a> {
         // attributes purely to reach the element's content model; the document is already
         // known to be invalid (via `error` below), so this only affects which further errors
         // get reported for the rest of the document.
-        let error = first_attr_error.unwrap_or(ValidatorError::NotAllowed(evt));
-        let recovered = schema.force_start_tag_close_deriv(pat);
-        let recovery = (!matches!(schema.patt(recovered), Pat::NotAllowed)).then_some(recovered);
+        let error = first_attr_error.unwrap_or(ValidatorError::NotAllowed {
+            span: span.start..span.end,
+            kind: "element-end",
+            expected: Expected(pat_id),
+        });
+        let recovered = self.schema.force_start_tag_close_deriv(pat);
+        let recovery =
+            (!matches!(self.schema.patt(recovered), Pat::NotAllowed)).then_some(recovered);
         Err(CloseStartError { error, recovery })
     }
 
-    #[allow(clippy::mutable_key_type)] // false-positive
+    fn handle_start_tag_close(&mut self, span: Span) -> Result<(), ValidatorError> {
+        if self.skip_depth > 0 {
+            self.arena.clear();
+            return Ok(());
+        }
+        match self.close_element_start(span) {
+            Ok(next_pat) => {
+                self.current_step = next_pat;
+                self.last_was_start_element = true;
+                Ok(())
+            }
+            Err(CloseStartError {
+                mut error,
+                recovery: Some(recovered),
+            }) => {
+                self.current_step = recovered;
+                self.last_was_start_element = true;
+                set_expected(&mut error, recovered);
+                self.report(error)
+            }
+            Err(CloseStartError {
+                error,
+                recovery: None,
+            }) => {
+                // Nothing to check this element's contents against, so skip them; the
+                // position is left where the element was expected.
+                if error.is_recoverable() {
+                    self.skip_depth = 1;
+                }
+                self.report_or_fail(error)
+            }
+        }
+    }
+
+    /// Like [`Self::report`], but passes a non-recoverable error straight through.
+    fn report_or_fail(&mut self, err: ValidatorError) -> Result<(), ValidatorError> {
+        if err.is_recoverable() {
+            self.report(err)
+        } else {
+            Err(err)
+        }
+    }
+
+    fn pop_element(&mut self) {
+        if self.stack.pop_has_namespaces() {
+            self.schema.ns_context_dirty = true;
+        }
+    }
+
+    fn handle_end_tag(&mut self, span: Span) -> Result<(), ValidatorError> {
+        if self.skip_depth > 0 {
+            self.skip_depth -= 1;
+            self.pop_element();
+            return Ok(());
+        }
+        self.ensure_ns_context();
+        self.flush_text()?;
+        let result = if self.last_was_start_element {
+            // The element had no child elements or text nodes, so complete it through the
+            // same empty-content rule as a self-closing tag.
+            self.schema.close_empty_element(self.current_step, false)
+        } else {
+            self.schema.end_tag_deriv(self.current_step)
+        };
+        self.pop_element();
+        if matches!(self.schema.patt(result), Pat::NotAllowed) {
+            // Some required content is missing. Report it against the element's content
+            // position, then force the element closed so following siblings are checked at
+            // the right depth. If even that fails, leave the position alone.
+            let before = self.current_step;
+            let forced = if self.last_was_start_element {
+                self.schema.close_empty_element(before, true)
+            } else {
+                self.schema.force_end_tag_deriv(before)
+            };
+            if !matches!(self.schema.patt(forced), Pat::NotAllowed) {
+                self.current_step = forced;
+                self.last_was_start_element = false;
+            }
+            return self.report(ValidatorError::NotAllowed {
+                span: span.start..span.end,
+                kind: "element-end",
+                expected: Expected(before),
+            });
+        }
+        self.current_step = result;
+        self.last_was_start_element = false;
+        Ok(())
+    }
+
+    fn handle_empty_element_end(&mut self, span: Span) -> Result<(), ValidatorError> {
+        if self.skip_depth > 0 {
+            self.arena.clear();
+            self.skip_depth -= 1;
+            self.pop_element();
+            return Ok(());
+        }
+        let next_id = match self.close_element_start(span) {
+            Ok(next_id) => next_id,
+            Err(CloseStartError {
+                mut error,
+                recovery,
+            }) => {
+                if let Some(recovered) = recovery {
+                    // `recovered` sits inside the element, but the tag is already complete, so
+                    // close it too — otherwise following siblings would be matched at the wrong
+                    // depth. Force through any outstanding content requirements (e.g. a missing
+                    // required child) as well, since this element's own error has already been
+                    // reported and there is nothing more to gain from cascading that into every
+                    // sibling. If even that can't produce a sound position, leave it alone.
+                    let closed = self.schema.close_empty_element(recovered, true);
+                    if !matches!(self.schema.patt(closed), Pat::NotAllowed) {
+                        self.current_step = closed;
+                        self.last_was_start_element = false;
+                    }
+                    set_expected(&mut error, recovered);
+                }
+                // The start tag was consumed regardless of the error, so the element stack has
+                // to be unwound to keep it balanced.
+                self.pop_element();
+                return self.report_or_fail(error);
+            }
+        };
+        let result = self.schema.close_empty_element(next_id, false);
+        self.pop_element();
+        if matches!(self.schema.patt(result), Pat::NotAllowed) {
+            // As in `handle_end_tag`: report the missing content, then force the element
+            // closed.
+            let forced = self.schema.close_empty_element(next_id, true);
+            if !matches!(self.schema.patt(forced), Pat::NotAllowed) {
+                self.current_step = forced;
+                self.last_was_start_element = false;
+            }
+            return self.report(ValidatorError::NotAllowed {
+                span: span.start..span.end,
+                kind: "element-end",
+                expected: Expected(next_id),
+            });
+        }
+        self.current_step = result;
+        self.last_was_start_element = false;
+        Ok(())
+    }
+
+    fn decode_char_ref(value: &[u8]) -> Result<char, ()> {
+        let s = std::str::from_utf8(value).map_err(|_| ())?;
+        let n = if let Some(hex) = s.strip_prefix('x') {
+            u32::from_str_radix(hex, 16).map_err(|_| ())?
+        } else {
+            s.parse::<u32>().map_err(|_| ())?
+        };
+        char::from_u32(n).ok_or(())
+    }
+}
+
+impl Explainer<'_> {
+    #[allow(clippy::mutable_key_type)]
     fn heads(&self, id: PatId) -> HashSet<Pat> {
         let mut result = HashSet::new();
         self.head(&mut result, id);
         result
     }
-    #[allow(clippy::mutable_key_type)] // false-positive
+    #[allow(clippy::mutable_key_type)]
     fn head(&self, result: &mut HashSet<Pat>, p: PatId) {
         // https://www.kohsuke.org/relaxng/implbook/Validation1.html#IDATGOO
         let pat = self.schema.patt(p);
@@ -520,7 +790,7 @@ impl<'a> Validator<'a> {
     }
 
     fn describe_expected(&self, expected_patt: PatId) -> String {
-        #[allow(clippy::mutable_key_type)] // false-positive
+        #[allow(clippy::mutable_key_type)]
         let heads = self.heads(expected_patt);
         let mut result = String::new();
         const MAX_ELEMENTS: usize = 4;
@@ -548,7 +818,7 @@ impl<'a> Validator<'a> {
                 // TODO: also provide namespace information; grouping by namespace to make the
                 //       information more succinct
                 let mut desc = String::new();
-                self.describe_nameclass(self.schema.name_class(*nameclass), &mut desc);
+                describe_nameclass(self.schema.name_class(*nameclass), &mut desc);
                 result.push_str(&desc);
             }
         }
@@ -558,23 +828,22 @@ impl<'a> Validator<'a> {
         // TODO: plus attributes and everything else
         result
     }
-    fn describe_nameclass(&self, nc: &NameClass, desc: &mut String) {
-        describe_nameclass(nc, desc);
-    }
 
+    /// Build diagnostics for `err`, which was found while validating `source`.
     pub fn diagnostic(
         &self,
         name: String,
-        source: String,
+        source: &[u8],
         err: &ValidatorError,
     ) -> (codemap::CodeMap, Vec<codemap_diagnostic::Diagnostic>) {
         let mut map = codemap::CodeMap::new();
-        let file = map.add_file(name, source);
+        let source_str = String::from_utf8_lossy(source).into_owned();
+        let file = map.add_file(name, source_str);
         let mut diagnostics = vec![];
         match err {
             ValidatorError::Xml(err) => {
-                let line = file.line_span(err.pos().row as _);
-                let span = line.subspan(err.pos().row as _, err.pos().row as _);
+                let offset = err.offset;
+                let span = file.span.subspan(offset as _, offset as _);
 
                 let label = codemap_diagnostic::SpanLabel {
                     span,
@@ -584,54 +853,30 @@ impl<'a> Validator<'a> {
 
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("{err}"),
+                    message: format!("{err:?}"),
                     code: None,
                     spans: vec![label],
                 });
             }
-            ValidatorError::NotAllowed(tok) => {
-                let span = match tok {
-                    Token::Declaration { span, .. }
-                    | Token::ProcessingInstruction { span, .. }
-                    | Token::Comment { span, .. }
-                    | Token::DtdStart { span, .. }
-                    | Token::EmptyDtd { span, .. }
-                    | Token::EntityDeclaration { span, .. }
-                    | Token::DtdEnd { span, .. }
-                    | Token::ElementStart { span, .. }
-                    | Token::Attribute { span, .. }
-                    | Token::ElementEnd { span, .. }
-                    | Token::Cdata { span, .. } => span,
-                    Token::Text { text } => text,
-                };
-                let name = match tok {
-                    Token::Declaration { .. } => "declaration",
-                    Token::ProcessingInstruction { .. } => "processing-instruction",
-                    Token::Comment { .. } => "comment",
-                    Token::DtdStart { .. } => "dtd-start",
-                    Token::EmptyDtd { .. } => "empty-dtd",
-                    Token::EntityDeclaration { .. } => "entity-declaration",
-                    Token::DtdEnd { .. } => "dtd-end",
-                    Token::ElementStart { .. } => "element-start",
-                    Token::Attribute { .. } => "attribute",
-                    Token::ElementEnd { end: _, .. } => "element-end",
-                    Token::Text { .. } => "text",
-                    Token::Cdata { .. } => "cdata",
-                };
+            ValidatorError::NotAllowed {
+                span,
+                kind,
+                expected,
+            } => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: file.span.subspan(span.start() as _, span.end() as _),
+                    span: file.span.subspan(span.start as _, span.end as _),
                     label: Some("Not allowed".to_string()),
                     style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("{name} not expected here"),
+                    message: format!("{kind} not expected here"),
                     code: None,
                     spans: vec![label],
                 });
 
-                let desc = self.describe_expected(self.current_step);
+                let desc = self.describe_expected(expected.0);
                 let message = if desc.is_empty() {
                     "Remove this".to_string()
                 } else {
@@ -644,22 +889,21 @@ impl<'a> Validator<'a> {
                     spans: vec![],
                 });
             }
-            ValidatorError::UndefinedNamespacePrefix { prefix } => {
+            ValidatorError::UndefinedNamespacePrefix { prefix, span } => {
                 let label = codemap_diagnostic::SpanLabel {
-                    span: file.span.subspan(prefix.start() as _, prefix.end() as _),
+                    span: file.span.subspan(span.start as _, span.end as _),
                     label: Some(format!(
-                        "Add an xmlns:{}=\"..\" attribute to define this prefix",
-                        prefix.as_str()
+                        "Add an xmlns:{prefix}=\"..\" attribute to define this prefix"
                     )),
                     style: codemap_diagnostic::SpanStyle::Primary,
                 };
 
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("The prefix {:?} is not defined", prefix.as_str()),
+                    message: format!("The prefix \"{prefix}\" is not defined"),
                     code: None,
                     spans: vec![label],
-                })
+                });
             }
             ValidatorError::UndefinedEntity { name, span } => {
                 let label = codemap_diagnostic::SpanLabel {
@@ -670,10 +914,10 @@ impl<'a> Validator<'a> {
 
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("The entity &{name:?}; is not defined"),
+                    message: format!("The entity &{name}; is not defined"),
                     code: None,
                     spans: vec![label],
-                })
+                });
             }
             ValidatorError::InvalidOrUnclosedEntity { span } => {
                 let label = codemap_diagnostic::SpanLabel {
@@ -687,7 +931,59 @@ impl<'a> Validator<'a> {
                     message: "Invalid or unclosed entity reference".to_string(),
                     code: None,
                     spans: vec![label],
-                })
+                });
+            }
+            ValidatorError::InvalidName { span, kind } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: file.span.subspan(span.start as _, span.end as _),
+                    label: Some("not a valid XML Name".to_string()),
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                };
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: format!("{kind} name is not a valid XML Name"),
+                    code: None,
+                    spans: vec![label],
+                });
+            }
+            ValidatorError::DuplicateAttribute { span } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: file.span.subspan(span.start as _, span.end as _),
+                    label: Some("duplicate".to_string()),
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                };
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: "duplicate attribute".to_string(),
+                    code: None,
+                    spans: vec![label],
+                });
+            }
+            ValidatorError::TooManyAttributes { span } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: file.span.subspan(span.start as _, span.end as _),
+                    label: None,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                };
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: "too many attributes on element (limit: 256)".to_string(),
+                    code: None,
+                    spans: vec![label],
+                });
+            }
+            ValidatorError::InvalidUtf8 { span, kind } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: file.span.subspan(span.start as _, span.end as _),
+                    label: Some("invalid UTF-8".to_string()),
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                };
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: format!("{kind} contains invalid UTF-8"),
+                    code: None,
+                    spans: vec![label],
+                });
             }
             ValidatorError::TextBufferOverflow => {
                 diagnostics.push(codemap_diagnostic::Diagnostic {
@@ -695,7 +991,16 @@ impl<'a> Validator<'a> {
                     message: "Text content exceeds maximum buffer size".to_string(),
                     code: None,
                     spans: vec![],
-                })
+                });
+            }
+            ValidatorError::Stopped => {}
+            ValidatorError::Io(e) => {
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: format!("I/O error: {e}"),
+                    code: None,
+                    spans: vec![],
+                });
             }
             ValidatorError::Schema(SchemaError::TooManyPatterns) => {
                 diagnostics.push(codemap_diagnostic::Diagnostic {
@@ -703,131 +1008,431 @@ impl<'a> Validator<'a> {
                     message: "Schema exceeds maximum number of patterns (65535)".to_string(),
                     code: None,
                     spans: vec![],
-                })
+                });
             }
         }
         (map, diagnostics)
     }
 }
 
-#[derive(Debug)]
-enum Txt<'a> {
-    Text(usize, &'a str),
-    Entity(usize, &'a str),
-    Char(usize, char),
+impl<S: Sink> Validator<S> {
+    /// Maps the outcome of handling one event to the visitor's result. A fatal error is passed
+    /// to the sink before parsing stops; `Stopped` means the sink has already asked to stop.
+    fn halt_on(&mut self, result: Result<(), ValidatorError>) -> Result<(), ValidatorError> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(ValidatorError::Stopped) => Err(ValidatorError::Stopped),
+            Err(err) => {
+                self.invalid = true;
+                let _ = (self.sink)(
+                    &Explainer {
+                        schema: &self.schema,
+                    },
+                    err,
+                );
+                Err(ValidatorError::Stopped)
+            }
+        }
+    }
+
+    /// Reports a failure of the parser or reader itself (anything the validator did not raise
+    /// as a visitor error) and summarises the run.
+    fn finish(&mut self, failure: Option<ValidatorError>) -> Result<(), Invalid> {
+        if let Some(err) = failure {
+            let _ = self.halt_on(Err(err));
+        }
+        if self.invalid { Err(Invalid) } else { Ok(()) }
+    }
 }
 
-fn parse_entities(
-    pos: usize,
-    text: &str,
-) -> impl Iterator<Item = Result<Txt<'_>, ValidatorError<'_>>> {
-    struct Entities<'a> {
-        text: &'a str,
-        pos: usize,
-        offset: usize,
-        in_entity: bool,
-    }
-    impl<'a> Iterator for Entities<'a> {
-        type Item = Result<Txt<'a>, ValidatorError<'a>>;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            if self.offset == self.text.len() {
-                return None;
+macro_rules! forward_events {
+    ($( fn $name:ident(&mut self $(, $arg:ident: $ty:ty)*); )*) => {
+        $(
+            fn $name(&mut self $(, $arg: $ty)*) -> Result<(), ValidatorError> {
+                let result = Validator::$name(self, $($arg),*);
+                self.halt_on(result)
             }
-            for (i, c) in self.text[self.offset..].char_indices() {
-                if self.in_entity {
-                    if c == ';' {
-                        self.in_entity = false;
-                        let text = &self.text[self.offset..self.offset + i];
-                        let result = if let Some(text) = text.strip_prefix('#') {
-                            numeric_entity(self.offset, text)
-                        } else {
-                            Ok(Txt::Entity(self.offset + self.pos, text))
-                        };
-                        self.offset += i + 1;
-                        return Some(result);
-                    }
-                } else if c == '&' {
-                    self.in_entity = true;
-                    let result = Txt::Text(
-                        self.offset + self.pos,
-                        &self.text[self.offset..self.offset + i],
-                    );
-                    self.offset += i + 1;
-                    return Some(Ok(result));
+        )*
+    };
+}
+
+impl<S: Sink> Visitor for Validator<S> {
+    type Error = ValidatorError;
+
+    forward_events! {
+        fn start_tag_open(&mut self, name: QName<'_>);
+        fn attribute_name(&mut self, name: QName<'_>);
+        fn attribute_value(&mut self, value: &[u8], span: Span);
+        fn attribute_entity_ref(&mut self, name: &[u8], span: Span);
+        fn attribute_char_ref(&mut self, value: &[u8], span: Span);
+        fn attribute_end(&mut self, span: Span);
+        fn start_tag_close(&mut self, span: Span);
+        fn empty_element_end(&mut self, span: Span);
+        fn end_tag(&mut self, name: QName<'_>);
+        fn characters(&mut self, text: &[u8], span: Span);
+        fn entity_ref(&mut self, name: &[u8], span: Span);
+        fn char_ref(&mut self, value: &[u8], span: Span);
+        fn cdata_content(&mut self, text: &[u8], span: Span);
+        fn entity_decl_start(&mut self, name: &[u8], kind: EntityKind, span: Span);
+        fn entity_decl_value(&mut self, value: &[u8], span: Span);
+        fn entity_decl_char_ref(&mut self, value: &[u8], span: Span);
+        fn entity_decl_entity_ref(&mut self, name: &[u8], span: Span);
+        fn entity_decl_end(&mut self, span: Span);
+        fn end_document(&mut self);
+    }
+}
+
+fn set_expected(err: &mut ValidatorError, pid: PatId) {
+    if let ValidatorError::NotAllowed { expected, .. } = err {
+        *expected = Expected(pid);
+    }
+}
+
+/// Cold-path classifier for a prefix lookup miss: decide whether the bytes
+/// are invalid UTF-8 (→ `InvalidUtf8`) or just an undefined prefix.
+#[cold]
+fn undefined_or_invalid_prefix(p: &[u8], name_span: Span) -> ValidatorError {
+    match std::str::from_utf8(p) {
+        Ok(s) => ValidatorError::UndefinedNamespacePrefix {
+            prefix: s.to_owned(),
+            span: name_span.start..name_span.end,
+        },
+        Err(_) => ValidatorError::InvalidUtf8 {
+            span: name_span.start..name_span.end,
+            kind: "namespace prefix",
+        },
+    }
+}
+
+/// Map xml-syntax-reader parse errors to validator errors.
+/// `ExpectedName` is promoted to `InvalidName` since it means the tokenizer
+/// encountered an invalid name-start character.
+fn map_xml_error(e: xml_syntax_reader::Error) -> ValidatorError {
+    if matches!(e.kind, ErrorKind::ExpectedName(_)) {
+        let offset = e.offset;
+        ValidatorError::InvalidName {
+            span: offset..offset,
+            kind: "element or attribute",
+        }
+    } else {
+        ValidatorError::Xml(e)
+    }
+}
+
+impl<S: Sink> Validator<S> {
+    fn start_tag_open(&mut self, name: QName<'_>) -> Result<(), ValidatorError> {
+        self.ensure_ns_context();
+        self.flush_text()?;
+        if self.skip_depth > 0 {
+            self.skip_depth += 1;
+        }
+        let prefix = name.prefix().map(|p| self.arena.push_name(p));
+        let local = self.arena.push_name(name.local_name());
+        let name_span = name.span();
+        if self.stack.scopes.is_empty() {
+            // Entering the document element; build a namespace context even if the
+            // document declares no namespaces, so that QName prefixes can be checked
+            self.schema.ns_context_dirty = true;
+        }
+        self.stack.push(prefix, local, name_span);
+        Ok(())
+    }
+
+    fn attribute_name(&mut self, name: QName<'_>) -> Result<(), ValidatorError> {
+        self.current_attr_prefix = name.prefix().map(|p| self.arena.push_name(p));
+        self.current_attr_local = self.arena.push_name(name.local_name());
+        self.current_attr_name_span = name.span();
+        self.current_attr_value_start = self.arena.begin_value();
+        Ok(())
+    }
+
+    fn attribute_value(&mut self, value: &[u8], span: Span) -> Result<(), ValidatorError> {
+        // Validate UTF-8 at the boundary so the arena's invariant holds:
+        // every byte in an attribute-value range is valid UTF-8.
+        std::str::from_utf8(value).map_err(|_| ValidatorError::InvalidUtf8 {
+            span: span.start..span.end,
+            kind: "attribute value",
+        })?;
+        self.arena.push_value_bytes(value);
+        Ok(())
+    }
+
+    fn attribute_entity_ref(&mut self, name: &[u8], span: Span) -> Result<(), ValidatorError> {
+        let name_str = std::str::from_utf8(name).map_err(|_| ValidatorError::InvalidUtf8 {
+            span: span.start..span.end,
+            kind: "entity name",
+        })?;
+        if let Some(val) = self.entity_definitions.get(name_str) {
+            let val = val.clone();
+            self.arena.push_value_str(&val);
+            Ok(())
+        } else {
+            Err(ValidatorError::UndefinedEntity {
+                name: name_str.to_owned(),
+                span: span.start..span.end,
+            })
+        }
+    }
+
+    fn attribute_char_ref(&mut self, value: &[u8], span: Span) -> Result<(), ValidatorError> {
+        let c =
+            Self::decode_char_ref(value).map_err(|()| ValidatorError::InvalidOrUnclosedEntity {
+                span: span.start..span.end,
+            })?;
+        self.arena.push_value_char(c);
+        Ok(())
+    }
+
+    fn attribute_end(&mut self, _span: Span) -> Result<(), ValidatorError> {
+        const MAX_ATTRIBUTES: usize = 256;
+
+        let prefix = self.current_attr_prefix.take();
+        let local = self.current_attr_local;
+        let value = self.arena.finish_value(self.current_attr_value_start);
+        let name_span = self.current_attr_name_span;
+
+        // Check for namespace declarations using arena data
+        let is_xmlns_prefix = prefix.is_some_and(|r| self.arena.get_name(r) == b"xmlns");
+        let is_default_xmlns = prefix.is_none() && self.arena.get_name(local) == b"xmlns";
+
+        // Enforce attribute count limit
+        let total_attrs = self.stack.current_attr_count() + self.stack.current_ns_count();
+        if total_attrs >= MAX_ATTRIBUTES {
+            return Err(ValidatorError::TooManyAttributes {
+                span: name_span.start..name_span.end,
+            });
+        }
+
+        // Check for duplicate attributes (comparing raw name bytes in the arena)
+        let new_prefix = prefix.map(|r| self.arena.get_name(r));
+        let new_local = self.arena.get_name(local);
+        let attr_start = self.stack.scopes.last().unwrap().attr_start as usize;
+        for attr in &self.stack.attrs[attr_start..] {
+            let existing_prefix = attr.prefix.map(|r| self.arena.get_name(r));
+            let existing_local = self.arena.get_name(attr.local);
+            if existing_prefix == new_prefix && existing_local == new_local {
+                return Err(ValidatorError::DuplicateAttribute {
+                    span: name_span.start..name_span.end,
+                });
+            }
+        }
+        // Also check against namespace declarations (xmlns:foo vs xmlns:foo)
+        if is_xmlns_prefix || is_default_xmlns {
+            let ns_start = self.stack.scopes.last().unwrap().ns_decl_start as usize;
+            for decl in &self.stack.ns_declarations[ns_start..] {
+                let matches = if is_xmlns_prefix {
+                    decl.prefix.as_bytes() == new_local
+                } else {
+                    decl.prefix.is_empty()
+                };
+                if matches {
+                    return Err(ValidatorError::DuplicateAttribute {
+                        span: name_span.start..name_span.end,
+                    });
                 }
             }
-            if self.in_entity {
-                Some(Err(ValidatorError::InvalidOrUnclosedEntity {
-                    span: self.pos + self.offset - 1..self.pos + self.offset,
-                }))
+        }
+
+        if is_xmlns_prefix || is_default_xmlns {
+            self.schema.ns_context_dirty = true;
+            let prefix_bytes: &[u8] = if is_xmlns_prefix {
+                self.arena.get_name(local)
             } else {
-                let result = Txt::Text(self.offset + self.pos, &self.text[self.offset..]);
-                self.offset = self.text.len();
-                Some(Ok(result))
-            }
-        }
-    }
-    fn numeric_entity(pos: usize, text: &str) -> Result<Txt<'_>, ValidatorError<'_>> {
-        if text.is_empty() {
-            return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos });
-        }
-        let c = if let Some(text) = text.strip_prefix('x') {
-            let pos = pos + 1;
-            if text.is_empty() {
-                return Err(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos });
-            }
-            u32::from_str_radix(text, 16)
-                .map_err(|_e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
+                b""
+            };
+            let uri = self.arena.get_value(value).to_owned();
+            self.stack.add_namespace(prefix_bytes, name_span, uri)?;
         } else {
-            text.parse()
-                .map_err(|_e| ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?
-        };
-        Ok(Txt::Char(
-            pos,
-            std::char::from_u32(c)
-                .ok_or(ValidatorError::InvalidOrUnclosedEntity { span: pos..pos })?,
-        ))
+            self.stack.add_attr(prefix, local, name_span, value);
+        }
+        Ok(())
     }
-    Entities {
-        text,
-        pos,
-        offset: 0,
-        in_entity: false,
+
+    fn start_tag_close(&mut self, span: Span) -> Result<(), ValidatorError> {
+        self.handle_start_tag_close(span)
     }
+
+    fn empty_element_end(&mut self, span: Span) -> Result<(), ValidatorError> {
+        self.handle_empty_element_end(span)
+    }
+
+    fn end_tag(&mut self, name: QName<'_>) -> Result<(), ValidatorError> {
+        self.handle_end_tag(name.span())
+    }
+
+    fn characters(&mut self, text: &[u8], span: Span) -> Result<(), ValidatorError> {
+        self.append_text_bytes(text, span, "text")
+    }
+
+    fn entity_ref(&mut self, name: &[u8], span: Span) -> Result<(), ValidatorError> {
+        let name_str = std::str::from_utf8(name).map_err(|_| ValidatorError::InvalidUtf8 {
+            span: span.start..span.end,
+            kind: "entity name",
+        })?;
+        if let Some(val) = self.entity_definitions.get(name_str) {
+            let val = val.clone();
+            self.append_validated_text(&val, span)
+        } else {
+            Err(ValidatorError::UndefinedEntity {
+                name: name_str.to_owned(),
+                span: span.start..span.end,
+            })
+        }
+    }
+
+    fn char_ref(&mut self, value: &[u8], span: Span) -> Result<(), ValidatorError> {
+        let c =
+            Self::decode_char_ref(value).map_err(|()| ValidatorError::InvalidOrUnclosedEntity {
+                span: span.start..span.end,
+            })?;
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        self.append_validated_text(s, span)
+    }
+
+    fn cdata_content(&mut self, text: &[u8], span: Span) -> Result<(), ValidatorError> {
+        self.append_text_bytes(text, span, "CDATA content")
+    }
+
+    // DTD entity declarations
+    fn entity_decl_start(
+        &mut self,
+        name: &[u8],
+        kind: EntityKind,
+        span: Span,
+    ) -> Result<(), ValidatorError> {
+        if kind == EntityKind::General {
+            let name_str = std::str::from_utf8(name).map_err(|_| ValidatorError::InvalidUtf8 {
+                span: span.start..span.end,
+                kind: "entity name",
+            })?;
+            self.stack.pending_entity_name = Some(name_str.to_owned());
+            self.stack.pending_entity_value = Some(String::new());
+        }
+        Ok(())
+    }
+
+    fn entity_decl_value(&mut self, value: &[u8], span: Span) -> Result<(), ValidatorError> {
+        let s = std::str::from_utf8(value).map_err(|_| ValidatorError::InvalidUtf8 {
+            span: span.start..span.end,
+            kind: "entity value",
+        })?;
+        if let Some(ref mut val) = self.stack.pending_entity_value {
+            val.push_str(s);
+        }
+        Ok(())
+    }
+
+    fn entity_decl_char_ref(&mut self, value: &[u8], span: Span) -> Result<(), ValidatorError> {
+        let c =
+            Self::decode_char_ref(value).map_err(|()| ValidatorError::InvalidOrUnclosedEntity {
+                span: span.start..span.end,
+            })?;
+        if let Some(ref mut val) = self.stack.pending_entity_value {
+            val.push(c);
+        }
+        Ok(())
+    }
+
+    fn entity_decl_entity_ref(&mut self, name: &[u8], span: Span) -> Result<(), ValidatorError> {
+        let name_str = std::str::from_utf8(name).map_err(|_| ValidatorError::InvalidUtf8 {
+            span: span.start..span.end,
+            kind: "entity name",
+        })?;
+        if let Some(resolved) = self.entity_definitions.get(name_str) {
+            let resolved = resolved.clone();
+            if let Some(ref mut val) = self.stack.pending_entity_value {
+                val.push_str(&resolved);
+            }
+            Ok(())
+        } else {
+            Err(ValidatorError::UndefinedEntity {
+                name: name_str.to_owned(),
+                span: span.start..span.end,
+            })
+        }
+    }
+
+    fn entity_decl_end(&mut self, _span: Span) -> Result<(), ValidatorError> {
+        if let (Some(name), Some(value)) = (
+            self.stack.pending_entity_name.take(),
+            self.stack.pending_entity_value.take(),
+        ) {
+            self.entity_definitions.insert(name, value);
+        }
+        Ok(())
+    }
+}
+
+/// Attribute with name and value stored as ranges into the `TagArena`.
+struct Attr {
+    prefix: Option<NameRange>,
+    local: NameRange,
+    name_span: Span,
+    value: ValueRange,
+}
+
+/// A namespace prefix→URI binding in the flat declaration stack.
+struct NsDecl {
+    prefix: String,
+    namespace_uri: String,
+}
+
+/// Per-element metadata on the scope stack. No per-element Vec allocations.
+struct ElementScope {
+    prefix: Option<NameRange>,
+    local: NameRange,
+    name_span: Span,
+    /// Index into `ns_declarations` where this element's declarations start.
+    ns_decl_start: u32,
+    /// True if this scope declared a default namespace (xmlns="...").
+    has_default_ns: bool,
+    /// Index into the reusable `attrs` vec where this element's attributes start.
+    attr_start: u32,
 }
 
 #[derive(Default)]
-struct ElementStack<'a> {
-    elements: Vec<ElementState<'a>>,
+struct ElementStack {
+    /// Element scope stack.
+    scopes: Vec<ElementScope>,
+    /// Flat list of all prefix→URI namespace declarations across all depths.
+    /// Each element scope owns the range `[scope.ns_decl_start .. next_scope.ns_decl_start]`.
+    /// Pop truncates back to the scope's start index.
+    ns_declarations: Vec<NsDecl>,
+    /// Cached default namespace URI. Updated eagerly on declaration, recomputed
+    /// on pop only if the popped scope had a default namespace declaration.
+    cached_default_ns: String,
+    /// Reusable buffer for attributes of the current element. Cleared per element.
+    attrs: Vec<Attr>,
+    // Temporary state for DTD entity declarations
+    pending_entity_name: Option<String>,
+    pending_entity_value: Option<String>,
 }
 
-impl<'a> ElementStack<'a> {
-    fn lookup_namespace_uri(&self, prefix: &str) -> Option<StrSpan<'a>> {
-        if prefix == "xml" {
-            return Some(StrSpan::from("http://www.w3.org/XML/1998/namespace"));
+impl ElementStack {
+    /// Byte-compare lookup. Stored prefixes are guaranteed valid UTF-8
+    /// (validated at `add_namespace`), so a hit implies the input bytes are
+    /// also valid UTF-8 by transitivity.
+    fn lookup_namespace_uri(&self, prefix: &[u8]) -> Option<&str> {
+        if prefix == b"xml" {
+            return Some("http://www.w3.org/XML/1998/namespace");
         }
-        self.elements
+        // Walk declarations in reverse (most recent first)
+        self.ns_declarations
             .iter()
             .rev()
-            .find_map(|elem| elem.lookup_namespace_uri(prefix))
+            .find(|d| d.prefix.as_bytes() == prefix)
+            .map(|d| d.namespace_uri.as_str())
     }
 
     fn capture_ns_context(&self) -> NsContext {
         let mut default_ns = String::new();
         let mut bindings = Vec::new();
-        for elem in &self.elements {
-            for ns in &elem.namespaces {
-                if ns.prefix.as_str().is_empty() {
-                    // Default namespace (xmlns="...")
-                    default_ns = ns.namespace_uri.as_str().to_string();
-                } else {
-                    // Prefixed namespace (xmlns:prefix="...")
-                    bindings.push((
-                        ns.prefix.as_str().to_string(),
-                        ns.namespace_uri.as_str().to_string(),
-                    ));
-                }
+        for decl in &self.ns_declarations {
+            if decl.prefix.is_empty() {
+                default_ns = decl.namespace_uri.clone();
+            } else {
+                bindings.push((decl.prefix.clone(), decl.namespace_uri.clone()));
             }
         }
         NsContext {
@@ -838,162 +1443,214 @@ impl<'a> ElementStack<'a> {
 
     fn resolve_element_namespace(
         &self,
-        prefix: StrSpan<'a>,
-    ) -> Result<Option<StrSpan<'a>>, ValidatorError<'a>> {
-        if prefix.as_str() == "" {
-            // For elements, empty prefix means look up the default namespace (xmlns="...")
-            Ok(self.lookup_namespace_uri(""))
-        } else {
-            Ok(Some(self.lookup_namespace_uri(&prefix).ok_or(
-                ValidatorError::UndefinedNamespacePrefix { prefix },
-            )?))
+        prefix: Option<&[u8]>,
+        name_span: Span,
+    ) -> Result<Option<&str>, ValidatorError> {
+        match prefix {
+            None => {
+                // For elements, empty prefix means look up the default namespace (xmlns="...")
+                if self.cached_default_ns.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(self.cached_default_ns.as_str()))
+                }
+            }
+            Some(p) => match self.lookup_namespace_uri(p) {
+                Some(uri) => Ok(Some(uri)),
+                None => Err(undefined_or_invalid_prefix(p, name_span)),
+            },
         }
     }
 
     fn resolve_attribute_namespace(
         &self,
-        prefix: StrSpan<'a>,
-    ) -> Result<Option<StrSpan<'a>>, ValidatorError<'a>> {
-        if prefix.as_str() == "" {
+        prefix: Option<&[u8]>,
+        name_span: Span,
+    ) -> Result<Option<&str>, ValidatorError> {
+        match prefix {
             // Per XML Namespaces spec, unprefixed attributes have no namespace
-            Ok(None)
-        } else {
-            Ok(Some(self.lookup_namespace_uri(&prefix).ok_or(
-                ValidatorError::UndefinedNamespacePrefix { prefix },
-            )?))
+            None => Ok(None),
+            Some(p) => match self.lookup_namespace_uri(p) {
+                Some(uri) => Ok(Some(uri)),
+                None => Err(undefined_or_invalid_prefix(p, name_span)),
+            },
         }
     }
 
-    fn push(&mut self, prefix: StrSpan<'a>, local: StrSpan<'a>, _span: StrSpan<'a>) {
-        self.elements.push(ElementState {
+    fn push(&mut self, prefix: Option<NameRange>, local: NameRange, name_span: Span) {
+        let ns_decl_start = self.ns_declarations.len() as u32;
+        let attr_start = self.attrs.len() as u32;
+        self.scopes.push(ElementScope {
             prefix,
             local,
-            namespaces: vec![],
-            attributes: vec![],
-        })
+            name_span,
+            ns_decl_start,
+            has_default_ns: false,
+            attr_start,
+        });
     }
+
     fn pop_has_namespaces(&mut self) -> bool {
-        self.elements
-            .pop()
-            .is_some_and(|e| !e.namespaces.is_empty())
+        let scope = self.scopes.pop().unwrap();
+        let had_ns = (scope.ns_decl_start as usize) < self.ns_declarations.len();
+        self.ns_declarations.truncate(scope.ns_decl_start as usize);
+        self.attrs.truncate(scope.attr_start as usize);
+        // Recompute cached default namespace if the popped scope declared one
+        if scope.has_default_ns {
+            self.cached_default_ns = self
+                .ns_declarations
+                .iter()
+                .rev()
+                .find(|d| d.prefix.is_empty())
+                .map(|d| d.namespace_uri.clone())
+                .unwrap_or_default();
+        }
+        had_ns
     }
+
+    /// Validates prefix UTF-8 once, here. Anchors the invariant that every
+    /// stored `NsDecl.prefix` is valid UTF-8, so hot-path lookups can byte-compare
+    /// without revalidating.
+    fn add_namespace(
+        &mut self,
+        prefix_bytes: &[u8],
+        prefix_span: Span,
+        uri: String,
+    ) -> Result<(), ValidatorError> {
+        let prefix = if prefix_bytes.is_empty() {
+            String::new()
+        } else {
+            std::str::from_utf8(prefix_bytes)
+                .map_err(|_| ValidatorError::InvalidUtf8 {
+                    span: prefix_span.start..prefix_span.end,
+                    kind: "namespace prefix",
+                })?
+                .to_owned()
+        };
+        if prefix.is_empty() {
+            self.cached_default_ns = uri.clone();
+            self.scopes.last_mut().unwrap().has_default_ns = true;
+        }
+        self.ns_declarations.push(NsDecl {
+            prefix,
+            namespace_uri: uri,
+        });
+        Ok(())
+    }
+
     fn add_attr(
         &mut self,
-        prefix: StrSpan<'a>,
-        local: StrSpan<'a>,
-        value: StrSpan<'a>,
-        span: StrSpan<'a>,
+        prefix: Option<NameRange>,
+        local: NameRange,
+        name_span: Span,
+        value: ValueRange,
     ) {
-        if prefix.as_str() == "xmlns" {
-            self.elements.last_mut().unwrap().namespaces.push(Ns {
-                prefix: local,
-                namespace_uri: value,
-            })
-        } else if prefix.as_str() == "" && local.as_str() == "xmlns" {
-            self.elements.last_mut().unwrap().namespaces.push(Ns {
-                prefix,
-                namespace_uri: value,
-            })
-        } else {
-            self.elements
-                .last_mut()
-                .unwrap()
-                .attributes
-                .push(UnresolvedAttr {
-                    prefix,
-                    local,
-                    value,
-                    span,
-                })
-        }
+        self.attrs.push(Attr {
+            prefix,
+            local,
+            name_span,
+            value,
+        });
     }
-    fn current_element(&self) -> Result<ResolvedElement<'a>, ValidatorError<'a>> {
-        let curr = self.elements.last().unwrap();
-        let namespace_uri = self.resolve_element_namespace(curr.prefix)?;
-        Ok(ResolvedElement {
-            name: QualifiedName {
-                namespace_uri: namespace_uri.map(|s| s.as_str()),
-                local_name: curr.local.as_str(),
-            },
-            raw_prefix: curr.prefix,
-            raw_local: curr.local,
-        })
+
+    /// Number of attributes on the current element.
+    fn current_attr_count(&self) -> usize {
+        let start = self.scopes.last().unwrap().attr_start as usize;
+        self.attrs.len() - start
     }
-    fn current_attributes(&self) -> Result<Vec<ResolvedAttr<'a>>, ValidatorError<'a>> {
-        self.elements
-            .last()
-            .unwrap()
-            .attributes
-            .iter()
-            .map(move |unresolved| {
-                let namespace_uri = self.resolve_attribute_namespace(unresolved.prefix)?;
-                Ok(ResolvedAttr {
-                    name: QualifiedName {
-                        namespace_uri: namespace_uri.map(|s| s.as_str()),
-                        local_name: unresolved.local.as_str(),
-                    },
-                    value: unresolved.value.as_str(),
-                    raw_prefix: unresolved.prefix,
-                    raw_local: unresolved.local,
-                    raw_value: unresolved.value,
-                    raw_span: unresolved.span,
-                })
-            })
-            .collect()
+
+    /// Number of namespace declarations on the current element.
+    fn current_ns_count(&self) -> usize {
+        let start = self.scopes.last().unwrap().ns_decl_start as usize;
+        self.ns_declarations.len() - start
     }
-}
-
-/// Resolved element with both &str QualifiedName (for derivatives) and raw StrSpan (for errors).
-struct ResolvedElement<'a> {
-    name: QualifiedName<'a>,
-    raw_prefix: StrSpan<'a>,
-    raw_local: StrSpan<'a>,
-}
-
-/// Resolved attribute with both &str QualifiedName (for derivatives) and raw StrSpan (for errors).
-struct ResolvedAttr<'a> {
-    name: QualifiedName<'a>,
-    value: &'a str,
-    raw_prefix: StrSpan<'a>,
-    raw_local: StrSpan<'a>,
-    raw_value: StrSpan<'a>,
-    raw_span: StrSpan<'a>,
-}
-
-struct UnresolvedAttr<'a> {
-    prefix: StrSpan<'a>,
-    local: StrSpan<'a>,
-    value: StrSpan<'a>,
-    span: StrSpan<'a>,
-}
-struct ElementState<'a> {
-    prefix: StrSpan<'a>,
-    local: StrSpan<'a>,
-    namespaces: Vec<Ns<'a>>,
-    attributes: Vec<UnresolvedAttr<'a>>,
-}
-
-impl<'a> ElementState<'a> {
-    fn lookup_namespace_uri(&self, prefix: &str) -> Option<StrSpan<'a>> {
-        self.namespaces
-            .iter()
-            .find(|ns| ns.prefix.as_str() == prefix)
-            .map(|ns| ns.namespace_uri)
-    }
-}
-
-struct Ns<'a> {
-    prefix: StrSpan<'a>,
-    namespace_uri: StrSpan<'a>,
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::Validator;
+    use crate::{Explainer, Validator};
     use assert_matches::assert_matches;
     use relaxng_model::model::DefineRule;
     use relaxng_model::{Compiler, Files, RelaxError, Syntax};
+    use std::cell::RefCell;
     use std::io;
+    use std::ops::ControlFlow;
+    use std::rc::Rc;
+
+    type BoxedSink = Box<dyn FnMut(&Explainer<'_>, crate::ValidatorError) -> ControlFlow<()>>;
+
+    /// A validator whose sink collects every error, for tests that inspect them afterwards.
+    struct Case {
+        v: Validator<BoxedSink>,
+        errors: Rc<RefCell<Vec<crate::ValidatorError>>>,
+    }
+
+    impl Case {
+        fn new(model: Rc<RefCell<Option<DefineRule>>>) -> Case {
+            Self::build(model, false)
+        }
+
+        fn with_coverage(model: Rc<RefCell<Option<DefineRule>>>) -> Case {
+            Self::build(model, true)
+        }
+
+        fn build(model: Rc<RefCell<Option<DefineRule>>>, coverage: bool) -> Case {
+            let errors = Rc::new(RefCell::new(vec![]));
+            let sink = errors.clone();
+            let sink: BoxedSink = Box::new(move |_: &Explainer<'_>, err| {
+                sink.borrow_mut().push(err);
+                ControlFlow::Continue(())
+            });
+            let v = if coverage {
+                Validator::new_with_coverage(model, sink)
+            } else {
+                Validator::new(model, sink)
+            };
+            Case {
+                v: v.unwrap(),
+                errors,
+            }
+        }
+
+        fn validate_all(&mut self, source: &[u8]) -> Result<(), Vec<crate::ValidatorError>> {
+            match self.v.validate(source) {
+                Ok(()) => Ok(()),
+                Err(super::Invalid) => Err(self.errors.take()),
+            }
+        }
+    }
+
+    impl std::ops::Deref for Case {
+        type Target = Validator<BoxedSink>;
+        fn deref(&self) -> &Self::Target {
+            &self.v
+        }
+    }
+
+    impl std::ops::DerefMut for Case {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.v
+        }
+    }
+
+    fn first_diagnostics(
+        v: &mut Case,
+        source: &[u8],
+    ) -> (crate::ValidatorError, Vec<codemap_diagnostic::Diagnostic>) {
+        let err = v
+            .validate_all(source)
+            .expect_err("document should be invalid")
+            .remove(0);
+        let (_, d) = Explainer { schema: &v.schema }.diagnostic("doc".to_string(), source, &err);
+        (err, d)
+    }
+
+    fn emit(explainer: &Explainer<'_>, source: &[u8], err: &crate::ValidatorError) {
+        let (map, d) = explainer.diagnostic("valid.xml".to_string(), source, err);
+        let mut emitter =
+            codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Auto, Some(&map));
+        emitter.emit(&d[..]);
+    }
     use std::path::Path;
 
     struct Fixture {
@@ -1031,47 +1688,31 @@ mod tests {
         }
 
         fn valid(&self, xml: &str) {
-            let reader = xmlparser::Tokenizer::from(xml);
-            let mut v = Validator::new(self.schema.clone(), reader).unwrap();
-            while let Some(i) = v.validate_next() {
-                if let Err(err) = i {
-                    let (map, d) = v.diagnostic("valid.xml".to_string(), xml.to_string(), &err);
-                    let mut emitter = codemap_diagnostic::Emitter::stderr(
-                        codemap_diagnostic::ColorConfig::Auto,
-                        Some(&map),
-                    );
-                    emitter.emit(&d[..]);
-                    panic!("{err:?}");
+            let mut v = Case::new(self.schema.clone());
+            if let Err(errors) = v.validate_all(xml.as_bytes()) {
+                for err in &errors {
+                    emit(&Explainer { schema: &v.schema }, xml.as_bytes(), err);
                 }
+                panic!("{errors:?}");
             }
         }
 
         fn valid_with_coverage(&self, xml: &str) -> super::CoverageReport {
-            let reader = xmlparser::Tokenizer::from(xml);
-            let mut v = Validator::new_with_coverage(self.schema.clone(), reader).unwrap();
-            while let Some(i) = v.validate_next() {
-                if let Err(err) = i {
-                    let (map, d) = v.diagnostic("valid.xml".to_string(), xml.to_string(), &err);
-                    let mut emitter = codemap_diagnostic::Emitter::stderr(
-                        codemap_diagnostic::ColorConfig::Auto,
-                        Some(&map),
-                    );
-                    emitter.emit(&d[..]);
-                    panic!("{err:?}");
+            let mut v = Case::with_coverage(self.schema.clone());
+            if let Err(errors) = v.validate_all(xml.as_bytes()) {
+                for err in &errors {
+                    emit(&Explainer { schema: &v.schema }, xml.as_bytes(), err);
                 }
+                panic!("{errors:?}");
             }
             v.coverage_report().expect("coverage should be enabled")
         }
 
         fn invalid(&self, xml: &str) {
-            let reader = xmlparser::Tokenizer::from(xml);
-            let mut v = Validator::new(self.schema.clone(), reader).unwrap();
-            while let Some(i) = v.validate_next() {
-                if let Err(_err) = i {
-                    return;
-                }
+            let mut v = Case::new(self.schema.clone());
+            if v.validate_all(xml.as_bytes()).is_ok() {
+                panic!("Invalid input was accepted by the validator")
             }
-            panic!("Invalid input was accepted by the validator")
         }
     }
 
@@ -1101,22 +1742,11 @@ mod tests {
             }
         };
 
-        let reader = xmlparser::Tokenizer::from(doc);
-        let mut v = Validator::new(schema.start, reader).unwrap();
+        let mut v = Case::new(schema.start);
         println!("====");
         v.schema.d(v.current_step).unwrap();
         println!("====");
-        let mut fail = None;
-        while let Some(i) = v.validate_next() {
-            if let Err(err) = i {
-                fail = Some(format!("{err:?}"));
-                break;
-            }
-        }
-        if let Some(err) = fail {
-            return Err(format!("{err:?}"));
-        }
-        Ok(())
+        v.validate_all(doc.as_bytes()).map_err(|e| format!("{e:?}"))
     }
 
     const RECIPE: &str = r#"start = element recipe {
@@ -1126,25 +1756,47 @@ mod tests {
         element step { text }*
     }"#;
 
-    /// Validate `doc` to the end, collecting every error together with the "Expected .."
-    /// help text the diagnostics produce for it.
-    fn all_errors(schema: &str, doc: &str) -> Vec<(String, String)> {
+    /// A reported error: its `Display` text, the source text its span covers, and the
+    /// "Expected .." help text the diagnostics produce for it.
+    #[derive(Debug)]
+    struct Reported {
+        message: String,
+        source: String,
+        help: String,
+    }
+
+    /// Validate `doc` to the end, collecting every error.
+    fn all_errors(schema: &str, doc: &str) -> Vec<Reported> {
         let f = Fixture::correct(schema);
-        let reader = xmlparser::Tokenizer::from(doc);
-        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
-        let mut out = vec![];
-        while let Some(i) = v.validate_next() {
-            if let Err(err) = i {
-                let (_, diagnostics) = v.diagnostic("doc".to_string(), doc.to_string(), &err);
+        let mut v = Case::new(f.schema.clone());
+        let errors = v.validate_all(doc.as_bytes()).err().unwrap_or_default();
+        errors
+            .into_iter()
+            .map(|err| {
+                let (_, diagnostics) = Explainer { schema: &v.schema }.diagnostic(
+                    "doc".to_string(),
+                    doc.as_bytes(),
+                    &err,
+                );
                 let help = diagnostics
                     .iter()
                     .find(|d| d.level == codemap_diagnostic::Level::Help)
                     .map(|d| d.message.clone())
                     .unwrap_or_default();
-                out.push((format!("{err:?}"), help));
-            }
-        }
-        out
+                let source = match &err {
+                    crate::ValidatorError::NotAllowed { span, .. }
+                    | crate::ValidatorError::InvalidName { span, .. } => {
+                        doc[span.start as usize..span.end as usize].to_string()
+                    }
+                    _ => String::new(),
+                };
+                Reported {
+                    message: err.to_string(),
+                    source,
+                    help,
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -1161,16 +1813,18 @@ mod tests {
             1,
             "expected only the attribute error, got {errs:?}"
         );
-        assert!(
-            errs[0].0.contains("local: StrSpan(\"serving\" "),
-            "expected the error to name the misspelled attribute 'serving' \
-             (not the schema's 'servings'), got {errs:?}"
+        assert_eq!(
+            errs[0].source, "serving",
+            "expected the error to name the misspelled attribute, got {errs:?}"
         );
     }
 
     /// The one error reported against a child element start tag.
-    fn child_element_error(errs: &[(String, String)]) -> &(String, String) {
-        match errs.iter().find(|(err, _)| err.contains("ElementStart")) {
+    fn child_element_error(errs: &[Reported]) -> &Reported {
+        match errs
+            .iter()
+            .find(|e| e.message == "element-start not expected here")
+        {
             Some(e) => e,
             None => panic!("expected an error on a child element, got {errs:?}"),
         }
@@ -1178,19 +1832,17 @@ mod tests {
 
     #[test]
     fn bad_attribute_reports_accurate_expectation_for_children() {
-        // This document omits <title> too, so an error on <ingredient> is legitimate — but it
-        // must describe recipe's content model rather than expecting <recipe> all over again.
         let errs = all_errors(
             RECIPE,
             r#"<recipe serving="2"><ingredient>i</ingredient></recipe>"#,
         );
         assert_eq!(
-            child_element_error(&errs).1,
+            child_element_error(&errs).help,
             "Expected Element title",
             "got {errs:?}"
         );
         assert!(
-            !errs.iter().any(|(_, help)| help.contains("recipe")),
+            !errs.iter().any(|e| e.help.contains("recipe")),
             "no error should still be expecting <recipe>, got {errs:?}"
         );
     }
@@ -1204,7 +1856,7 @@ mod tests {
             r#"<recipe servings="2"><ingredient>i</ingredient></recipe>"#,
         );
         assert_eq!(
-            child_element_error(&errs).1,
+            child_element_error(&errs).help,
             "Expected Element title",
             "got {errs:?}"
         );
@@ -1213,26 +1865,21 @@ mod tests {
     #[test]
     fn bad_attribute_on_empty_element_leaves_stack_balanced() {
         // The start tag is consumed whether or not it validates, so the element stack must
-        // still be unwound — otherwise every later element is seen at the wrong depth.
+        // still be unwound.
         let f = Fixture::correct(
             "start = element root { element a { attribute x { text } }, element b { empty } }",
         );
-        let doc = r#"<root><a y="1"/><b/></root>"#;
-        let reader = xmlparser::Tokenizer::from(doc);
-        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
-        let mut errors = vec![];
-        while let Some(i) = v.validate_next() {
-            if let Err(err) = i {
-                errors.push(format!("{err:?}"));
-            }
-        }
+        let mut v = Case::new(f.schema.clone());
+        let errors = v
+            .validate_all(br#"<root><a y="1"/><b/></root>"#)
+            .unwrap_err();
         assert_eq!(
             errors.len(),
             1,
             "only the bad attribute should be reported, got {errors:?}"
         );
         assert_eq!(
-            v.stack.elements.len(),
+            v.stack.scopes.len(),
             0,
             "element stack still holds frames after the document ended"
         );
@@ -1240,9 +1887,6 @@ mod tests {
 
     #[test]
     fn wholly_missing_attribute_does_not_cascade_into_children() {
-        // Unlike a misspelled attribute, there is no bad `Attribute` token to blame here —
-        // `servings` is simply never given. Recovery must still kick in so <title> and
-        // <ingredient> are checked against recipe's real content model instead of cascading.
         let errs = all_errors(
             RECIPE,
             r#"<recipe><title>t</title><ingredient>i</ingredient></recipe>"#,
@@ -1253,69 +1897,140 @@ mod tests {
             "expected only the missing-attribute error, got {errs:?}"
         );
         assert!(
-            !errs[0].1.contains("recipe"),
+            !errs[0].help.contains("recipe"),
             "the single error should not still be expecting <recipe>, got {errs:?}"
         );
     }
 
     #[test]
     fn self_closing_element_missing_required_child_does_not_cascade() {
-        // `<a y="1"/>` is invalid twice over (wrong attribute, missing required <b>), but
-        // since it can never be closed even after forcing the attribute, recovery has to fall
-        // back to forcing the element's content requirements too — otherwise the sibling <c/>
-        // gets wrongly rejected against a's stale, never-advanced position.
-        let f = Fixture::correct(
+        let errs = all_errors(
             "start = element root { \
                 element a { attribute x { text }, element b { empty } }, \
                 element c { empty } \
             }",
+            r#"<root><a y="1"/><c/></root>"#,
         );
-        let doc = r#"<root><a y="1"/><c/></root>"#;
-        let reader = xmlparser::Tokenizer::from(doc);
-        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
-        let mut errors = vec![];
-        while let Some(i) = v.validate_next() {
-            if let Err(err) = i {
-                errors.push(format!("{err:?}"));
-            }
-        }
         assert_eq!(
-            errors.len(),
+            errs.len(),
             1,
-            "only the bad attribute on <a> should be reported, got {errors:?}"
+            "only the bad attribute on <a> should be reported, got {errs:?}"
         );
-        assert!(
-            errors[0].contains("\"y\""),
-            "expected the one error to be about attribute 'y', got {errors:?}"
-        );
+        assert_eq!(errs[0].source, "y", "got {errs:?}");
     }
 
     #[test]
     fn abandoned_self_closing_recovery_does_not_let_a_later_element_steal_its_slot() {
-        // `a` is required exactly once. The first `<a y="1"/>` is invalid (wrong attribute,
-        // missing required <b>) and can't be recovered into a position *inside* a's content,
-        // so recovery instead advances past `a` entirely. A second `<a>` must then be rejected
-        // as an extra, disallowed element — not silently accepted as satisfying the same slot.
-        let f = Fixture::correct(
+        let errs = all_errors(
             "start = element root { element a { attribute x { text }, element b { empty } } }",
+            r#"<root><a y="1"/><a x="1"><b/></a></root>"#,
         );
-        let doc = r#"<root><a y="1"/><a x="1"><b/></a></root>"#;
-        let reader = xmlparser::Tokenizer::from(doc);
-        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
-        let mut errors = vec![];
-        while let Some(i) = v.validate_next() {
-            if let Err(err) = i {
-                errors.push(format!("{err:?}"));
+        assert!(
+            errs.len() >= 2,
+            "expected both the bad attribute and the illegal second <a> to be reported, got {errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.message == "element-start not expected here"),
+            "expected the second, schema-illegal <a> to be rejected outright, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn disallowed_element_contents_are_skipped() {
+        let errs = all_errors(
+            "start = element root { element a { empty }, element b { empty } }",
+            r#"<root><a/><bogus><x>text</x><y/></bogus><b/></root>"#,
+        );
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert_eq!(errs[0].source, "bogus", "got {errs:?}");
+    }
+
+    #[test]
+    fn missing_required_child_does_not_cascade_into_siblings() {
+        let errs = all_errors(
+            "start = element root { element a { element b { empty } }, element c { empty } }",
+            r#"<root><a></a><c/></root>"#,
+        );
+        assert_eq!(errs.len(), 1, "got {errs:?}");
+        assert_eq!(errs[0].message, "element-end not expected here");
+        assert_eq!(errs[0].help, "Expected Element b");
+    }
+
+    #[test]
+    fn disallowed_text_is_skipped() {
+        let errs = all_errors(
+            "start = element root { element a { empty }, element b { empty } }",
+            r#"<root><a>oops</a><b>again</b></root>"#,
+        );
+        assert_eq!(errs.len(), 2, "got {errs:?}");
+        assert_eq!(errs[0].source, "oops");
+        assert_eq!(errs[1].source, "again");
+    }
+
+    #[test]
+    fn sink_can_stop_validation() {
+        let doc = "<root><x/><x/><x/><x/></root>";
+        let f = Fixture::correct("start = element root { empty }");
+        let seen = std::cell::Cell::new(0);
+        let mut v = Validator::new(f.schema.clone(), |_: &_, _| {
+            seen.set(seen.get() + 1);
+            if seen.get() == 2 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
             }
-        }
-        assert!(
-            errors.len() >= 2,
-            "expected both the bad attribute and the illegal second <a> to be reported, got {errors:?}"
+        })
+        .unwrap();
+        let result = v.validate(doc.as_bytes());
+        assert_eq!(result, Err(super::Invalid));
+        assert_eq!(seen.get(), 2);
+    }
+
+    #[test]
+    fn sink_receives_fatal_error_last() {
+        let f = Fixture::correct("start = element root { element a { empty } }");
+        let mut v = Case::new(f.schema.clone());
+        let errors = v
+            .validate_all(b"<root>text<a/>&undefined;</root>")
+            .unwrap_err();
+        assert_eq!(errors.len(), 2, "got {errors:?}");
+        assert_matches!(
+            errors[0],
+            super::ValidatorError::NotAllowed { kind: "text", .. }
         );
-        assert!(
-            errors.iter().any(|e| e.contains("ElementStart")),
-            "expected the second, schema-illegal <a> to be rejected outright, got {errors:?}"
+        assert_matches!(errors[1], super::ValidatorError::UndefinedEntity { .. });
+    }
+
+    #[test]
+    fn text_after_root_is_checked_at_end_of_document() {
+        let f = Fixture::correct("start = element root { empty }");
+        let doc = b"<root/>trailing";
+
+        let mut v = Case::new(f.schema.clone());
+        let errors = v.validate_all(doc).unwrap_err();
+        assert_eq!(errors.len(), 1, "got {errors:?}");
+        assert_matches!(
+            errors[0],
+            super::ValidatorError::NotAllowed { kind: "text", .. }
         );
+
+        let mut v = Case::new(f.schema.clone());
+        let errors = match v.validate_reader(&doc[..]) {
+            Ok(()) => vec![],
+            Err(super::Invalid) => v.errors.take(),
+        };
+        assert_eq!(errors.len(), 1, "got {errors:?}");
+    }
+
+    #[test]
+    fn valid_document_reports_nothing_to_sink() {
+        let f = Fixture::correct("start = element root { empty }");
+        let mut v = Validator::new(f.schema.clone(), |_: &_, err| {
+            panic!("unexpected error {err:?}")
+        })
+        .unwrap();
+        assert_eq!(v.validate_reader(&b"<root/>"[..]), Ok(()));
     }
 
     #[test]
@@ -1482,10 +2197,7 @@ mod tests {
 
     #[test]
     fn parse_entities() {
-        let mut iter = super::parse_entities(0, "foo &bar; blat");
-        assert_matches!(iter.next(), Some(Ok(super::Txt::Text(0, "foo "))));
-        assert_matches!(iter.next(), Some(Ok(super::Txt::Entity(5, "bar"))));
-        assert_matches!(iter.next(), Some(Ok(super::Txt::Text(9, " blat"))));
+        Fixture::correct("start = element a { text }").valid("<a>foo &amp; bar</a>");
     }
 
     #[test]
@@ -1637,15 +2349,8 @@ mod tests {
         let f = Fixture::correct(schema);
 
         let xml = "<root xmlns=\"urn:foo\"><wrong xmlns=\"urn:bar\">text</wrong></root>";
-        let reader = xmlparser::Tokenizer::from(xml);
-        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
-        let mut diagnostics = vec![];
-        while let Some(i) = v.validate_next() {
-            if let Err(err) = i {
-                let (_, d) = v.diagnostic("test.xml".to_string(), xml.to_string(), &err);
-                diagnostics.extend(d);
-            }
-        }
+        let mut v = Case::new(f.schema.clone());
+        let (_, diagnostics) = first_diagnostics(&mut v, xml.as_bytes());
         let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
         assert!(
             messages.iter().any(|m| m.contains("{urn:foo}child")),
@@ -1659,15 +2364,8 @@ mod tests {
         let f = Fixture::correct(schema);
 
         let xml = "<root><wrong>text</wrong></root>";
-        let reader = xmlparser::Tokenizer::from(xml);
-        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
-        let mut diagnostics = vec![];
-        while let Some(i) = v.validate_next() {
-            if let Err(err) = i {
-                let (_, d) = v.diagnostic("test.xml".to_string(), xml.to_string(), &err);
-                diagnostics.extend(d);
-            }
-        }
+        let mut v = Case::new(f.schema.clone());
+        let (_, diagnostics) = first_diagnostics(&mut v, xml.as_bytes());
         let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
         assert!(
             messages
@@ -1680,11 +2378,175 @@ mod tests {
     #[test]
     fn coverage_disabled_by_default() {
         let f = Fixture::correct("start = element a { empty }");
-        let reader = xmlparser::Tokenizer::from("<a/>");
-        let mut v = Validator::new(f.schema.clone(), reader).unwrap();
-        while let Some(i) = v.validate_next() {
-            i.unwrap();
-        }
+        let mut v = Case::new(f.schema.clone());
+        v.validate_all(b"<a/>").unwrap();
         assert!(v.coverage_report().is_none());
+    }
+
+    #[test]
+    fn invalid_element_name_reported_as_invalid_name() {
+        // Schema accepts any element name, but "b!ad" is not a valid XML NCName
+        // (xml-syntax-reader accepts '!' in names since it's not a name-terminator)
+        let f = Fixture::correct("start = element * { empty }");
+        let mut v = Case::new(f.schema.clone());
+        let err = v.validate_all(b"<b!ad/>").unwrap_err().remove(0);
+        assert_matches!(
+            err,
+            super::ValidatorError::InvalidName {
+                kind: "element",
+                ..
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_name_start_char_reported_as_invalid_name() {
+        // "1bad" starts with a digit — rejected by xml-syntax-reader as ExpectedName,
+        // which the validator maps to InvalidName (not Xml error)
+        let f = Fixture::correct("start = element a { empty }");
+        let mut v = Case::new(f.schema.clone());
+        let err = v.validate_all(b"<1bad/>").unwrap_err().remove(0);
+        assert_matches!(err, super::ValidatorError::InvalidName { .. });
+    }
+
+    #[test]
+    fn invalid_attribute_name_reported_as_invalid_name() {
+        // Schema requires an attribute with a specific name plus allows any others;
+        // "b@d" is not a valid NCName
+        let f = Fixture::correct(
+            "start = element a { attribute x { text }, attribute * - x { text }* }",
+        );
+        let mut v = Case::new(f.schema.clone());
+        let err = v
+            .validate_all(b"<a x=\"v\" b@d=\"x\"/>")
+            .unwrap_err()
+            .remove(0);
+        assert_matches!(
+            err,
+            super::ValidatorError::InvalidName {
+                kind: "attribute",
+                ..
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_attribute_rejected() {
+        let f = Fixture::correct("start = element a { attribute x { text } }");
+        let mut v = Case::new(f.schema.clone());
+        let err = v
+            .validate_all(b"<a x=\"1\" x=\"2\"/>")
+            .unwrap_err()
+            .remove(0);
+        assert_matches!(err, super::ValidatorError::DuplicateAttribute { .. });
+    }
+
+    #[test]
+    fn duplicate_xmlns_rejected() {
+        let f = Fixture::correct("default namespace = \"urn:x\" start = element a { empty }");
+        let mut v = Case::new(f.schema.clone());
+        let err = v
+            .validate_all(b"<a xmlns=\"urn:x\" xmlns=\"urn:y\"/>")
+            .unwrap_err()
+            .remove(0);
+        assert_matches!(err, super::ValidatorError::DuplicateAttribute { .. });
+    }
+
+    #[test]
+    fn invalid_utf8_in_text_rejected() {
+        // Schema permits any text — we must still reject malformed UTF-8.
+        let f = Fixture::correct("start = element a { text }");
+        let mut v = Case::new(f.schema.clone());
+        // 0xC0 is an invalid UTF-8 lead byte (overlong encoding).
+        let bad = b"<a>hello\xC0world</a>";
+        let err = v.validate_all(bad).unwrap_err().remove(0);
+        assert_matches!(err, super::ValidatorError::InvalidUtf8 { kind: "text", .. });
+    }
+
+    #[test]
+    fn invalid_utf8_in_text_under_fixed_point_pattern_rejected() {
+        // `text` is a fixed-point — the validator's hot path skips the buffer
+        // copy and `text_deriv` walk, but Option A keeps the UTF-8 check.
+        let f = Fixture::correct("start = element a { text }");
+        let mut v = Case::new(f.schema.clone());
+        // Lone continuation byte — invalid UTF-8.
+        let bad = b"<a>\x80</a>";
+        let err = v.validate_all(bad).unwrap_err().remove(0);
+        assert_matches!(err, super::ValidatorError::InvalidUtf8 { kind: "text", .. });
+    }
+
+    #[test]
+    fn invalid_utf8_in_cdata_rejected() {
+        let f = Fixture::correct("start = element a { text }");
+        let mut v = Case::new(f.schema.clone());
+        let bad = b"<a><![CDATA[\xFF]]></a>";
+        let err = v.validate_all(bad).unwrap_err().remove(0);
+        assert_matches!(
+            err,
+            super::ValidatorError::InvalidUtf8 {
+                kind: "CDATA content",
+                ..
+            }
+        );
+    }
+
+    #[test]
+    fn cdata_with_leading_whitespace() {
+        let f = Fixture::correct("start = element Data { element a { xsd:string } }");
+        f.valid("<Data>\n    <a>\n      <![CDATA[my_test_data]]>\n    </a>\n</Data>");
+        f.valid("<Data><a> <![CDATA[my_test_data]]></a></Data>");
+        f.valid("<Data><a><![CDATA[my_test_data]]> </a></Data>");
+    }
+
+    #[test]
+    fn invalid_utf8_in_attribute_value_rejected() {
+        // Schema accepts any text in attribute — must still reject malformed UTF-8.
+        let f = Fixture::correct("start = element a { attribute x { text } }");
+        let mut v = Case::new(f.schema.clone());
+        let bad = b"<a x=\"hi\xC0there\"/>";
+        let err = v.validate_all(bad).unwrap_err().remove(0);
+        assert_matches!(
+            err,
+            super::ValidatorError::InvalidUtf8 {
+                kind: "attribute value",
+                ..
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_in_xmlns_uri_rejected() {
+        // xmlns URI is an attribute value — bad UTF-8 must be rejected even
+        // though no schema URI comparison would ever hit it.
+        let f = Fixture::correct("start = element a { empty }");
+        let mut v = Case::new(f.schema.clone());
+        let bad = b"<a xmlns:foo=\"urn:\xFFbad\"/>";
+        let err = v.validate_all(bad).unwrap_err().remove(0);
+        assert_matches!(
+            err,
+            super::ValidatorError::InvalidUtf8 {
+                kind: "attribute value",
+                ..
+            }
+        );
+    }
+
+    #[test]
+    fn text_not_allowed_diagnostic_uses_text_span() {
+        // When buffered text is rejected, the error span should cover the text
+        // run, not the surrounding element.
+        let f = Fixture::correct("start = element a { empty }");
+        let mut v = Case::new(f.schema.clone());
+        let xml = b"<a>nope</a>";
+        let err = v.validate_all(xml).unwrap_err().remove(0);
+        let span = match err {
+            super::ValidatorError::NotAllowed {
+                span, kind: "text", ..
+            } => span,
+            other => panic!("expected NotAllowed text error, got {other:?}"),
+        };
+        // "nope" starts at byte 3 in the document.
+        assert_eq!(span.start, 3, "span start should point at the text");
+        assert_eq!(span.end, 7, "span end should be after the text");
     }
 }

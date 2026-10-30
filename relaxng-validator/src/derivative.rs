@@ -202,16 +202,15 @@ impl Schema {
     }
 
     pub(crate) fn start_tag_open_deriv(&mut self, pid: PatId, name: QualifiedName) -> PatId {
-        let local_key: Box<str> = name.local_name.into();
-        let ns_key: Option<Box<str>> = name.namespace_uri.map(|s| s.into());
+        let local_key: Box<[u8]> = name.local_name.into();
+        let ns_key = self.ns_interner.intern_opt(name.namespace_uri);
 
         // Cache check (borrow released before any mutation)
         {
             let inner = self.inner.borrow();
-            if let Some(&cached) =
-                inner
-                    .start_tag_open_cache
-                    .get(&(pid, local_key.clone(), ns_key.clone()))
+            if let Some(&cached) = inner
+                .start_tag_open_cache
+                .get(&(pid, local_key.clone(), ns_key))
             {
                 return cached;
             }
@@ -249,7 +248,7 @@ impl Schema {
                 }
             }
             Pat::Element(nc, inner_pat) => {
-                if contains(self.name_class(nc), name) {
+                if contains(self.name_class(nc), &name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
                     self.after(inner_pat, empty)
@@ -280,16 +279,12 @@ impl Schema {
     }
 
     pub(crate) fn start_att_deriv(&mut self, pid: PatId, name: QualifiedName) -> PatId {
-        let local_key: Box<str> = name.local_name.into();
-        let ns_key: Option<Box<str>> = name.namespace_uri.map(|s| s.into());
+        let local_key: Box<[u8]> = name.local_name.into();
+        let ns_key = self.ns_interner.intern_opt(name.namespace_uri);
 
         {
             let inner = self.inner.borrow();
-            if let Some(&cached) =
-                inner
-                    .start_att_cache
-                    .get(&(pid, local_key.clone(), ns_key.clone()))
-            {
+            if let Some(&cached) = inner.start_att_cache.get(&(pid, local_key.clone(), ns_key)) {
                 return cached;
             }
         }
@@ -324,7 +319,7 @@ impl Schema {
                 self.choice(x, y)
             }
             Pat::Attribute(nc, val_pat) => {
-                if contains(self.name_class(nc), name) {
+                if contains(self.name_class(nc), &name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
                     self.after(val_pat, empty)

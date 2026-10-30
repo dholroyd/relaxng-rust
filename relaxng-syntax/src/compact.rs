@@ -8,11 +8,8 @@ use nom::{
     AsChar, IResult,
     branch::alt,
     bytes::complete::{is_not, tag, take, take_until},
-    character::{
-        complete::{char, multispace1},
-        streaming::not_line_ending,
-    },
-    combinator::{all_consuming, map, not, opt, peek, recognize},
+    character::{complete::multispace1, streaming::not_line_ending},
+    combinator::{all_consuming, map, not, opt, peek, recognize, verify},
     error::ErrorKind,
     multi::{fold_many0, fold_many1, separated_list0},
     sequence::delimited,
@@ -418,12 +415,12 @@ fn identifier(input: Span) -> IResult<Span, Identifier> {
 
 pub fn nc_name(input: Span) -> IResult<Span, NcName> {
     let (mut input, start) = position(input)?;
-    let (rest, first) = alt((nc_name_start_char, escape_char)).parse(input)?;
+    let (rest, first) = alt((nc_name_start_char, escaped_nc_name_start_char)).parse(input)?;
     input = rest;
     let mut name = String::new();
     name.push(first);
     loop {
-        match alt((nc_name_char, escape_char)).parse(input) {
+        match alt((nc_name_char, escaped_nc_name_char)).parse(input) {
             Ok((rest, c)) => {
                 name.push(c);
                 input = rest;
@@ -437,38 +434,54 @@ pub fn nc_name(input: Span) -> IResult<Span, NcName> {
 }
 
 fn nc_name_start_char(input: Span) -> IResult<Span, char> {
-    // per https://www.w3.org/TR/REC-xml/#NT-NameStartChar -- but without ':'
-    alt((
-        char_in('A'..='Z'),
-        char('_'),
-        char_in('a'..='z'),
-        char_in('\u{C0}'..='\u{D6}'),
-        char_in('\u{D8}'..='\u{F6}'),
-        char_in('\u{F8}'..='\u{2FF}'),
-        char_in('\u{370}'..='\u{37D}'),
-        char_in('\u{37F}'..='\u{1FFF}'),
-        char_in('\u{200C}'..='\u{200D}'),
-        char_in('\u{2070}'..='\u{218F}'),
-        char_in('\u{2C00}'..='\u{2FEF}'),
-        char_in('\u{3001}'..='\u{D7FF}'),
-        char_in('\u{F900}'..='\u{FDCF}'),
-        char_in('\u{FDF0}'..='\u{FFFD}'),
-        char_in('\u{10000}'..='\u{EFFFF}'),
-    ))
-    .parse(input)
+    satisfy(is_nc_name_start_char).parse(input)
 }
 
 fn nc_name_char(input: Span) -> IResult<Span, char> {
-    alt((
-        nc_name_start_char,
-        char('-'),
-        char('.'),
-        char_in('0'..='9'),
-        char('\u{B7}'),
-        char_in('\u{0300}'..='\u{036F}'),
-        char_in('\u{203F}'..='\u{2040}'),
-    ))
-    .parse(input)
+    satisfy(is_nc_name_char).parse(input)
+}
+
+/// An escape is just another way of writing a character, so the character it denotes must be
+/// acceptable at this position in the name
+fn escaped_nc_name_start_char(input: Span) -> IResult<Span, char> {
+    verify(escape_char, |c| is_nc_name_start_char(*c)).parse(input)
+}
+
+fn escaped_nc_name_char(input: Span) -> IResult<Span, char> {
+    verify(escape_char, |c| is_nc_name_char(*c)).parse(input)
+}
+
+fn is_nc_name_start_char(c: char) -> bool {
+    // per https://www.w3.org/TR/REC-xml/#NT-NameStartChar -- but without ':'
+    matches!(c,
+        'A'..='Z' |
+        '_' |
+        'a'..='z' |
+        '\u{C0}'..='\u{D6}' |
+        '\u{D8}'..='\u{F6}' |
+        '\u{F8}'..='\u{2FF}' |
+        '\u{370}'..='\u{37D}' |
+        '\u{37F}'..='\u{1FFF}' |
+        '\u{200C}'..='\u{200D}' |
+        '\u{2070}'..='\u{218F}' |
+        '\u{2C00}'..='\u{2FEF}' |
+        '\u{3001}'..='\u{D7FF}' |
+        '\u{F900}'..='\u{FDCF}' |
+        '\u{FDF0}'..='\u{FFFD}' |
+        '\u{10000}'..='\u{EFFFF}'
+    )
+}
+
+fn is_nc_name_char(c: char) -> bool {
+    is_nc_name_start_char(c)
+        || matches!(c,
+            '-' |
+            '.' |
+            '0'..='9' |
+            '\u{B7}' |
+            '\u{0300}'..='\u{036F}' |
+            '\u{203F}'..='\u{2040}'
+        )
 }
 
 fn keyword(input: Span) -> IResult<Span, Keyword> {
@@ -2141,5 +2154,20 @@ mod test {
         let input = LocatedSpan::new(r"a\x{62}c");
         let (_, name) = nc_name(input).unwrap();
         assert_eq!(name.1, "abc");
+    }
+
+    #[test]
+    fn escape_cannot_smuggle_illegal_char_into_ncname() {
+        // \x{21} is '!', which is not an NCName character
+        let input = LocatedSpan::new(r"element a\x{21}b { empty }");
+        assert!(schema(input).is_err());
+    }
+
+    #[test]
+    fn escape_cannot_smuggle_illegal_start_char_into_ncname() {
+        // \x{31} is '1', which may continue but not start an NCName
+        assert!(nc_name(LocatedSpan::new(r"\x{31}a")).is_err());
+        let (_, name) = nc_name(LocatedSpan::new(r"a\x{31}")).unwrap();
+        assert_eq!(name.1, "a1");
     }
 }

@@ -15,12 +15,14 @@ fn compile(rnc: &str) -> Rc<RefCell<Option<DefineRule>>> {
 }
 
 fn assert_valid(model: Rc<RefCell<Option<DefineRule>>>, doc: &str) {
-    let mut v = Validator::new(model).expect("compile validator");
     let mut errors = vec![];
-    let result = v.validate_with(doc.as_bytes(), |_, err| {
+    let mut v = Validator::new(model, |_: &_, err| {
         errors.push(err);
         ControlFlow::Continue(())
-    });
+    })
+    .expect("compile validator");
+    let result = v.validate(doc.as_bytes());
+    drop(v);
     if result.is_err() {
         panic!("validation error: {errors:?}\ndoc:\n{doc}");
     }

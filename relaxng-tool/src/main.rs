@@ -1,6 +1,6 @@
 use codemap::CodeMap;
 use relaxng_model::{Compiler, Syntax};
-use relaxng_validator::{CoverageReport, Validator};
+use relaxng_validator::{CoverageReport, Explainer, Sink, Validator, ValidatorError};
 
 use std::fs::File;
 use std::io::BufReader;
@@ -100,18 +100,16 @@ fn compile_schema(syntax: Syntax, schema: &Path) -> relaxng_model::CompileResult
     }
 }
 
-fn run_validation(v: &mut Validator, xml: &Path) {
-    let f = File::open(xml).unwrap_or_else(|e| {
-        eprintln!("Error opening {xml:?}: {e}");
-        exit(1);
-    });
+/// Reports each validation error on stderr, with the context of the document at `xml`.
+fn error_sink(xml: &Path) -> impl FnMut(&Explainer<'_>, ValidatorError) -> ControlFlow<()> + '_ {
     // The source is only needed for diagnostic context, so read it on the first error rather
     // than holding valid documents in memory.
     let mut source: Option<Option<Vec<u8>>> = None;
-    let result = v.validate_reader(BufReader::new(f), |v, err| {
+    move |explainer, err| {
         match source.get_or_insert_with(|| std::fs::read(xml).ok()) {
             Some(source) => {
-                let (map, d) = v.diagnostic(xml.to_string_lossy().to_string(), source, &err);
+                let (map, d) =
+                    explainer.diagnostic(xml.to_string_lossy().to_string(), source, &err);
                 let mut emitter = codemap_diagnostic::Emitter::stderr(
                     codemap_diagnostic::ColorConfig::Auto,
                     Some(&map),
@@ -121,8 +119,15 @@ fn run_validation(v: &mut Validator, xml: &Path) {
             None => eprintln!("Validation error in {xml:?}: {err}"),
         }
         ControlFlow::Continue(())
+    }
+}
+
+fn run_validation<S: Sink>(v: &mut Validator<S>, xml: &Path) {
+    let f = File::open(xml).unwrap_or_else(|e| {
+        eprintln!("Error opening {xml:?}: {e}");
+        exit(1);
     });
-    if result.is_err() {
+    if v.validate_reader(BufReader::new(f)).is_err() {
         exit(2);
     }
 }
@@ -131,7 +136,7 @@ fn validate(syntax: Syntax, schema: PathBuf, xmls: Vec<PathBuf>) {
     let result = compile_schema(syntax, &schema);
     let model = result.start;
     for xml in &xmls {
-        let mut v = Validator::new(model.clone()).expect("compile validator");
+        let mut v = Validator::new(model.clone(), error_sink(xml)).expect("compile validator");
         eprintln!("Validating {xml:?}");
         run_validation(&mut v, xml);
     }
@@ -149,7 +154,8 @@ fn coverage(syntax: Syntax, schema: PathBuf, xmls: Vec<PathBuf>, format: &str) {
     let model = result.start;
     let mut merged_report: Option<CoverageReport> = None;
     for xml in &xmls {
-        let mut v = Validator::new_with_coverage(model.clone()).expect("compile validator");
+        let mut v = Validator::new_with_coverage(model.clone(), error_sink(xml))
+            .expect("compile validator");
         eprintln!("Validating {xml:?}");
         run_validation(&mut v, xml);
         if let Some(report) = v.coverage_report() {

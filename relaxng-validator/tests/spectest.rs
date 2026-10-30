@@ -168,14 +168,15 @@ fn run_test(test_case: TestCase) -> Result<(), Failed> {
             };
 
             for (i, doc) in valid.iter().enumerate() {
-                let mut v = Validator::new(result.start.clone()).unwrap();
                 let mut errors = vec![];
-                if v.validate_with(doc.as_bytes(), |_, err| {
+                let mut v = Validator::new(result.start.clone(), |_: &_, err| {
                     errors.push(err);
                     ControlFlow::Continue(())
                 })
-                .is_err()
-                {
+                .unwrap();
+                let rejected = v.validate(doc.as_bytes()).is_err();
+                drop(v);
+                if rejected {
                     let err = errors;
                     let schema = resources.get("correct.rng").unwrap();
                     return Err(format!(
@@ -187,10 +188,9 @@ fn run_test(test_case: TestCase) -> Result<(), Failed> {
             }
 
             for (i, doc) in invalid.iter().enumerate() {
-                let mut v = Validator::new(result.start.clone()).unwrap();
-                if v.validate_with(doc.as_bytes(), |_, _| ControlFlow::Break(()))
-                    .is_ok()
-                {
+                let mut v = Validator::new(result.start.clone(), |_: &_, _| ControlFlow::Break(()))
+                    .unwrap();
+                if v.validate(doc.as_bytes()).is_ok() {
                     let schema = resources.get("correct.rng").unwrap();
                     return Err(format!(
                         "Invalid document #{} was accepted:\nschema: {schema}\ndoc: {doc}",

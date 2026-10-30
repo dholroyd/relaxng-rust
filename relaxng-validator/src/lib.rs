@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, Range};
 use std::rc::Rc;
-use xml_syntax_reader::{EntityKind, ErrorKind, ParseError, QName, Span, Visitor};
+use xml_syntax_reader::{EntityKind, ErrorKind, ParseError, QName, ReadError, Span, Visitor};
 
 pub use coverage::{CoverageReport, TrackablePattern};
 // Re-exported so downstream crates can match `ValidatorError::Schema(..)` exhaustively.
@@ -26,7 +26,7 @@ pub enum ValidatorError {
         span: Range<u64>,
         kind: &'static str,
         /// What the schema would have accepted at this point, used by
-        /// [`Validator::diagnostic`].
+        /// [`Explainer::diagnostic`].
         expected: Expected,
     },
     UndefinedNamespacePrefix {
@@ -59,6 +59,8 @@ pub enum ValidatorError {
         kind: &'static str,
     },
     TextBufferOverflow,
+    /// The sink asked for validation to stop. Never passed to the sink.
+    Stopped,
     Io(std::io::Error),
     Schema(SchemaError),
 }
@@ -79,7 +81,7 @@ impl ValidatorError {
 #[derive(Debug, Clone, Copy)]
 pub struct Expected(PatId);
 
-/// Returned by [`Validator::validate_with`] and [`Validator::validate_reader`] when at least one
+/// Returned by [`Validator::validate`] and [`Validator::validate_reader`] when at least one
 /// error was passed to the sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Invalid;
@@ -121,6 +123,7 @@ impl std::fmt::Display for ValidatorError {
             ValidatorError::TextBufferOverflow => {
                 write!(f, "Text content exceeds maximum buffer size")
             }
+            ValidatorError::Stopped => write!(f, "validation stopped"),
             ValidatorError::Io(e) => write!(f, "I/O error: {e}"),
             ValidatorError::Schema(SchemaError::TooManyPatterns) => {
                 write!(f, "Schema exceeds maximum number of patterns (65535)")
@@ -232,7 +235,19 @@ impl TagArena {
     }
 }
 
-pub struct Validator {
+/// Receives each error found while validating. Returning [`ControlFlow::Break`] stops validation.
+/// The [`Explainer`] argument lets the sink render details, such as [`Explainer::diagnostic`],
+/// only when it wants them.
+pub trait Sink: FnMut(&Explainer<'_>, ValidatorError) -> ControlFlow<()> {}
+impl<F> Sink for F where F: FnMut(&Explainer<'_>, ValidatorError) -> ControlFlow<()> {}
+
+/// Renders details of a [`ValidatorError`] that are costly to produce, using the schema the
+/// error was found against.
+pub struct Explainer<'a> {
+    schema: &'a Schema,
+}
+
+pub struct Validator<S> {
     schema: Schema,
     current_step: PatId,
     last_was_start_element: bool,
@@ -252,12 +267,16 @@ pub struct Validator {
     current_attr_local: NameRange,
     current_attr_name_span: Span,
     current_attr_value_start: u32,
-    pending: Vec<ValidatorError>,
     skip_depth: u32,
+    sink: S,
+    invalid: bool,
 }
 
-impl Validator {
-    pub fn new(model: Rc<RefCell<Option<model::DefineRule>>>) -> Result<Validator, ValidatorError> {
+impl<S: Sink> Validator<S> {
+    pub fn new(
+        model: Rc<RefCell<Option<model::DefineRule>>>,
+        sink: S,
+    ) -> Result<Validator<S>, ValidatorError> {
         let (schema, start) = build_schema(&model).map_err(ValidatorError::Schema)?;
         let mut entity_definitions = HashMap::default();
         entity_definitions.insert("lt".to_string(), "<".to_string());
@@ -279,16 +298,18 @@ impl Validator {
             current_attr_local: (0, 0),
             current_attr_name_span: Span::new(0, 0),
             current_attr_value_start: 0,
-            pending: Vec::new(),
             skip_depth: 0,
+            sink,
+            invalid: false,
         })
     }
 
     /// Create a validator with coverage tracking enabled.
     pub fn new_with_coverage(
         model: Rc<RefCell<Option<model::DefineRule>>>,
-    ) -> Result<Validator, ValidatorError> {
-        let mut v = Self::new(model)?;
+        sink: S,
+    ) -> Result<Validator<S>, ValidatorError> {
+        let mut v = Self::new(model, sink)?;
         let compile_time_count = v.schema.inner.borrow().patterns.len() as u16;
         let word_count = (compile_time_count as usize).div_ceil(64);
         v.schema.compile_time_count = compile_time_count;
@@ -297,36 +318,49 @@ impl Validator {
     }
 
     /// Validate an XML document already in memory.
-    pub fn validate_with<F>(&mut self, source: &[u8], sink: F) -> Result<(), Invalid>
-    where
-        F: FnMut(&Validator, ValidatorError) -> ControlFlow<()>,
-    {
-        let mut run = Run::new(self, sink);
-        let result = xml_syntax_reader::Reader::new()
-            .parse_slice(source, &mut run)
-            .map(|_| ());
-        run.finish(result)
+    pub fn validate(&mut self, source: &[u8]) -> Result<(), Invalid> {
+        self.invalid = false;
+        let failure = match xml_syntax_reader::Reader::new().parse_slice(source, self) {
+            Ok(_) | Err(ParseError::Visitor(_)) => None,
+            Err(ParseError::Xml(e)) => Some(map_xml_error(e)),
+        };
+        self.finish(failure)
     }
 
     /// Validate XML from a streaming reader, without loading the entire document into memory.
-    pub fn validate_reader<R, F>(&mut self, reader: R, sink: F) -> Result<(), Invalid>
-    where
-        R: std::io::Read,
-        F: FnMut(&Validator, ValidatorError) -> ControlFlow<()>,
-    {
-        let mut run = Run::new(self, sink);
-        let result = run.parse_reader(reader);
-        run.finish(result)
+    pub fn validate_reader<R: std::io::Read>(&mut self, reader: R) -> Result<(), Invalid> {
+        self.invalid = false;
+        let failure = match xml_syntax_reader::parse_read_with_capacity(reader, self, 64 * 1024) {
+            Ok(()) | Err(ReadError::Visitor(_)) => None,
+            Err(ReadError::Xml(e)) => Some(map_xml_error(e)),
+            Err(ReadError::Io(e)) => Some(ValidatorError::Io(e)),
+            Err(ReadError::BufferTooSmall { capacity }) => {
+                Some(ValidatorError::Io(std::io::Error::other(format!(
+                    "XML construct larger than the {capacity}-byte read buffer"
+                ))))
+            }
+        };
+        self.finish(failure)
     }
 
-    fn finish_validation(&mut self) -> Result<(), ValidatorError> {
+    /// Checks anything still pending when the document ends successfully. Called by the
+    /// parser as the `end_document` event.
+    fn end_document(&mut self) -> Result<(), ValidatorError> {
         self.flush_text()
     }
 
     fn report(&mut self, err: ValidatorError) -> Result<(), ValidatorError> {
         debug_assert!(err.is_recoverable(), "{err:?}");
-        self.pending.push(err);
-        Ok(())
+        self.invalid = true;
+        match (self.sink)(
+            &Explainer {
+                schema: &self.schema,
+            },
+            err,
+        ) {
+            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Break(()) => Err(ValidatorError::Stopped),
+        }
     }
 
     /// Extract the coverage report. Returns `None` if coverage tracking was not enabled.
@@ -701,7 +735,9 @@ impl Validator {
         };
         char::from_u32(n).ok_or(())
     }
+}
 
+impl Explainer<'_> {
     #[allow(clippy::mutable_key_type)]
     fn heads(&self, id: PatId) -> HashSet<Pat> {
         let mut result = HashSet::new();
@@ -793,6 +829,7 @@ impl Validator {
         result
     }
 
+    /// Build diagnostics for `err`, which was found while validating `source`.
     pub fn diagnostic(
         &self,
         name: String,
@@ -956,6 +993,7 @@ impl Validator {
                     spans: vec![],
                 });
             }
+            ValidatorError::Stopped => {}
             ValidatorError::Io(e) => {
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
@@ -977,103 +1015,31 @@ impl Validator {
     }
 }
 
-struct Halt;
-
-struct Run<'v, F> {
-    v: &'v mut Validator,
-    sink: F,
-    /// Reused buffer for handing over `v.pending` without reallocating.
-    scratch: Vec<ValidatorError>,
-    invalid: bool,
-}
-
-impl<'v, F> Run<'v, F>
-where
-    F: FnMut(&Validator, ValidatorError) -> ControlFlow<()>,
-{
-    fn new(v: &'v mut Validator, sink: F) -> Self {
-        Run {
-            v,
-            sink,
-            scratch: Vec::new(),
-            invalid: false,
-        }
-    }
-
-    fn after(&mut self, result: Result<(), ValidatorError>) -> Result<(), Halt> {
-        if result.is_ok() && self.v.pending.is_empty() {
-            return Ok(());
-        }
-        self.deliver(result)
-    }
-
-    fn deliver(&mut self, result: Result<(), ValidatorError>) -> Result<(), Halt> {
-        std::mem::swap(&mut self.scratch, &mut self.v.pending);
-        let mut stop = false;
-        for err in self.scratch.drain(..) {
-            self.invalid = true;
-            if !stop && (self.sink)(self.v, err).is_break() {
-                stop = true;
-            }
-        }
-        if let Err(err) = result {
-            self.invalid = true;
-            if !stop {
-                let _ = (self.sink)(self.v, err);
-            }
-            return Err(Halt);
-        }
-        if stop { Err(Halt) } else { Ok(()) }
-    }
-
-    fn fatal(&mut self, err: ValidatorError) -> Result<(), Halt> {
-        self.deliver(Err(err))
-    }
-
-    fn parse_reader<R: std::io::Read>(&mut self, mut reader: R) -> Result<(), ParseError<Halt>> {
-        let mut xml_reader = xml_syntax_reader::Reader::new();
-        let mut buf = vec![0u8; 65536];
-        let mut valid: usize = 0;
-        let mut stream_offset: u64 = 0;
-
-        loop {
-            let n = match reader.read(&mut buf[valid..]) {
-                Ok(n) => n,
-                Err(e) => {
-                    let _ = self.fatal(ValidatorError::Io(e));
-                    return Err(ParseError::Visitor(Halt));
-                }
-            };
-            valid += n;
-            let is_final = n == 0;
-
-            let consumed = xml_reader.parse(&buf[..valid], stream_offset, is_final, self)?;
-
-            let consumed = consumed as usize;
-            let leftover = valid - consumed;
-            if leftover > 0 {
-                buf.copy_within(consumed..valid, 0);
-            }
-            valid = leftover;
-            stream_offset += consumed as u64;
-
-            if is_final && consumed == 0 {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(mut self, result: Result<(), ParseError<Halt>>) -> Result<(), Invalid> {
+impl<S: Sink> Validator<S> {
+    /// Maps the outcome of handling one event to the visitor's result. A fatal error is passed
+    /// to the sink before parsing stops; `Stopped` means the sink has already asked to stop.
+    fn halt_on(&mut self, result: Result<(), ValidatorError>) -> Result<(), ValidatorError> {
         match result {
-            Ok(()) => {
-                let result = self.v.finish_validation();
-                let _ = self.after(result);
+            Ok(()) => Ok(()),
+            Err(ValidatorError::Stopped) => Err(ValidatorError::Stopped),
+            Err(err) => {
+                self.invalid = true;
+                let _ = (self.sink)(
+                    &Explainer {
+                        schema: &self.schema,
+                    },
+                    err,
+                );
+                Err(ValidatorError::Stopped)
             }
-            Err(ParseError::Xml(e)) => {
-                let _ = self.fatal(map_xml_error(e));
-            }
-            Err(ParseError::Visitor(Halt)) => {}
+        }
+    }
+
+    /// Reports a failure of the parser or reader itself (anything the validator did not raise
+    /// as a visitor error) and summarises the run.
+    fn finish(&mut self, failure: Option<ValidatorError>) -> Result<(), Invalid> {
+        if let Some(err) = failure {
+            let _ = self.halt_on(Err(err));
         }
         if self.invalid { Err(Invalid) } else { Ok(()) }
     }
@@ -1082,19 +1048,16 @@ where
 macro_rules! forward_events {
     ($( fn $name:ident(&mut self $(, $arg:ident: $ty:ty)*); )*) => {
         $(
-            fn $name(&mut self $(, $arg: $ty)*) -> Result<(), Halt> {
-                let result = self.v.$name($($arg),*);
-                self.after(result)
+            fn $name(&mut self $(, $arg: $ty)*) -> Result<(), ValidatorError> {
+                let result = Validator::$name(self, $($arg),*);
+                self.halt_on(result)
             }
         )*
     };
 }
 
-impl<F> Visitor for Run<'_, F>
-where
-    F: FnMut(&Validator, ValidatorError) -> ControlFlow<()>,
-{
-    type Error = Halt;
+impl<S: Sink> Visitor for Validator<S> {
+    type Error = ValidatorError;
 
     forward_events! {
         fn start_tag_open(&mut self, name: QName<'_>);
@@ -1115,6 +1078,7 @@ where
         fn entity_decl_char_ref(&mut self, value: &[u8], span: Span);
         fn entity_decl_entity_ref(&mut self, name: &[u8], span: Span);
         fn entity_decl_end(&mut self, span: Span);
+        fn end_document(&mut self);
     }
 }
 
@@ -1155,7 +1119,7 @@ fn map_xml_error(e: xml_syntax_reader::Error) -> ValidatorError {
     }
 }
 
-impl Validator {
+impl<S: Sink> Validator<S> {
     fn start_tag_open(&mut self, name: QName<'_>) -> Result<(), ValidatorError> {
         self.ensure_ns_context();
         self.flush_text()?;
@@ -1604,39 +1568,85 @@ impl ElementStack {
 
 #[cfg(test)]
 mod tests {
-    use crate::Validator;
+    use crate::{Explainer, Validator};
     use assert_matches::assert_matches;
     use relaxng_model::model::DefineRule;
     use relaxng_model::{Compiler, Files, RelaxError, Syntax};
+    use std::cell::RefCell;
     use std::io;
     use std::ops::ControlFlow;
+    use std::rc::Rc;
 
-    fn validate_all(v: &mut Validator, source: &[u8]) -> Result<(), Vec<crate::ValidatorError>> {
-        let mut errors = vec![];
-        match v.validate_with(source, |_, err| {
-            errors.push(err);
-            ControlFlow::Continue(())
-        }) {
-            Ok(()) => Ok(()),
-            Err(super::Invalid) => Err(errors),
+    type BoxedSink = Box<dyn FnMut(&Explainer<'_>, crate::ValidatorError) -> ControlFlow<()>>;
+
+    /// A validator whose sink collects every error, for tests that inspect them afterwards.
+    struct Case {
+        v: Validator<BoxedSink>,
+        errors: Rc<RefCell<Vec<crate::ValidatorError>>>,
+    }
+
+    impl Case {
+        fn new(model: Rc<RefCell<Option<DefineRule>>>) -> Case {
+            Self::build(model, false)
+        }
+
+        fn with_coverage(model: Rc<RefCell<Option<DefineRule>>>) -> Case {
+            Self::build(model, true)
+        }
+
+        fn build(model: Rc<RefCell<Option<DefineRule>>>, coverage: bool) -> Case {
+            let errors = Rc::new(RefCell::new(vec![]));
+            let sink = errors.clone();
+            let sink: BoxedSink = Box::new(move |_: &Explainer<'_>, err| {
+                sink.borrow_mut().push(err);
+                ControlFlow::Continue(())
+            });
+            let v = if coverage {
+                Validator::new_with_coverage(model, sink)
+            } else {
+                Validator::new(model, sink)
+            };
+            Case {
+                v: v.unwrap(),
+                errors,
+            }
+        }
+
+        fn validate_all(&mut self, source: &[u8]) -> Result<(), Vec<crate::ValidatorError>> {
+            match self.v.validate(source) {
+                Ok(()) => Ok(()),
+                Err(super::Invalid) => Err(self.errors.take()),
+            }
+        }
+    }
+
+    impl std::ops::Deref for Case {
+        type Target = Validator<BoxedSink>;
+        fn deref(&self) -> &Self::Target {
+            &self.v
+        }
+    }
+
+    impl std::ops::DerefMut for Case {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.v
         }
     }
 
     fn first_diagnostics(
-        v: &mut Validator,
+        v: &mut Case,
         source: &[u8],
     ) -> (crate::ValidatorError, Vec<codemap_diagnostic::Diagnostic>) {
-        let mut first = None;
-        let _ = v.validate_with(source, |v, err| {
-            let (_, d) = v.diagnostic("doc".to_string(), source, &err);
-            first = Some((err, d));
-            ControlFlow::Break(())
-        });
-        first.expect("document should be invalid")
+        let err = v
+            .validate_all(source)
+            .expect_err("document should be invalid")
+            .remove(0);
+        let (_, d) = Explainer { schema: &v.schema }.diagnostic("doc".to_string(), source, &err);
+        (err, d)
     }
 
-    fn emit(v: &Validator, source: &[u8], err: &crate::ValidatorError) {
-        let (map, d) = v.diagnostic("valid.xml".to_string(), source, err);
+    fn emit(explainer: &Explainer<'_>, source: &[u8], err: &crate::ValidatorError) {
+        let (map, d) = explainer.diagnostic("valid.xml".to_string(), source, err);
         let mut emitter =
             codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Auto, Some(&map));
         emitter.emit(&d[..]);
@@ -1678,35 +1688,29 @@ mod tests {
         }
 
         fn valid(&self, xml: &str) {
-            let mut v = Validator::new(self.schema.clone()).unwrap();
-            let mut errors = vec![];
-            let result = v.validate_with(xml.as_bytes(), |v, err| {
-                emit(v, xml.as_bytes(), &err);
-                errors.push(err);
-                ControlFlow::Continue(())
-            });
-            if result.is_err() {
+            let mut v = Case::new(self.schema.clone());
+            if let Err(errors) = v.validate_all(xml.as_bytes()) {
+                for err in &errors {
+                    emit(&Explainer { schema: &v.schema }, xml.as_bytes(), err);
+                }
                 panic!("{errors:?}");
             }
         }
 
         fn valid_with_coverage(&self, xml: &str) -> super::CoverageReport {
-            let mut v = Validator::new_with_coverage(self.schema.clone()).unwrap();
-            let mut errors = vec![];
-            let result = v.validate_with(xml.as_bytes(), |v, err| {
-                emit(v, xml.as_bytes(), &err);
-                errors.push(err);
-                ControlFlow::Continue(())
-            });
-            if result.is_err() {
+            let mut v = Case::with_coverage(self.schema.clone());
+            if let Err(errors) = v.validate_all(xml.as_bytes()) {
+                for err in &errors {
+                    emit(&Explainer { schema: &v.schema }, xml.as_bytes(), err);
+                }
                 panic!("{errors:?}");
             }
             v.coverage_report().expect("coverage should be enabled")
         }
 
         fn invalid(&self, xml: &str) {
-            let mut v = Validator::new(self.schema.clone()).unwrap();
-            if validate_all(&mut v, xml.as_bytes()).is_ok() {
+            let mut v = Case::new(self.schema.clone());
+            if v.validate_all(xml.as_bytes()).is_ok() {
                 panic!("Invalid input was accepted by the validator")
             }
         }
@@ -1738,11 +1742,11 @@ mod tests {
             }
         };
 
-        let mut v = Validator::new(schema.start).unwrap();
+        let mut v = Case::new(schema.start);
         println!("====");
         v.schema.d(v.current_step).unwrap();
         println!("====");
-        validate_all(&mut v, doc.as_bytes()).map_err(|e| format!("{e:?}"))
+        v.validate_all(doc.as_bytes()).map_err(|e| format!("{e:?}"))
     }
 
     const RECIPE: &str = r#"start = element recipe {
@@ -1764,30 +1768,35 @@ mod tests {
     /// Validate `doc` to the end, collecting every error.
     fn all_errors(schema: &str, doc: &str) -> Vec<Reported> {
         let f = Fixture::correct(schema);
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let mut out = vec![];
-        let _ = v.validate_with(doc.as_bytes(), |v, err| {
-            let (_, diagnostics) = v.diagnostic("doc".to_string(), doc.as_bytes(), &err);
-            let help = diagnostics
-                .iter()
-                .find(|d| d.level == codemap_diagnostic::Level::Help)
-                .map(|d| d.message.clone())
-                .unwrap_or_default();
-            let source = match &err {
-                crate::ValidatorError::NotAllowed { span, .. }
-                | crate::ValidatorError::InvalidName { span, .. } => {
-                    doc[span.start as usize..span.end as usize].to_string()
+        let mut v = Case::new(f.schema.clone());
+        let errors = v.validate_all(doc.as_bytes()).err().unwrap_or_default();
+        errors
+            .into_iter()
+            .map(|err| {
+                let (_, diagnostics) = Explainer { schema: &v.schema }.diagnostic(
+                    "doc".to_string(),
+                    doc.as_bytes(),
+                    &err,
+                );
+                let help = diagnostics
+                    .iter()
+                    .find(|d| d.level == codemap_diagnostic::Level::Help)
+                    .map(|d| d.message.clone())
+                    .unwrap_or_default();
+                let source = match &err {
+                    crate::ValidatorError::NotAllowed { span, .. }
+                    | crate::ValidatorError::InvalidName { span, .. } => {
+                        doc[span.start as usize..span.end as usize].to_string()
+                    }
+                    _ => String::new(),
+                };
+                Reported {
+                    message: err.to_string(),
+                    source,
+                    help,
                 }
-                _ => String::new(),
-            };
-            out.push(Reported {
-                message: err.to_string(),
-                source,
-                help,
-            });
-            ControlFlow::Continue(())
-        });
-        out
+            })
+            .collect()
     }
 
     #[test]
@@ -1860,8 +1869,10 @@ mod tests {
         let f = Fixture::correct(
             "start = element root { element a { attribute x { text } }, element b { empty } }",
         );
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let errors = validate_all(&mut v, br#"<root><a y="1"/><b/></root>"#).unwrap_err();
+        let mut v = Case::new(f.schema.clone());
+        let errors = v
+            .validate_all(br#"<root><a y="1"/><b/></root>"#)
+            .unwrap_err();
         assert_eq!(
             errors.len(),
             1,
@@ -1961,30 +1972,28 @@ mod tests {
     fn sink_can_stop_validation() {
         let doc = "<root><x/><x/><x/><x/></root>";
         let f = Fixture::correct("start = element root { empty }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let mut seen = 0;
-        let result = v.validate_with(doc.as_bytes(), |_, _| {
-            seen += 1;
-            if seen == 2 {
+        let seen = std::cell::Cell::new(0);
+        let mut v = Validator::new(f.schema.clone(), |_: &_, _| {
+            seen.set(seen.get() + 1);
+            if seen.get() == 2 {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
             }
-        });
+        })
+        .unwrap();
+        let result = v.validate(doc.as_bytes());
         assert_eq!(result, Err(super::Invalid));
-        assert_eq!(seen, 2);
+        assert_eq!(seen.get(), 2);
     }
 
     #[test]
     fn sink_receives_fatal_error_last() {
         let f = Fixture::correct("start = element root { element a { empty } }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let mut errors = vec![];
-        let result = v.validate_with(b"<root>text<a/>&undefined;</root>", |_, err| {
-            errors.push(err);
-            ControlFlow::Continue(())
-        });
-        assert_eq!(result, Err(super::Invalid));
+        let mut v = Case::new(f.schema.clone());
+        let errors = v
+            .validate_all(b"<root>text<a/>&undefined;</root>")
+            .unwrap_err();
         assert_eq!(errors.len(), 2, "got {errors:?}");
         assert_matches!(
             errors[0],
@@ -1994,12 +2003,34 @@ mod tests {
     }
 
     #[test]
+    fn text_after_root_is_checked_at_end_of_document() {
+        let f = Fixture::correct("start = element root { empty }");
+        let doc = b"<root/>trailing";
+
+        let mut v = Case::new(f.schema.clone());
+        let errors = v.validate_all(doc).unwrap_err();
+        assert_eq!(errors.len(), 1, "got {errors:?}");
+        assert_matches!(
+            errors[0],
+            super::ValidatorError::NotAllowed { kind: "text", .. }
+        );
+
+        let mut v = Case::new(f.schema.clone());
+        let errors = match v.validate_reader(&doc[..]) {
+            Ok(()) => vec![],
+            Err(super::Invalid) => v.errors.take(),
+        };
+        assert_eq!(errors.len(), 1, "got {errors:?}");
+    }
+
+    #[test]
     fn valid_document_reports_nothing_to_sink() {
         let f = Fixture::correct("start = element root { empty }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let result =
-            v.validate_reader(&b"<root/>"[..], |_, err| panic!("unexpected error {err:?}"));
-        assert_eq!(result, Ok(()));
+        let mut v = Validator::new(f.schema.clone(), |_: &_, err| {
+            panic!("unexpected error {err:?}")
+        })
+        .unwrap();
+        assert_eq!(v.validate_reader(&b"<root/>"[..]), Ok(()));
     }
 
     #[test]
@@ -2318,7 +2349,7 @@ mod tests {
         let f = Fixture::correct(schema);
 
         let xml = "<root xmlns=\"urn:foo\"><wrong xmlns=\"urn:bar\">text</wrong></root>";
-        let mut v = Validator::new(f.schema.clone()).unwrap();
+        let mut v = Case::new(f.schema.clone());
         let (_, diagnostics) = first_diagnostics(&mut v, xml.as_bytes());
         let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
         assert!(
@@ -2333,7 +2364,7 @@ mod tests {
         let f = Fixture::correct(schema);
 
         let xml = "<root><wrong>text</wrong></root>";
-        let mut v = Validator::new(f.schema.clone()).unwrap();
+        let mut v = Case::new(f.schema.clone());
         let (_, diagnostics) = first_diagnostics(&mut v, xml.as_bytes());
         let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
         assert!(
@@ -2347,8 +2378,8 @@ mod tests {
     #[test]
     fn coverage_disabled_by_default() {
         let f = Fixture::correct("start = element a { empty }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        validate_all(&mut v, b"<a/>").unwrap();
+        let mut v = Case::new(f.schema.clone());
+        v.validate_all(b"<a/>").unwrap();
         assert!(v.coverage_report().is_none());
     }
 
@@ -2357,8 +2388,8 @@ mod tests {
         // Schema accepts any element name, but "b!ad" is not a valid XML NCName
         // (xml-syntax-reader accepts '!' in names since it's not a name-terminator)
         let f = Fixture::correct("start = element * { empty }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let err = validate_all(&mut v, b"<b!ad/>").unwrap_err().remove(0);
+        let mut v = Case::new(f.schema.clone());
+        let err = v.validate_all(b"<b!ad/>").unwrap_err().remove(0);
         assert_matches!(
             err,
             super::ValidatorError::InvalidName {
@@ -2373,8 +2404,8 @@ mod tests {
         // "1bad" starts with a digit — rejected by xml-syntax-reader as ExpectedName,
         // which the validator maps to InvalidName (not Xml error)
         let f = Fixture::correct("start = element a { empty }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let err = validate_all(&mut v, b"<1bad/>").unwrap_err().remove(0);
+        let mut v = Case::new(f.schema.clone());
+        let err = v.validate_all(b"<1bad/>").unwrap_err().remove(0);
         assert_matches!(err, super::ValidatorError::InvalidName { .. });
     }
 
@@ -2385,8 +2416,9 @@ mod tests {
         let f = Fixture::correct(
             "start = element a { attribute x { text }, attribute * - x { text }* }",
         );
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let err = validate_all(&mut v, b"<a x=\"v\" b@d=\"x\"/>")
+        let mut v = Case::new(f.schema.clone());
+        let err = v
+            .validate_all(b"<a x=\"v\" b@d=\"x\"/>")
             .unwrap_err()
             .remove(0);
         assert_matches!(
@@ -2401,8 +2433,9 @@ mod tests {
     #[test]
     fn duplicate_attribute_rejected() {
         let f = Fixture::correct("start = element a { attribute x { text } }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let err = validate_all(&mut v, b"<a x=\"1\" x=\"2\"/>")
+        let mut v = Case::new(f.schema.clone());
+        let err = v
+            .validate_all(b"<a x=\"1\" x=\"2\"/>")
             .unwrap_err()
             .remove(0);
         assert_matches!(err, super::ValidatorError::DuplicateAttribute { .. });
@@ -2411,8 +2444,9 @@ mod tests {
     #[test]
     fn duplicate_xmlns_rejected() {
         let f = Fixture::correct("default namespace = \"urn:x\" start = element a { empty }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
-        let err = validate_all(&mut v, b"<a xmlns=\"urn:x\" xmlns=\"urn:y\"/>")
+        let mut v = Case::new(f.schema.clone());
+        let err = v
+            .validate_all(b"<a xmlns=\"urn:x\" xmlns=\"urn:y\"/>")
             .unwrap_err()
             .remove(0);
         assert_matches!(err, super::ValidatorError::DuplicateAttribute { .. });
@@ -2422,10 +2456,10 @@ mod tests {
     fn invalid_utf8_in_text_rejected() {
         // Schema permits any text — we must still reject malformed UTF-8.
         let f = Fixture::correct("start = element a { text }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
+        let mut v = Case::new(f.schema.clone());
         // 0xC0 is an invalid UTF-8 lead byte (overlong encoding).
         let bad = b"<a>hello\xC0world</a>";
-        let err = validate_all(&mut v, bad).unwrap_err().remove(0);
+        let err = v.validate_all(bad).unwrap_err().remove(0);
         assert_matches!(err, super::ValidatorError::InvalidUtf8 { kind: "text", .. });
     }
 
@@ -2434,19 +2468,19 @@ mod tests {
         // `text` is a fixed-point — the validator's hot path skips the buffer
         // copy and `text_deriv` walk, but Option A keeps the UTF-8 check.
         let f = Fixture::correct("start = element a { text }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
+        let mut v = Case::new(f.schema.clone());
         // Lone continuation byte — invalid UTF-8.
         let bad = b"<a>\x80</a>";
-        let err = validate_all(&mut v, bad).unwrap_err().remove(0);
+        let err = v.validate_all(bad).unwrap_err().remove(0);
         assert_matches!(err, super::ValidatorError::InvalidUtf8 { kind: "text", .. });
     }
 
     #[test]
     fn invalid_utf8_in_cdata_rejected() {
         let f = Fixture::correct("start = element a { text }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
+        let mut v = Case::new(f.schema.clone());
         let bad = b"<a><![CDATA[\xFF]]></a>";
-        let err = validate_all(&mut v, bad).unwrap_err().remove(0);
+        let err = v.validate_all(bad).unwrap_err().remove(0);
         assert_matches!(
             err,
             super::ValidatorError::InvalidUtf8 {
@@ -2468,9 +2502,9 @@ mod tests {
     fn invalid_utf8_in_attribute_value_rejected() {
         // Schema accepts any text in attribute — must still reject malformed UTF-8.
         let f = Fixture::correct("start = element a { attribute x { text } }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
+        let mut v = Case::new(f.schema.clone());
         let bad = b"<a x=\"hi\xC0there\"/>";
-        let err = validate_all(&mut v, bad).unwrap_err().remove(0);
+        let err = v.validate_all(bad).unwrap_err().remove(0);
         assert_matches!(
             err,
             super::ValidatorError::InvalidUtf8 {
@@ -2485,9 +2519,9 @@ mod tests {
         // xmlns URI is an attribute value — bad UTF-8 must be rejected even
         // though no schema URI comparison would ever hit it.
         let f = Fixture::correct("start = element a { empty }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
+        let mut v = Case::new(f.schema.clone());
         let bad = b"<a xmlns:foo=\"urn:\xFFbad\"/>";
-        let err = validate_all(&mut v, bad).unwrap_err().remove(0);
+        let err = v.validate_all(bad).unwrap_err().remove(0);
         assert_matches!(
             err,
             super::ValidatorError::InvalidUtf8 {
@@ -2502,9 +2536,9 @@ mod tests {
         // When buffered text is rejected, the error span should cover the text
         // run, not the surrounding element.
         let f = Fixture::correct("start = element a { empty }");
-        let mut v = Validator::new(f.schema.clone()).unwrap();
+        let mut v = Case::new(f.schema.clone());
         let xml = b"<a>nope</a>";
-        let err = validate_all(&mut v, xml).unwrap_err().remove(0);
+        let err = v.validate_all(xml).unwrap_err().remove(0);
         let span = match err {
             super::ValidatorError::NotAllowed {
                 span, kind: "text", ..

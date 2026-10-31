@@ -1,66 +1,147 @@
 use relaxng_model::datatype;
 use relaxng_model::model::NameClass;
 
-use crate::infoset::is_ncname;
+use crate::infoset::{ExpandedName, NameTable};
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct QualifiedName<'a> {
-    pub(crate) namespace_uri: Option<&'a str>,
-    /// Local name as raw bytes. For `Named` matches, byte equality against the
-    /// schema's UTF-8 name is sufficient. For wildcard matches (`AnyName`/`NsName`),
-    /// `contains()` validates that this is a legal XML NCName.
-    pub(crate) local_name: &'a [u8],
+/// Id of a local name the schema mentions.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct NameId(u32);
+
+/// Id of a namespace URI the schema mentions, with the empty URI standing for no namespace.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct NsId(u32);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum LocalKey {
+    Known(NameId),
+    /// A valid NCName that the schema does not mention.
+    Other,
 }
 
-fn is_ns_match(namespace_uri: &str, target_namespace: Option<&str>) -> bool {
-    if let Some(target_namespace) = target_namespace {
-        target_namespace == namespace_uri
-    } else {
-        namespace_uri.is_empty()
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NsKey {
+    Known(NsId),
+    /// A namespace that the schema does not mention.
+    Other,
+}
+
+/// A document's element or attribute name, as far as matching against the schema is concerned.
+///
+/// Every name class compares a name with the schema's names only for equality, so all the names
+/// that a schema does not mention match exactly the same name classes, and share a key. The keys
+/// a document can produce are therefore bounded by the schema, however many distinct names the
+/// document uses.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct NameKey {
+    // Private, so that only `SchemaNames::key` can make one, and every name that reaches a
+    // derivation has been checked to be a valid NCName
+    local: LocalKey,
+    ns: NsKey,
+}
+
+/// The local names and namespace URIs that a schema's name classes mention.
+#[derive(Default)]
+pub(crate) struct SchemaNames {
+    local_names: NameTable,
+    /// Indexed by `NsId`. Schemas mention few namespaces, so a linear search is cheaper than
+    /// hashing the whole of a document's URI, and it can only be as long as the schema makes it.
+    namespaces: Vec<Box<str>>,
+}
+
+impl SchemaNames {
+    fn find_namespace(&self, uri: &str) -> Option<NsId> {
+        let pos = self.namespaces.iter().position(|u| **u == *uri)?;
+        Some(NsId(pos as u32))
+    }
+
+    fn namespace(&mut self, uri: &str) -> NsId {
+        self.find_namespace(uri).unwrap_or_else(|| {
+            self.namespaces.push(uri.into());
+            NsId(self.namespaces.len() as u32 - 1)
+        })
+    }
+
+    /// The key for `name`, or `None` if its local name is not a valid NCName, so that no name
+    /// class can match it.
+    pub(crate) fn key(&self, name: &ExpandedName<'_>) -> Option<NameKey> {
+        let local = match name.local_name.lookup(&self.local_names) {
+            Some(id) => LocalKey::Known(NameId(id)),
+            None if name.local_name.is_valid() => LocalKey::Other,
+            None => return None,
+        };
+        let ns = match self.find_namespace(name.namespace_uri.unwrap_or("")) {
+            Some(id) => NsKey::Known(id),
+            None => NsKey::Other,
+        };
+        Some(NameKey { local, ns })
     }
 }
 
-pub(crate) fn contains(nc: &NameClass, target_name: &QualifiedName) -> bool {
-    match nc {
-        NameClass::Named {
-            namespace_uri,
-            name,
-        } => {
-            // Byte equality: if the schema name is a valid NCName (guaranteed by
-            // the schema compiler), matching bytes implies a valid name.
-            if let Some(target_namespace) = target_name.namespace_uri {
-                target_namespace == namespace_uri && target_name.local_name == name.as_bytes()
-            } else {
-                namespace_uri.is_empty() && target_name.local_name == name.as_bytes()
-            }
+/// A [`NameClass`] with its names replaced by ids, for matching against a [`NameKey`].
+pub(crate) enum NameMatcher {
+    Named {
+        ns: NsId,
+        local: NameId,
+    },
+    NsName {
+        ns: NsId,
+        except: Option<Box<NameMatcher>>,
+    },
+    AnyName {
+        except: Option<Box<NameMatcher>>,
+    },
+    Alt(Box<NameMatcher>, Box<NameMatcher>),
+}
+
+impl NameMatcher {
+    /// Compiles `nc`, adding the names it mentions to `names`.
+    ///
+    /// # Panics
+    ///
+    /// If `nc` names an element or attribute with something that is not a valid NCName, which
+    /// the schema parsers never produce. See [`NameTable::insert`].
+    pub(crate) fn compile(nc: &NameClass, names: &mut SchemaNames) -> NameMatcher {
+        let except = |except: &Option<Box<NameClass>>, names: &mut SchemaNames| {
+            except
+                .as_ref()
+                .map(|nc| Box::new(NameMatcher::compile(nc, names)))
+        };
+        match nc {
+            NameClass::Named {
+                namespace_uri,
+                name,
+            } => NameMatcher::Named {
+                ns: names.namespace(namespace_uri),
+                local: NameId(names.local_names.insert(name)),
+            },
+            NameClass::NsName {
+                namespace_uri,
+                except: e,
+            } => NameMatcher::NsName {
+                ns: names.namespace(namespace_uri),
+                except: except(e, names),
+            },
+            NameClass::AnyName { except: e } => NameMatcher::AnyName {
+                except: except(e, names),
+            },
+            NameClass::Alt { a, b } => NameMatcher::Alt(
+                Box::new(NameMatcher::compile(a, names)),
+                Box::new(NameMatcher::compile(b, names)),
+            ),
         }
-        NameClass::NsName {
-            namespace_uri,
-            except,
-        } => {
-            if !is_ncname(target_name.local_name) {
-                return false;
+    }
+
+    pub(crate) fn matches(&self, name: NameKey) -> bool {
+        let excluded =
+            |except: &Option<Box<NameMatcher>>| except.as_ref().is_some_and(|nc| nc.matches(name));
+        match self {
+            NameMatcher::Named { ns, local } => {
+                name.ns == NsKey::Known(*ns) && name.local == LocalKey::Known(*local)
             }
-            if is_ns_match(namespace_uri, target_name.namespace_uri) {
-                if let Some(except_nameclass) = except {
-                    !contains(except_nameclass, target_name)
-                } else {
-                    true
-                }
-            } else {
-                false
-            }
+            NameMatcher::NsName { ns, except } => name.ns == NsKey::Known(*ns) && !excluded(except),
+            NameMatcher::AnyName { except } => !excluded(except),
+            NameMatcher::Alt(a, b) => a.matches(name) || b.matches(name),
         }
-        NameClass::AnyName { except } => {
-            if !is_ncname(target_name.local_name) {
-                return false;
-            }
-            match except {
-                None => true,
-                Some(nc) => !contains(nc, target_name),
-            }
-        }
-        NameClass::Alt { a, b } => contains(a, target_name) || contains(b, target_name),
     }
 }
 

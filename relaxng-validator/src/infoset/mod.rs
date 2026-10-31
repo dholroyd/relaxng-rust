@@ -9,10 +9,8 @@
 
 mod name;
 
-pub(crate) use name::{Name, is_ncname};
+pub(crate) use name::{Name, NameTable};
 
-use name::NameState;
-use std::cell::Cell;
 use std::ops::Range;
 use xml_syntax_reader::{ErrorKind, ParseError, QName, Span, Visitor};
 
@@ -115,7 +113,7 @@ impl<'a> StartElement<'a> {
         self.attrs.iter().map(move |a| Attribute {
             name: ExpandedName {
                 namespace_uri: stack.namespace_uri(a.namespace),
-                local_name: Name::new(arena.get_name(a.local), &a.name_state),
+                local_name: Name::new(arena.get_name(a.local)),
             },
             name_span: a.name_span,
             value: arena.get_value(a.value),
@@ -370,7 +368,6 @@ struct Attr {
     prefix: Option<NameRange>,
     local: NameRange,
     name_span: Span,
-    name_state: Cell<NameState>,
     value: ValueRange,
     /// Resolved once the whole start tag has been read.
     namespace: NsRef,
@@ -388,7 +385,6 @@ struct ElementScope {
     prefix: Option<NameRange>,
     local: NameRange,
     name_span: Span,
-    name_state: Cell<NameState>,
     /// Index into `ns_declarations` where this element's declarations start.
     ns_decl_start: u32,
     /// The default namespace declaration in scope outside this element, restored on pop.
@@ -481,7 +477,6 @@ impl ElementStack {
             prefix,
             local,
             name_span: name.span(),
-            name_state: Cell::new(NameState::Unchecked),
             ns_decl_start: self.ns_declarations.len() as u32,
             outer_default_ns: self.default_ns,
         });
@@ -694,8 +689,7 @@ impl<'s, 'h, H: Handler> Driver<'s, 'h, H> {
         self.text(s, span)
     }
 
-    /// The tag has been read in full: resolve its names, hand it over, then check any names the
-    /// handler left unchecked.
+    /// The tag has been read in full: resolve its names and hand it over.
     fn finish_start_tag(&mut self, close_span: Span, empty: bool) -> Result<(), Failure<H::Error>> {
         let state = &mut self.state;
         let scope = state.stack.scopes.last().unwrap();
@@ -731,7 +725,7 @@ impl<'s, 'h, H: Handler> Driver<'s, 'h, H> {
         let element = StartElement {
             name: ExpandedName {
                 namespace_uri: state.stack.namespace_uri(elem_ns),
-                local_name: Name::new(get_name(&state.stack.names, scope.local), &scope.name_state),
+                local_name: Name::new(get_name(&state.stack.names, scope.local)),
             },
             name_span: scope.name_span,
             close_span,
@@ -743,25 +737,6 @@ impl<'s, 'h, H: Handler> Driver<'s, 'h, H> {
         self.handler
             .start_element(&state.stack.scope(), &element)
             .map_err(Failure::Handler)?;
-
-        if scope.name_state.get() == NameState::Unchecked
-            && !is_ncname(get_name(&state.stack.names, scope.local))
-        {
-            return Err(Failure::Infoset(Error::InvalidName {
-                span: scope.name_span.start..scope.name_span.end,
-                kind: "element",
-            }));
-        }
-        for attr in &state.attrs {
-            if attr.name_state.get() == NameState::Unchecked
-                && !is_ncname(state.arena.get_name(attr.local))
-            {
-                return Err(Failure::Infoset(Error::InvalidName {
-                    span: attr.name_span.start..attr.name_span.end,
-                    kind: "attribute",
-                }));
-            }
-        }
 
         // Attribute names and values are no longer needed — reset for the next start tag
         self.state.arena.clear();
@@ -926,7 +901,6 @@ impl<H: Handler> Visitor for Driver<'_, '_, H> {
                 prefix,
                 local,
                 name_span,
-                name_state: Cell::new(NameState::Unchecked),
                 value,
                 namespace: NsRef::None,
             });

@@ -592,21 +592,20 @@ impl<S: Sink> Engine<S> {
     /// position the element itself was expected at. `None` means there is no sound state to
     /// continue from and the caller should leave its position untouched.
     ///
-    /// Names that the schema accepts are marked valid, which spares the reader from checking
-    /// them: every name in the schema is a valid NCName, so a name that matches is one too.
+    /// Every name is checked to be a valid NCName here, since the reader does not check them:
+    /// looking it up in the schema's names proves a name valid, as every name in the schema is,
+    /// and any other name is checked explicitly.
     fn close_element_start(
         &mut self,
         ns: &NamespaceScope<'_>,
         element: &StartElement<'_>,
     ) -> Result<PatId, CloseStartError> {
         let elem_name_span = element.name_span;
-        let elem_qname = QualifiedName {
-            namespace_uri: element.name.namespace_uri,
-            local_name: element.name.local_name.as_bytes(),
-        };
-
         let pat_id = self.current_step;
-        let next_pat = self.schema.start_tag_open_deriv(pat_id, elem_qname);
+        let next_pat = match self.schema.schema_names.key(&element.name) {
+            Some(key) => self.schema.start_tag_open_deriv(pat_id, key),
+            None => PAT_NOT_ALLOWED,
+        };
         if matches!(self.schema.patt(next_pat), Pat::NotAllowed) {
             let err = if !element.name.local_name.is_valid() {
                 ValidatorError::InvalidName {
@@ -624,7 +623,6 @@ impl<S: Sink> Engine<S> {
             // descend into and nothing to recover to.
             return Err(CloseStartError::unrecoverable(err));
         }
-        element.name.local_name.mark_valid();
 
         // A rejected attribute is recorded but does not abandon the derivation: the
         // remaining attributes are still applied, so that an element with one bad attribute
@@ -634,16 +632,13 @@ impl<S: Sink> Engine<S> {
         let mut first_attr_error = None;
         for attr in element.attributes() {
             let attr_name_span = attr.name_span;
-            let attr_qname = QualifiedName {
-                namespace_uri: attr.name.namespace_uri,
-                local_name: attr.name.local_name.as_bytes(),
+            let derived = match self.schema.schema_names.key(&attr.name) {
+                Some(key) => {
+                    let mid = self.schema.start_att_deriv(pat, key);
+                    self.schema.att_value_deriv(mid, attr.value, ns)
+                }
+                None => PAT_NOT_ALLOWED,
             };
-            let mid = self.schema.start_att_deriv(pat, attr_qname);
-            if !matches!(self.schema.patt(mid), Pat::NotAllowed) {
-                // The name matched, even if the value goes on to fail
-                attr.name.local_name.mark_valid();
-            }
-            let derived = self.schema.att_value_deriv(mid, attr.value, ns);
             if matches!(self.schema.patt(derived), Pat::NotAllowed) {
                 if first_attr_error.is_none() {
                     first_attr_error = Some(if !attr.name.local_name.is_valid() {
@@ -2305,6 +2300,32 @@ mod tests {
                 ..
             }
         );
+    }
+
+    #[test]
+    fn distinct_unknown_names_share_cache_entries() {
+        // Names the schema doesn't mention all match the same name classes, so they share
+        // derivative cache entries rather than adding entries for every new name
+        let f = Fixture::correct(
+            "start = element root {
+               (element * - known { attribute * { text }* } | element known { empty })*
+             }",
+        );
+        let cache_sizes = |n: usize| {
+            let mut doc = String::from(r#"<root xmlns:p="urn:p">"#);
+            for i in 0..n {
+                doc += &format!(r#"<e{i} a{i}="v" p:b{i}="v"/><p:f{i}/><known/>"#);
+            }
+            doc += "</root>";
+            let mut v = Case::new(f.schema.clone());
+            v.validate_all(doc.as_bytes()).unwrap();
+            let inner = v.engine.schema.inner.borrow();
+            (
+                inner.start_tag_open_cache.len(),
+                inner.start_att_cache.len(),
+            )
+        };
+        assert_eq!(cache_sizes(3), cache_sizes(300));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use relaxng_model::datatype::Datatypes;
 use std::collections::HashMap;
 
 use crate::infoset::NamespaceScope;
-use crate::nameclass::{QualifiedName, contains};
+use crate::nameclass::NameKey;
 use crate::schema::{Pat, PatId, Schema};
 
 fn is_whitespace_char(c: char) -> bool {
@@ -197,17 +197,11 @@ impl Schema {
         result
     }
 
-    pub(crate) fn start_tag_open_deriv(&mut self, pid: PatId, name: QualifiedName) -> PatId {
-        let local_key: Box<[u8]> = name.local_name.into();
-        let ns_key = self.ns_interner.intern_opt(name.namespace_uri);
-
+    pub(crate) fn start_tag_open_deriv(&mut self, pid: PatId, name: NameKey) -> PatId {
         // Cache check (borrow released before any mutation)
         {
             let inner = self.inner.borrow();
-            if let Some(&cached) = inner
-                .start_tag_open_cache
-                .get(&(pid, local_key.clone(), ns_key))
-            {
+            if let Some(&cached) = inner.start_tag_open_cache.get(&(pid, name)) {
                 return cached;
             }
         }
@@ -244,7 +238,7 @@ impl Schema {
                 }
             }
             Pat::Element(nc, inner_pat) => {
-                if contains(self.name_class(nc), &name) {
+                if self.name_matcher(nc).matches(name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
                     self.after(inner_pat, empty)
@@ -270,17 +264,14 @@ impl Schema {
         self.inner
             .borrow_mut()
             .start_tag_open_cache
-            .insert((pid, local_key, ns_key), result);
+            .insert((pid, name), result);
         result
     }
 
-    pub(crate) fn start_att_deriv(&mut self, pid: PatId, name: QualifiedName) -> PatId {
-        let local_key: Box<[u8]> = name.local_name.into();
-        let ns_key = self.ns_interner.intern_opt(name.namespace_uri);
-
+    pub(crate) fn start_att_deriv(&mut self, pid: PatId, name: NameKey) -> PatId {
         {
             let inner = self.inner.borrow();
-            if let Some(&cached) = inner.start_att_cache.get(&(pid, local_key.clone(), ns_key)) {
+            if let Some(&cached) = inner.start_att_cache.get(&(pid, name)) {
                 return cached;
             }
         }
@@ -315,7 +306,7 @@ impl Schema {
                 self.choice(x, y)
             }
             Pat::Attribute(nc, val_pat) => {
-                if contains(self.name_class(nc), &name) {
+                if self.name_matcher(nc).matches(name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
                     self.after(val_pat, empty)
@@ -333,7 +324,7 @@ impl Schema {
         self.inner
             .borrow_mut()
             .start_att_cache
-            .insert((pid, local_key, ns_key), result);
+            .insert((pid, name), result);
         result
     }
 

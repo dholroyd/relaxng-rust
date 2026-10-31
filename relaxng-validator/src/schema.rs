@@ -1,4 +1,7 @@
 use relaxng_model::model::{NameClass, PatRef};
+
+use crate::nameclass::{NameKey, NameMatcher, SchemaNames};
+use fnv::FnvHashMap;
 use relaxng_model::{datatype, model};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -116,35 +119,7 @@ impl Pat {
 // Schema internals
 // ---------------------------------------------------------------------------
 
-/// Interned namespace URI identifier. Comparing two `NsId` values is equivalent
-/// to comparing the URI strings they represent, but costs a single u32 comparison
-/// instead of hashing/comparing the full URI.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct NsId(u32);
-
-/// Interns namespace URI strings so that repeated lookups use a cheap integer key.
-#[derive(Default)]
-pub(crate) struct NamespaceInterner {
-    uris: Vec<String>,
-}
-
-impl NamespaceInterner {
-    pub(crate) fn intern(&mut self, uri: &str) -> NsId {
-        if let Some(pos) = self.uris.iter().position(|u| u == uri) {
-            NsId(pos as u32)
-        } else {
-            let id = NsId(self.uris.len() as u32);
-            self.uris.push(uri.to_owned());
-            id
-        }
-    }
-
-    pub(crate) fn intern_opt(&mut self, uri: Option<&str>) -> Option<NsId> {
-        uri.map(|u| self.intern(u))
-    }
-}
-
-pub(crate) type NameCache = HashMap<(PatId, Box<[u8]>, Option<NsId>), PatId>;
+pub(crate) type NameCache = FnvHashMap<(PatId, NameKey), PatId>;
 
 #[derive(Default)]
 pub(crate) struct Inner {
@@ -154,13 +129,13 @@ pub(crate) struct Inner {
 
     // Our implementation of https://relaxng.org/jclark/derivative.html#Memoization
 
-    // Persistent cross-call memo: (input PatId, local-name, namespace-uri) -> result PatId
+    // Persistent cross-call memo: (input PatId, name) -> result PatId
     pub(crate) start_tag_open_cache: NameCache,
     // Persistent cross-call memo: input PatId -> result PatId
     pub(crate) start_tag_close_cache: HashMap<PatId, PatId>,
     // Persistent cross-call memo: input PatId -> result PatId (Vec indexed by PatId.0)
     pub(crate) mixed_text_cache: Vec<Option<PatId>>,
-    // Persistent cross-call memo: (input PatId, local-name, namespace-uri) -> result PatId
+    // Persistent cross-call memo: (input PatId, name) -> result PatId
     pub(crate) start_att_cache: NameCache,
 }
 
@@ -175,13 +150,18 @@ pub(crate) struct Schema {
 
     pub(crate) coverage: Option<Box<[u64]>>,
     pub(crate) compile_time_count: u16,
-    /// Interner for namespace URI strings used in derivative cache keys.
-    pub(crate) ns_interner: NamespaceInterner,
+    /// `names` compiled for matching, at the same indexes.
+    matchers: Box<[NameMatcher]>,
+    /// The names that `matchers` mention.
+    pub(crate) schema_names: SchemaNames,
 }
 
 impl Schema {
     pub(crate) fn name_class(&self, id: NameClassId) -> &NameClass {
         &self.names[id.0 as usize]
+    }
+    pub(crate) fn name_matcher(&self, id: NameClassId) -> &NameMatcher {
+        &self.matchers[id.0 as usize]
     }
     pub(crate) fn datatype(&self, id: DatatypeId) -> &datatype::Datatypes {
         &self.datatypes[id.0 as usize]
@@ -774,9 +754,17 @@ impl SchemaBuilder {
             span_map: self.span_map,
             ..Default::default()
         };
+        let names = self.names.into_table();
+        let mut schema_names = SchemaNames::default();
+        let matchers = names
+            .iter()
+            .map(|nc| NameMatcher::compile(nc, &mut schema_names))
+            .collect();
         Schema {
             inner: RefCell::new(inner),
-            names: self.names.into_table(),
+            names,
+            matchers,
+            schema_names,
             datatypes: self.datatypes.into_table(),
             datatype_values: self.datatype_values.into_table(),
             ..Default::default()

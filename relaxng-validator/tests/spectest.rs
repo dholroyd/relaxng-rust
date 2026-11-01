@@ -1,6 +1,6 @@
 use libtest_mimic::{Arguments, Failed, Trial};
 use relaxng_model::Compiler;
-use relaxng_validator::Validator;
+use relaxng_validator::{Validator, validate_slice};
 use roxmltree::{ExpandedName, Node};
 
 use std::collections::HashMap;
@@ -61,7 +61,7 @@ fn collect_suite<'a, 'input>(
             } else if child.tag_name() == ExpandedName::from("testCase") {
                 collect_case(trials, counters, path, &suite_name, child);
             } else if child.tag_name() == ExpandedName::from("documentation") {
-                suite_name = child.text().map(|t| slugify(t));
+                suite_name = child.text().map(slugify);
             }
         }
     }
@@ -129,12 +129,13 @@ fn is_suppressed(test_case: &TestCase) -> bool {
         let mut c = create_compiler(resources);
         c.compile(Path::new(&schema_key))
     });
-    match result {
-        Ok(Err(relaxng_model::RelaxError::XmlParse(_, relaxng_syntax::xml::Error::Todo(_)))) => {
-            true
-        }
-        _ => false,
-    }
+    matches!(
+        result,
+        Ok(Err(relaxng_model::RelaxError::XmlParse(
+            _,
+            relaxng_syntax::xml::Error::Todo(_)
+        )))
+    )
 }
 
 fn run_test(test_case: TestCase) -> Result<(), Failed> {
@@ -166,39 +167,27 @@ fn run_test(test_case: TestCase) -> Result<(), Failed> {
             };
 
             for (i, doc) in valid.iter().enumerate() {
-                let reader = xmlparser::Tokenizer::from(&doc[..]);
-                let mut v = Validator::new(result.start.clone(), reader).unwrap();
-                loop {
-                    match v.validate_next() {
-                        None => break,
-                        Some(Ok(())) => {}
-                        Some(Err(err)) => {
-                            let schema = resources.get("correct.rng").unwrap();
-                            return Err(format!(
-                                "Valid document #{} rejected: {err:?}\nschema: {schema}\ndoc: {doc}",
-                                i + 1
-                            )
-                            .into());
-                        }
-                    }
+                let mut errors = vec![];
+                let mut v = Validator::new(result.start.clone(), |_: &_, err| {
+                    errors.push(err);
+                })
+                .unwrap();
+                let rejected = validate_slice(&mut v, doc.as_bytes()).is_err();
+                drop(v);
+                if rejected {
+                    let err = errors;
+                    let schema = resources.get("correct.rng").unwrap();
+                    return Err(format!(
+                        "Valid document #{} rejected: {err:?}\nschema: {schema}\ndoc: {doc}",
+                        i + 1
+                    )
+                    .into());
                 }
             }
 
             for (i, doc) in invalid.iter().enumerate() {
-                let reader = xmlparser::Tokenizer::from(&doc[..]);
-                let mut v = Validator::new(result.start.clone(), reader).unwrap();
-                let mut was_rejected = false;
-                loop {
-                    match v.validate_next() {
-                        None => break,
-                        Some(Ok(())) => {}
-                        Some(Err(_)) => {
-                            was_rejected = true;
-                            break;
-                        }
-                    }
-                }
-                if !was_rejected {
+                let mut v = Validator::new(result.start.clone(), |_: &_, _| {}).unwrap();
+                if validate_slice(&mut v, doc.as_bytes()).is_ok() {
                     let schema = resources.get("correct.rng").unwrap();
                     return Err(format!(
                         "Invalid document #{} was accepted:\nschema: {schema}\ndoc: {doc}",
@@ -344,15 +333,15 @@ fn load_resources(path: &Path, resources: &mut HashMap<String, String>, node: No
 fn stringify(node: Node) -> String {
     let mut res = String::new();
     // extra work to give the first line consistent indentation with the rest of the lines
-    if let Some(prev) = node.prev_sibling() {
-        if let Some(text) = prev.text() {
-            let last_line = if let Some(pos) = text.rfind('\n') {
-                &text[pos + 1..]
-            } else {
-                text
-            };
-            res.push_str(last_line);
-        }
+    if let Some(prev) = node.prev_sibling()
+        && let Some(text) = prev.text()
+    {
+        let last_line = if let Some(pos) = text.rfind('\n') {
+            &text[pos + 1..]
+        } else {
+            text
+        };
+        res.push_str(last_line);
     }
     res.push_str(&node.document().input_text()[node.range()]);
     res

@@ -37,6 +37,8 @@ The `relaxng-validator` crate passes all 384 tests from the RELAX NG test suite.
 
 All 44 XML Schema built-in datatypes are supported (except `NOTATION`, which the RelaxNG spec forbids).
 
+Entities declared in a DTD are not supported: the DOCTYPE is skipped, and a reference to any entity other than the
+predefined ones is reported as an error.  Attribute values are limited to 1 MiB.
 
 ## Subprojects
 
@@ -44,7 +46,6 @@ All 44 XML Schema built-in datatypes are supported (except `NOTATION`, which the
    an 'abstract sytax tree' representation of an individual schema file.
  - [`relaxng-model`](relaxng-model) provides an intermediate representation of an RELAX NG schema, which might be
    composed of multiple related schema component files.
- - [`relaxng-validator`](relaxng-validator) able to perform validation of instance documents.  Uses
-   [xmlparser](https://crates.io/crates/xmlparser).
+ - [`relaxng-validator`](relaxng-validator) able to perform validation of instance documents.
  - [`relaxng-tool`](relaxng-tool) - a demo CLI program to validate XML documents against a RELAX NG schema.
  - [`relaxng-exemplifier`](relaxng-exemplifier) - generate random example XML documents from a schema, for testing

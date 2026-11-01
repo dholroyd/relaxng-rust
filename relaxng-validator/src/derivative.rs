@@ -1,6 +1,7 @@
-use relaxng_model::datatype::{Datatype, Datatypes};
+use relaxng_model::datatype::Datatypes;
 use std::collections::HashMap;
 
+use crate::infoset::NamespaceScope;
 use crate::nameclass::{QualifiedName, contains};
 use crate::schema::{Pat, PatId, Schema};
 
@@ -12,47 +13,45 @@ pub(crate) fn is_whitespace_str(s: &str) -> bool {
     s.chars().all(is_whitespace_char)
 }
 
-impl Schema {
-    fn datatype_is_valid(&self, dt: &Datatypes, text: &str) -> bool {
-        match self.ns_context {
-            Some(ref ns_ctx) => dt.is_valid_with_ns(text, |p| ns_ctx.lookup(p)),
-            None => dt.is_valid(text),
-        }
-    }
+/// Checks `text` against `dt`, resolving any QName prefix against the declarations in `ns`.
+fn datatype_is_valid(dt: &Datatypes, text: &str, ns: &NamespaceScope<'_>) -> bool {
+    dt.is_valid_with_ns(text, |p| ns.lookup_prefix(p).map(str::to_owned))
+}
 
-    pub(crate) fn text_deriv(&mut self, pid: PatId, text: &str) -> PatId {
+impl Schema {
+    pub(crate) fn text_deriv(&mut self, pid: PatId, text: &str, ns: &NamespaceScope<'_>) -> PatId {
         let current = self.patt(pid);
         match current {
             Pat::Choice(p1, p2, _) => {
-                let a = self.text_deriv(p1, text);
-                let b = self.text_deriv(p2, text);
+                let a = self.text_deriv(p1, text, ns);
+                let b = self.text_deriv(p2, text, ns);
                 self.choice(a, b)
             }
             Pat::Interleave(p1, p2, _) => {
-                let d1 = self.text_deriv(p1, text);
+                let d1 = self.text_deriv(p1, text, ns);
                 let a = self.interleave(d1, p2);
 
-                let d2 = self.text_deriv(p2, text);
+                let d2 = self.text_deriv(p2, text, ns);
                 let b = self.interleave(p1, d2);
                 self.choice(a, b)
             }
             Pat::Group(p1, p2, _) => {
                 let nullable = self.patt(p1).is_nullable();
-                let d1 = self.text_deriv(p1, text);
+                let d1 = self.text_deriv(p1, text, ns);
                 let p = self.group(d1, p2);
                 if nullable {
-                    let d2 = self.text_deriv(p2, text);
+                    let d2 = self.text_deriv(p2, text, ns);
                     self.choice(p, d2)
                 } else {
                     p
                 }
             }
             Pat::After(p1, p2) => {
-                let d = self.text_deriv(p1, text);
+                let d = self.text_deriv(p1, text, ns);
                 self.after(d, p2)
             }
             Pat::OneOrMore(p, _) => {
-                let d = self.text_deriv(p, text);
+                let d = self.text_deriv(p, text, ns);
                 self.group(d, self.choice(self.one_or_more(p), self.empty()))
             }
             Pat::Text => {
@@ -60,7 +59,7 @@ impl Schema {
                 self.text()
             }
             Pat::Datatype(dt) => {
-                if self.datatype_is_valid(self.datatype(dt), text) {
+                if datatype_is_valid(self.datatype(dt), text, ns) {
                     self.mark_covered(pid);
                     self.empty()
                 } else {
@@ -69,12 +68,9 @@ impl Schema {
             }
             Pat::DatatypeValue(dt) => {
                 let dt = self.datatype_value(dt);
-                let valid = if let Some(ref ns_ctx) = self.ns_context {
-                    let ns_ctx = ns_ctx.clone();
-                    dt.is_valid_with_ns(text, &ns_ctx.default_ns, |p| ns_ctx.lookup(p))
-                } else {
-                    dt.is_valid(text)
-                };
+                let valid = dt.is_valid_with_ns(text, ns.default_namespace().unwrap_or(""), |p| {
+                    ns.lookup_prefix(p).map(str::to_owned)
+                });
                 if valid {
                     self.mark_covered(pid);
                     self.empty()
@@ -83,9 +79,9 @@ impl Schema {
                 }
             }
             Pat::DatatypeExcept(dt, except) => {
-                let d = self.text_deriv(except, text);
+                let d = self.text_deriv(except, text, ns);
                 let pat2 = self.patt(d);
-                if self.datatype_is_valid(self.datatype(dt), text) && !pat2.is_nullable() {
+                if datatype_is_valid(self.datatype(dt), text, ns) && !pat2.is_nullable() {
                     self.mark_covered(pid);
                     self.empty()
                 } else {
@@ -95,7 +91,7 @@ impl Schema {
             Pat::List(p) => {
                 let mut p = p;
                 for item in text.split_whitespace() {
-                    p = self.text_deriv(p, item);
+                    p = self.text_deriv(p, item, ns);
                     if let Pat::NotAllowed = self.patt(p) {
                         return p;
                     }
@@ -202,16 +198,15 @@ impl Schema {
     }
 
     pub(crate) fn start_tag_open_deriv(&mut self, pid: PatId, name: QualifiedName) -> PatId {
-        let local_key: Box<str> = name.local_name.into();
-        let ns_key: Option<Box<str>> = name.namespace_uri.map(|s| s.into());
+        let local_key: Box<[u8]> = name.local_name.into();
+        let ns_key = self.ns_interner.intern_opt(name.namespace_uri);
 
         // Cache check (borrow released before any mutation)
         {
             let inner = self.inner.borrow();
-            if let Some(&cached) =
-                inner
-                    .start_tag_open_cache
-                    .get(&(pid, local_key.clone(), ns_key.clone()))
+            if let Some(&cached) = inner
+                .start_tag_open_cache
+                .get(&(pid, local_key.clone(), ns_key))
             {
                 return cached;
             }
@@ -249,7 +244,7 @@ impl Schema {
                 }
             }
             Pat::Element(nc, inner_pat) => {
-                if contains(self.name_class(nc), name) {
+                if contains(self.name_class(nc), &name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
                     self.after(inner_pat, empty)
@@ -280,16 +275,12 @@ impl Schema {
     }
 
     pub(crate) fn start_att_deriv(&mut self, pid: PatId, name: QualifiedName) -> PatId {
-        let local_key: Box<str> = name.local_name.into();
-        let ns_key: Option<Box<str>> = name.namespace_uri.map(|s| s.into());
+        let local_key: Box<[u8]> = name.local_name.into();
+        let ns_key = self.ns_interner.intern_opt(name.namespace_uri);
 
         {
             let inner = self.inner.borrow();
-            if let Some(&cached) =
-                inner
-                    .start_att_cache
-                    .get(&(pid, local_key.clone(), ns_key.clone()))
-            {
+            if let Some(&cached) = inner.start_att_cache.get(&(pid, local_key.clone(), ns_key)) {
                 return cached;
             }
         }
@@ -324,7 +315,7 @@ impl Schema {
                 self.choice(x, y)
             }
             Pat::Attribute(nc, val_pat) => {
-                if contains(self.name_class(nc), name) {
+                if contains(self.name_class(nc), &name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
                     self.after(val_pat, empty)
@@ -346,19 +337,24 @@ impl Schema {
         result
     }
 
-    pub(crate) fn att_value_deriv(&mut self, pid: PatId, value: &str) -> PatId {
+    pub(crate) fn att_value_deriv(
+        &mut self,
+        pid: PatId,
+        value: &str,
+        ns: &NamespaceScope<'_>,
+    ) -> PatId {
         let pat = self.patt(pid);
         match pat {
             Pat::After(val_pat, cont) => {
-                if self.value_match(val_pat, value) {
+                if self.value_match(val_pat, value, ns) {
                     cont
                 } else {
                     self.not_allowed()
                 }
             }
             Pat::Choice(p1, p2, _) => {
-                let c1 = self.att_value_deriv(p1, value);
-                let c2 = self.att_value_deriv(p2, value);
+                let c1 = self.att_value_deriv(p1, value, ns);
+                let c2 = self.att_value_deriv(p2, value, ns);
                 self.choice(c1, c2)
             }
             _ => self.not_allowed(),
@@ -390,12 +386,12 @@ impl Schema {
         }
     }
 
-    pub(crate) fn value_match(&mut self, pid: PatId, val: &str) -> bool {
+    pub(crate) fn value_match(&mut self, pid: PatId, val: &str, ns: &NamespaceScope<'_>) -> bool {
         let pat = self.patt(pid);
         if pat.is_nullable() && is_whitespace_str(val) {
             true
         } else {
-            let d = self.text_deriv(pid, val);
+            let d = self.text_deriv(pid, val, ns);
             self.patt(d).is_nullable()
         }
     }
@@ -560,8 +556,13 @@ impl Schema {
     /// satisfied. Only meaningful on the error-recovery path, once this element's own error has
     /// already been reported — forcing it on the happy path would let genuinely-incomplete
     /// content through undetected.
-    pub(crate) fn close_empty_element(&mut self, pid: PatId, force: bool) -> PatId {
-        let p = self.text_deriv(pid, "");
+    pub(crate) fn close_empty_element(
+        &mut self,
+        pid: PatId,
+        force: bool,
+        ns: &NamespaceScope<'_>,
+    ) -> PatId {
+        let p = self.text_deriv(pid, "", ns);
         let closed = self.end_tag_deriv(p);
         if force && matches!(self.patt(closed), Pat::NotAllowed) {
             self.force_end_tag_deriv(p)

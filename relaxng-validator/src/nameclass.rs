@@ -1,10 +1,15 @@
 use relaxng_model::datatype;
 use relaxng_model::model::NameClass;
 
+use crate::infoset::is_ncname;
+
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct QualifiedName<'a> {
     pub(crate) namespace_uri: Option<&'a str>,
-    pub(crate) local_name: &'a str,
+    /// Local name as raw bytes. For `Named` matches, byte equality against the
+    /// schema's UTF-8 name is sufficient. For wildcard matches (`AnyName`/`NsName`),
+    /// `contains()` validates that this is a legal XML NCName.
+    pub(crate) local_name: &'a [u8],
 }
 
 fn is_ns_match(namespace_uri: &str, target_namespace: Option<&str>) -> bool {
@@ -15,22 +20,27 @@ fn is_ns_match(namespace_uri: &str, target_namespace: Option<&str>) -> bool {
     }
 }
 
-pub(crate) fn contains(nc: &NameClass, target_name: QualifiedName) -> bool {
+pub(crate) fn contains(nc: &NameClass, target_name: &QualifiedName) -> bool {
     match nc {
         NameClass::Named {
             namespace_uri,
             name,
         } => {
-            if let Some(ref target_namespace) = target_name.namespace_uri {
-                *target_namespace == namespace_uri && target_name.local_name == name
+            // Byte equality: if the schema name is a valid NCName (guaranteed by
+            // the schema compiler), matching bytes implies a valid name.
+            if let Some(target_namespace) = target_name.namespace_uri {
+                target_namespace == namespace_uri && target_name.local_name == name.as_bytes()
             } else {
-                namespace_uri.is_empty() && target_name.local_name == name
+                namespace_uri.is_empty() && target_name.local_name == name.as_bytes()
             }
         }
         NameClass::NsName {
             namespace_uri,
             except,
         } => {
+            if !is_ncname(target_name.local_name) {
+                return false;
+            }
             if is_ns_match(namespace_uri, target_name.namespace_uri) {
                 if let Some(except_nameclass) = except {
                     !contains(except_nameclass, target_name)
@@ -41,10 +51,15 @@ pub(crate) fn contains(nc: &NameClass, target_name: QualifiedName) -> bool {
                 false
             }
         }
-        NameClass::AnyName { except } => match except {
-            None => true,
-            Some(nc) => !contains(nc, target_name),
-        },
+        NameClass::AnyName { except } => {
+            if !is_ncname(target_name.local_name) {
+                return false;
+            }
+            match except {
+                None => true,
+                Some(nc) => !contains(nc, target_name),
+            }
+        }
         NameClass::Alt { a, b } => contains(a, target_name) || contains(b, target_name),
     }
 }

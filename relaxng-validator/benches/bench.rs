@@ -1,11 +1,10 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use relaxng_model::{Compiler, Files, Syntax};
-use relaxng_validator::Validator;
+use relaxng_validator::{Validator, validate_slice};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
-use xmlparser::Tokenizer;
 
 /// schema exercising most features:
 /// - Namespaces (default + prefixed)
@@ -281,15 +280,8 @@ fn compile_schema() -> Rc<RefCell<Option<relaxng_model::model::DefineRule>>> {
 }
 
 fn validate(schema: Rc<RefCell<Option<relaxng_model::model::DefineRule>>>, doc: &str) {
-    let tokenizer = Tokenizer::from(doc);
-    let mut v = Validator::new(schema, tokenizer).unwrap();
-    loop {
-        match v.validate_next() {
-            None => break,
-            Some(Ok(())) => {}
-            Some(Err(e)) => panic!("Validation error: {e:?}"),
-        }
-    }
+    let mut v = Validator::new(schema, |_: &_, err| panic!("Validation error: {err:?}")).unwrap();
+    validate_slice(&mut v, doc.as_bytes()).unwrap();
 }
 
 fn bench_compile(c: &mut Criterion) {

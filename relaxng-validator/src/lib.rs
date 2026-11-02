@@ -468,13 +468,11 @@ impl<'a> Validator<'a> {
         Err(CloseStartError { error, recovery })
     }
 
-    #[allow(clippy::mutable_key_type)] // false-positive
     fn heads(&self, id: PatId) -> HashSet<Pat> {
         let mut result = HashSet::new();
         self.head(&mut result, id);
         result
     }
-    #[allow(clippy::mutable_key_type)] // false-positive
     fn head(&self, result: &mut HashSet<Pat>, p: PatId) {
         // https://www.kohsuke.org/relaxng/implbook/Validation1.html#IDATGOO
         let pat = self.schema.patt(p);
@@ -520,7 +518,6 @@ impl<'a> Validator<'a> {
     }
 
     fn describe_expected(&self, expected_patt: PatId) -> String {
-        #[allow(clippy::mutable_key_type)] // false-positive
         let heads = self.heads(expected_patt);
         let mut result = String::new();
         const MAX_ELEMENTS: usize = 4;

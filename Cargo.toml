@@ -1,15 +1,76 @@
-[workspace]
-resolver = "3"
-members = [
-    "relaxng-syntax",
-    "relaxng-model",
-    "relaxng-validator",
-    "relaxng-tool",
-    "relaxng-exemplifier",
-]
-
-[workspace.package]
+[package]
+name = "relaxng"
 license = "MIT OR Apache-2.0"
+version = "0.1.0"
+authors = ["David Holroyd <dave@badgers-in-foil.co.uk>"]
+edition = "2024"
+description = "RELAX NG schema parsing, validation and example document generation"
+readme = "README.md"
+repository = "https://github.com/dholroyd/relaxng-rust"
+include = ["/src", "/tests", "/benches", "/README.md", "/TOOL.md", "/LICENSE-*"]
+
+[features]
+default = ["validator", "exemplifier", "tool"]
+# Validate XML documents against a compiled schema
+validator = ["dep:xml-syntax-reader", "dep:fnv"]
+# Generate random example documents from a schema
+exemplifier = ["dep:arbitrary", "dep:rand"]
+# The `rng` command line program
+tool = ["validator", "exemplifier", "dep:structopt", "dep:structopt-derive"]
+
+[dependencies]
+nom = "8.0"
+nom_locate = "5.0"
+roxmltree = "0.21.1"
+fluent-uri = "0.4.1"
+codemap = "0.1.3"
+codemap-diagnostic = "0.1.1"
+regex = "1.11.1"
+num-bigint = "0.4.6"
+bigdecimal = "0.4.8"
+lazy_static = "1.5.0"
+chrono = "0.4.19"
+uriparse = "0.6.3"
+
+# validator
+xml-syntax-reader = { version = "0.3", optional = true }
+fnv = { version = "1.0.7", optional = true }
+
+# exemplifier
+arbitrary = { version = "1", optional = true }
+rand = { version = "0.9", features = ["small_rng"], optional = true }
+
+# tool
+structopt = { version = "0.3.21", optional = true }
+structopt-derive = { version = "0.4.14", optional = true }
+
+[dev-dependencies]
+assert_matches = "1.4.0"
+criterion = "0.8"
+libtest-mimic = "0.8.1"
+tempfile = "3"
+
+[[bin]]
+name = "rng"
+required-features = ["tool"]
+
+[[test]]
+name = "spectest"
+harness = false
+required-features = ["validator"]
+
+[[test]]
+name = "exemplifier"
+required-features = ["exemplifier", "validator"]
+
+[[bench]]
+name = "model"
+harness = false
+
+[[bench]]
+name = "validator"
+harness = false
+required-features = ["validator"]
 
 [profile.release]
 debug = true

@@ -6,7 +6,6 @@ members = [
     "relaxng-validator",
     "relaxng-tool",
     "relaxng-exemplifier",
-    "difftest",
 ]
 
 [workspace.package]

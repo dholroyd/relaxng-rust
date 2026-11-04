@@ -1,12 +1,10 @@
 use crate::syntax::types::*;
-use nom::Parser;
 use nom::character::complete::satisfy;
 use nom::combinator::cut;
-use nom::error::Error;
 use nom::multi::separated_list1;
 use nom::sequence::preceded;
+use nom::{Input, Parser};
 use nom::{
-    IResult,
     branch::alt,
     bytes::complete::{is_not, tag, take, take_until},
     character::{complete::multispace1, streaming::not_line_ending},
@@ -22,6 +20,28 @@ use std::ops::Range;
 
 const MAX_RECURSION_DEPTH: usize = 30;
 
+/// Error from the compact syntax parser.
+#[derive(Debug, PartialEq)]
+pub enum Error<I> {
+    /// The input doesn't match the grammar; the [`ErrorKind`] names the nom parser that gave up.
+    Nom(I, ErrorKind),
+    /// The input is a `\x{N}` escape sequence that is malformed or names a character XML
+    /// doesn't allow.
+    Escape(I, String),
+}
+
+impl<I> nom::error::ParseError<I> for Error<I> {
+    fn from_error_kind(input: I, kind: ErrorKind) -> Self {
+        Error::Nom(input, kind)
+    }
+
+    fn append(_input: I, _kind: ErrorKind, other: Self) -> Self {
+        other
+    }
+}
+
+type IResult<I, O> = nom::IResult<I, O, Error<I>>;
+
 thread_local! {
     static RECURSION_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -33,7 +53,7 @@ impl RecursionGuard {
         RECURSION_DEPTH.with(|depth| {
             let current = depth.get();
             if current >= MAX_RECURSION_DEPTH {
-                Err(nom::Err::Failure(Error::new(input, ErrorKind::TooLarge)))
+                Err(nom::Err::Failure(Error::Nom(input, ErrorKind::TooLarge)))
             } else {
                 depth.set(current + 1);
                 Ok((input, RecursionGuard))
@@ -123,10 +143,7 @@ fn resolve_one_escape(input: &str) -> Result<(char, usize), EscapeError> {
 ///
 /// The escape format is `\x+{hex_digits}` where one or more `x` characters
 /// may appear. The hex value must be a valid XML 1.0 Char.
-///
-/// Error spans are offset by `span_offset`, the position of `input` within the
-/// original text.
-fn resolve_escapes(input: &str, span_offset: usize) -> Result<Cow<'_, str>, EscapeError> {
+fn resolve_escapes(input: &str) -> Result<Cow<'_, str>, EscapeError> {
     let bytes = input.as_bytes();
     let first_escape = find_escape(bytes, 0);
     let Some(first_escape) = first_escape else {
@@ -139,8 +156,8 @@ fn resolve_escapes(input: &str, span_offset: usize) -> Result<Cow<'_, str>, Esca
         if bytes[i] == b'\\' {
             if is_escape_at(bytes, i).is_some() {
                 let (c, len) = resolve_one_escape(&input[i..]).map_err(|mut e| {
-                    e.span.start += i + span_offset;
-                    e.span.end += i + span_offset;
+                    e.span.start += i;
+                    e.span.end += i;
                     e
                 })?;
                 result.push(c);
@@ -195,22 +212,21 @@ fn is_xml_char(c: char) -> bool {
     )
 }
 
+/// Converts an [`EscapeError`] from resolving escapes in `input` to a parse failure spanning
+/// just the offending escape sequence.
+fn escape_failure(input: Span, e: EscapeError) -> nom::Err<Error<Span>> {
+    let escape = input.take_from(e.span.start).take(e.span.len());
+    nom::Err::Failure(Error::Escape(escape, e.message))
+}
+
 /// Parse a `\x+{hex}` escape sequence and return the resolved character.
 fn escape_char(input: Span) -> IResult<Span, char> {
     let frag = input.fragment();
     let bytes = frag.as_bytes();
     if bytes.is_empty() || bytes[0] != b'\\' || is_escape_at(bytes, 0).is_none() {
-        return Err(nom::Err::Error(Error {
-            input,
-            code: ErrorKind::Char,
-        }));
+        return Err(nom::Err::Error(Error::Nom(input, ErrorKind::Char)));
     }
-    let (c, len) = resolve_one_escape(frag).map_err(|_| {
-        nom::Err::Failure(Error {
-            input,
-            code: ErrorKind::Char,
-        })
-    })?;
+    let (c, len) = resolve_one_escape(frag).map_err(|e| escape_failure(input, e))?;
     let (rest, _) = take(len).parse(input)?;
     Ok((rest, c))
 }
@@ -375,14 +391,7 @@ fn literal_segment(input: Span) -> IResult<Span, LiteralSegment> {
     ))
     .parse(input)?;
 
-    let body_offset = body.location_offset();
-    let body_str = body.fragment();
-    let resolved = resolve_escapes(body_str, body_offset).map_err(|_| {
-        nom::Err::Failure(Error {
-            input: body,
-            code: ErrorKind::Char,
-        })
-    })?;
+    let resolved = resolve_escapes(body.fragment()).map_err(|e| escape_failure(body, e))?;
 
     IResult::Ok((
         input,
@@ -2022,55 +2031,55 @@ mod test {
     #[test]
     fn escape_basic() {
         // \x{66}\x{6f}\x{6f} == "foo"
-        assert_eq!(resolve_escapes(r"\x{66}\x{6f}\x{6f}", 0).unwrap(), "foo");
+        assert_eq!(resolve_escapes(r"\x{66}\x{6f}\x{6f}").unwrap(), "foo");
     }
 
     #[test]
     fn escape_multiple_x() {
         // Multiple x's are allowed: \xx{41} == "A"
-        assert_eq!(resolve_escapes(r"\xx{41}", 0).unwrap(), "A");
-        assert_eq!(resolve_escapes(r"\xxx{41}", 0).unwrap(), "A");
+        assert_eq!(resolve_escapes(r"\xx{41}").unwrap(), "A");
+        assert_eq!(resolve_escapes(r"\xxx{41}").unwrap(), "A");
     }
 
     #[test]
     fn escape_mixed_with_text() {
         assert_eq!(
-            resolve_escapes(r"hello \x{20} world", 0).unwrap(),
+            resolve_escapes(r"hello \x{20} world").unwrap(),
             "hello   world"
         );
     }
 
     #[test]
     fn escape_no_escapes() {
-        assert_eq!(resolve_escapes("plain text", 0).unwrap(), "plain text");
+        assert_eq!(resolve_escapes("plain text").unwrap(), "plain text");
     }
 
     #[test]
     fn escape_backslash_not_followed_by_x() {
         // \keyword should pass through unchanged
-        assert_eq!(resolve_escapes(r"\keyword", 0).unwrap(), r"\keyword");
+        assert_eq!(resolve_escapes(r"\keyword").unwrap(), r"\keyword");
     }
 
     #[test]
     fn escape_invalid_xml_char() {
         // U+0000 is not a valid XML char
-        assert!(resolve_escapes(r"\x{0}", 0).is_err());
+        assert!(resolve_escapes(r"\x{0}").is_err());
     }
 
     #[test]
     fn escape_unterminated() {
-        assert!(resolve_escapes(r"\x{41", 0).is_err());
+        assert!(resolve_escapes(r"\x{41").is_err());
     }
 
     #[test]
     fn escape_empty_hex() {
-        assert!(resolve_escapes(r"\x{}", 0).is_err());
+        assert!(resolve_escapes(r"\x{}").is_err());
     }
 
     #[test]
     fn escape_non_bmp() {
         // U+10000 LINEAR B SYLLABLE B008 A
-        assert_eq!(resolve_escapes(r"\x{10000}", 0).unwrap(), "\u{10000}");
+        assert_eq!(resolve_escapes(r"\x{10000}").unwrap(), "\u{10000}");
     }
 
     #[test]
@@ -2159,5 +2168,31 @@ mod test {
         assert!(nc_name(LocatedSpan::new(r"\x{31}a")).is_err());
         let (_, name) = nc_name(LocatedSpan::new(r"a\x{31}")).unwrap();
         assert_eq!(name.1, "a1");
+    }
+
+    #[test]
+    fn invalid_escape_in_string_literal_reports_the_escape() {
+        let input = LocatedSpan::new(r#"element foo { attribute bar { "a\x{20}b\x{0}c" } }"#);
+        match schema(input) {
+            Err(nom::Err::Failure(Error::Escape(span, message))) => {
+                assert_eq!(*span.fragment(), r"\x{0}");
+                assert_eq!(span.location_offset(), 39);
+                assert_eq!(message, r"\x{0} is not a valid XML character");
+            }
+            other => panic!("expected an escape error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_escape_in_name_reports_the_escape() {
+        let input = LocatedSpan::new(r"element f\x{zz} { empty }");
+        match schema(input) {
+            Err(nom::Err::Failure(Error::Escape(span, message))) => {
+                assert_eq!(*span.fragment(), r"\x{z");
+                assert_eq!(span.location_offset(), 9);
+                assert_eq!(message, "invalid character 'z' in escape sequence");
+            }
+            other => panic!("expected an escape error, got {other:?}"),
+        }
     }
 }

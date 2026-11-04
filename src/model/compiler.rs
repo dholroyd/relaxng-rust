@@ -8,7 +8,6 @@ use crate::syntax::types::{
     DatatypeName, Name, NamespaceUriLiteral, NamespacedName, NcName, QName, Schema,
 };
 use crate::syntax::{compact, types};
-use nom::error::Error;
 use nom_locate::LocatedSpan;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
@@ -104,21 +103,19 @@ impl Syntax {
             }),
             Syntax::Compact => {
                 let input = LocatedSpan::new(file.source());
+                let span = |input: compact::Span| {
+                    file.span.subspan(
+                        input.location_offset() as _,
+                        (input.location_offset() + input.fragment().len()) as _,
+                    )
+                };
                 let schema = compact::schema(input).map_err(|e| match e {
-                    nom::Err::Error(Error { input, code }) => RelaxError::Parse(
-                        file.span.subspan(
-                            input.location_offset() as _,
-                            (input.location_offset() + input.fragment().len()) as _,
-                        ),
-                        code,
-                    ),
-                    nom::Err::Failure(Error { input, code }) => RelaxError::Parse(
-                        file.span.subspan(
-                            input.location_offset() as _,
-                            (input.location_offset() + input.fragment().len()) as _,
-                        ),
-                        code,
-                    ),
+                    nom::Err::Error(err) | nom::Err::Failure(err) => match err {
+                        compact::Error::Nom(input, code) => RelaxError::Parse(span(input), code),
+                        compact::Error::Escape(input, message) => {
+                            RelaxError::EscapeError(span(input), message)
+                        }
+                    },
                     nom::Err::Incomplete(_n) => unimplemented!("{:?}", e),
                 })?;
                 Ok(schema)

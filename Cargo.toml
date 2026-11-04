@@ -33,7 +33,7 @@ chrono = "0.4.19"
 uriparse = "0.6.3"
 
 # validator
-xml-syntax-reader = { version = "0.3", optional = true }
+xml-syntax-reader = { version = "0.4", optional = true }
 fnv = { version = "1.0.7", optional = true }
 
 # exemplifier

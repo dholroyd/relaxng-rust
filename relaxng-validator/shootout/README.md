@@ -57,12 +57,12 @@ cargo run --release -- --update
 <!-- BEGIN RESULTS -->
 *20 iterations per cell; min time shown (ms).*
 
-| sections | rng 0.1.0 | jing 20241231 | jing -t 20241231 | xmllint libxml 2.14.5 | rnv 1.7.11 |
+| sections | rng 0.1.0 | jing 20241231 | jing -t 20241231 | xmllint libxml 2.15.2 | rnv 1.7.11 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 2 | 2.4 | 170.8 | 113.0 | 1.8 | 1.4 |
-| 20 | 5.0 | 173.3 | 122.0 | 5.3 | 3.9 |
-| 200 | 24.7 | 233.6 | 172.0 | 42.6 | 27.1 |
-| 2000 | 221.4 | 385.6 | 302.0 | 421.1 | 257.9 |
+| 2 | 2.4 | 194.6 | 145.0 | 1.9 | 1.6 |
+| 20 | 3.5 | 219.6 | 169.0 | 4.9 | 3.7 |
+| 200 | 13.6 | 276.1 | 222.0 | 36.3 | 24.2 |
+| 2000 | 115.2 | 473.6 | 416.0 | 368.2 | 230.0 |
 
 `jing` = wall-clock (includes JVM startup); `jing -t` = jing's self-reported time.
 <!-- END RESULTS -->
@@ -73,4 +73,4 @@ cargo run --release -- --update
 - All validator stdout/stderr suppressed — no terminal I/O cost in timing
 - JVM cold-start is deliberately included for Jing (honest CLI comparison);
   use `jing -t` for Jing's internal algorithmic timing
-- **min** is the headline stat (least affected by OS noise); median and mean also shown
+- min is shown in hopes this is least affected by noise on the host system

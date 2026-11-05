@@ -2574,4 +2574,86 @@ mod tests {
         assert_eq!(span.start, 3, "span start should point at the text");
         assert_eq!(span.end, 7, "span end should be after the text");
     }
+
+    /// Runs `f` on its own thread, failing if it does not finish within `secs`, so that a
+    /// regression to exponential behaviour fails the test rather than hanging it.
+    fn within_deadline(secs: u64, f: impl FnOnce() + Send + 'static) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            f();
+            let _ = tx.send(());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("did not finish within {secs}s")
+            }
+            // The worker panicked; its own message has already been printed.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("worker panicked"),
+        }
+    }
+
+    /// A schema whose pattern is a DAG in which each define is referenced twice by the next,
+    /// so that an unmemoized walk of it visits 2^depth paths.
+    fn doubling_schema(depth: usize) -> String {
+        let mut s = format!("start = element s {{ d{depth} }}\nd0 = element x {{ empty }}?\n");
+        for i in 1..=depth {
+            s.push_str(&format!("d{i} = d{prev}, d{prev}\n", prev = i - 1));
+        }
+        s
+    }
+
+    // https://github.com/dholroyd/relaxng-rust/issues/35
+    #[test]
+    fn whitespace_text_deriv_is_memoized() {
+        within_deadline(10, || {
+            let f = Fixture::correct(&doubling_schema(40));
+            f.valid("<s> \n\t</s>");
+        });
+    }
+
+    // Results that consult a datatype aren't kept across calls, so rely on the per-call memo.
+    // Datatypes can't be grouped (§7.2), so here the sharing is through `except` instead:
+    // each level refers to the one below twice.  Levels alternately match and reject " ".
+    #[test]
+    fn whitespace_text_deriv_through_datatype_is_memoized() {
+        within_deadline(10, || {
+            let depth = 40;
+            let mut schema = format!(
+                "start = element s {{ d{depth} }}\nd0 = xsd:string {{ maxLength = \"4\" }}\n"
+            );
+            for i in 1..=depth {
+                let prev = i - 1;
+                schema.push_str(&format!(
+                    "d{i} = (xsd:string - d{prev}) | (xsd:token - d{prev})\n"
+                ));
+            }
+            Fixture::correct(&schema).valid("<s> </s>");
+        });
+    }
+
+    // Empty content is matched as an empty text node, so takes the same path as whitespace.
+    #[test]
+    fn empty_element_text_deriv_is_memoized() {
+        within_deadline(10, || {
+            let f = Fixture::correct(&doubling_schema(40));
+            f.valid("<s></s>");
+            f.valid("<s/>");
+        });
+    }
+
+    // The whitespace memo must not conflate different whitespace strings, since a datatype
+    // can tell them apart.  One validator is reused so the second document sees the cache
+    // the first one filled.
+    #[test]
+    fn whitespace_text_memo_distinguishes_whitespace_strings() {
+        let f = Fixture::correct(
+            "start = element s { (xsd:string { length = \"1\" }, attribute a { xsd:string { length = \"1\" } }) }",
+        );
+        let mut v = Case::new(f.schema.clone());
+        assert!(v.validate_all(br#"<s a=" "> </s>"#).is_ok());
+        assert!(v.validate_all(br#"<s a=" ">  </s>"#).is_err());
+        assert!(v.validate_all(br#"<s a="  "> </s>"#).is_err());
+        assert!(v.validate_all(br#"<s a=" "> </s>"#).is_ok());
+    }
 }

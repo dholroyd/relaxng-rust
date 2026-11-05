@@ -137,6 +137,11 @@ pub(crate) struct Inner {
     pub(crate) mixed_text_cache: Vec<Option<PatId>>,
     // Persistent cross-call memo: (input PatId, name) -> result PatId
     pub(crate) start_att_cache: NameCache,
+    // Persistent cross-call memo for whitespace-only (including empty) text: input PatId ->
+    // result PatId (Vec indexed by PatId.0).  Only holds results that are the same for every
+    // whitespace-only string, i.e. that did not consult a datatype, so it is keyed on the
+    // pattern alone and bounded by the pattern table.
+    pub(crate) whitespace_text_cache: Vec<Option<PatId>>,
 }
 
 #[derive(Default)]

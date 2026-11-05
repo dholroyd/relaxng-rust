@@ -1,4 +1,5 @@
 use crate::model::datatype::Datatypes;
+use fnv::FnvHashMap;
 use std::collections::HashMap;
 
 use crate::validator::infoset::NamespaceScope;
@@ -18,40 +19,143 @@ fn datatype_is_valid(dt: &Datatypes, text: &str, ns: &NamespaceScope<'_>) -> boo
     dt.is_valid_with_ns(text, |p| ns.lookup_prefix(p).map(str::to_owned))
 }
 
+/// The state of one [`Schema::text_deriv`] call.
+struct TextDerivCx<'t, 'n, 's> {
+    text: &'t str,
+    /// Whether `text` is whitespace-only (or empty).
+    whitespace: bool,
+    ns: &'n NamespaceScope<'s>,
+    /// This call's memo: input PatId -> (result PatId, whether the result depends on the text).
+    memo: FnvHashMap<PatId, (PatId, bool)>,
+    /// Whether the derivative being computed depends on the text, beyond whether it is
+    /// whitespace-only.  Only datatypes tell whitespace strings apart (e.g. by a length facet),
+    /// so they set this.
+    depends: bool,
+}
+
 impl Schema {
     pub(crate) fn text_deriv(&mut self, pid: PatId, text: &str, ns: &NamespaceScope<'_>) -> PatId {
-        let current = self.patt(pid);
-        match current {
+        let mut cx = TextDerivCx {
+            text,
+            whitespace: is_whitespace_str(text),
+            ns,
+            memo: FnvHashMap::default(),
+            depends: false,
+        };
+        self.text_deriv_memo(pid, &mut cx)
+    }
+
+    // Memoizes the recursion in Self::text_deriv_uncached.  Sub-patterns are shared, so
+    // without this each one is re-derived once per path that reaches it, which is exponential
+    // in the nesting depth.
+    //
+    // Results go into `whitespace_text_cache` when they hold for every whitespace-only text,
+    // since that case recurs in nearly every context and so is worth keeping across calls.
+    // Everything else goes into `cx.memo`, which lasts for this `text_deriv` call only.  See
+    // [`TextDerivCx::depends`] for how the two cases are told apart.
+    fn text_deriv_memo(&mut self, pid: PatId, cx: &mut TextDerivCx<'_, '_, '_>) -> PatId {
+        let pat = self.patt(pid);
+        // Only patterns that recurse into sub-patterns are memoized.  Since every such parent is
+        // memoized, a leaf (including Element and Attribute, whose derivative never looks inside
+        // them) is derived at most once per distinct parent anyway, too little to repay an insert.
+        if !Self::is_recursive_pattern(pat) {
+            return self.text_deriv_uncached(pid, pat, cx);
+        }
+        if cx.whitespace
+            && let Some(cached) = self.whitespace_text_cache_entry(pid)
+        {
+            return cached;
+        }
+        if let Some(&(cached, depends)) = cx.memo.get(&pid) {
+            // Re-apply the flag so every parent of a shared child sees the dependency, not just
+            // the first one to derive it.
+            cx.depends |= depends;
+            return cached;
+        }
+        // Find whether this pattern's own derivative depends on the text, then fold that into
+        // the enclosing pattern's.
+        let outer = std::mem::replace(&mut cx.depends, false);
+        let result = self.text_deriv_uncached(pid, pat, cx);
+        let depends = cx.depends;
+        cx.depends |= outer;
+        if cx.whitespace && !depends {
+            // Keyed on the pattern alone, so only results that are the same for every
+            // whitespace-only text can go here.
+            let mut inner = self.inner.borrow_mut();
+            let idx = pid.0 as usize;
+            if idx >= inner.whitespace_text_cache.len() {
+                inner.whitespace_text_cache.resize(idx + 1, None);
+            }
+            inner.whitespace_text_cache[idx] = Some(result);
+        } else {
+            cx.memo.insert(pid, (result, depends));
+        }
+        result
+    }
+
+    fn whitespace_text_cache_entry(&self, pid: PatId) -> Option<PatId> {
+        self.inner
+            .borrow()
+            .whitespace_text_cache
+            .get(pid.0 as usize)
+            .copied()
+            .flatten()
+    }
+
+    fn is_recursive_pattern(pat: Pat) -> bool {
+        matches!(
+            pat,
+            Pat::Choice(..)
+                | Pat::Interleave(..)
+                | Pat::Group(..)
+                | Pat::After(..)
+                | Pat::OneOrMore(..)
+                | Pat::DatatypeExcept(..)
+                | Pat::List(..)
+        )
+    }
+
+    /// Returns the derivative of `pid` (whose pattern is `pat`) with respect to `cx.text`,
+    /// setting `cx.depends` if a datatype was consulted.
+    fn text_deriv_uncached(
+        &mut self,
+        pid: PatId,
+        pat: Pat,
+        cx: &mut TextDerivCx<'_, '_, '_>,
+    ) -> PatId {
+        let text = cx.text;
+        let ns = cx.ns;
+        match pat {
             Pat::Choice(p1, p2, _) => {
-                let a = self.text_deriv(p1, text, ns);
-                let b = self.text_deriv(p2, text, ns);
+                let a = self.text_deriv_memo(p1, cx);
+                let b = self.text_deriv_memo(p2, cx);
                 self.choice(a, b)
             }
             Pat::Interleave(p1, p2, _) => {
-                let d1 = self.text_deriv(p1, text, ns);
+                let d1 = self.text_deriv_memo(p1, cx);
                 let a = self.interleave(d1, p2);
 
-                let d2 = self.text_deriv(p2, text, ns);
+                let d2 = self.text_deriv_memo(p2, cx);
                 let b = self.interleave(p1, d2);
                 self.choice(a, b)
             }
             Pat::Group(p1, p2, _) => {
                 let nullable = self.patt(p1).is_nullable();
-                let d1 = self.text_deriv(p1, text, ns);
+                let d1 = self.text_deriv_memo(p1, cx);
                 let p = self.group(d1, p2);
                 if nullable {
-                    let d2 = self.text_deriv(p2, text, ns);
+                    let d2 = self.text_deriv_memo(p2, cx);
                     self.choice(p, d2)
                 } else {
                     p
                 }
             }
             Pat::After(p1, p2) => {
-                let d = self.text_deriv(p1, text, ns);
+                let d = self.text_deriv_memo(p1, cx);
                 self.after(d, p2)
             }
             Pat::OneOrMore(p, _) => {
-                let d = self.text_deriv(p, text, ns);
+                let d = self.text_deriv_memo(p, cx);
                 self.group(d, self.choice(self.one_or_more(p), self.empty()))
             }
             Pat::Text => {
@@ -59,6 +163,7 @@ impl Schema {
                 self.text()
             }
             Pat::Datatype(dt) => {
+                cx.depends = true;
                 if datatype_is_valid(self.datatype(dt), text, ns) {
                     self.mark_covered(pid);
                     self.empty()
@@ -67,6 +172,7 @@ impl Schema {
                 }
             }
             Pat::DatatypeValue(dt) => {
+                cx.depends = true;
                 let dt = self.datatype_value(dt);
                 let valid = dt.is_valid_with_ns(text, ns.default_namespace().unwrap_or(""), |p| {
                     ns.lookup_prefix(p).map(str::to_owned)
@@ -79,7 +185,8 @@ impl Schema {
                 }
             }
             Pat::DatatypeExcept(dt, except) => {
-                let d = self.text_deriv(except, text, ns);
+                cx.depends = true;
+                let d = self.text_deriv_memo(except, cx);
                 let pat2 = self.patt(d);
                 if datatype_is_valid(self.datatype(dt), text, ns) && !pat2.is_nullable() {
                     self.mark_covered(pid);
@@ -121,7 +228,7 @@ impl Schema {
                 // The document assumes however that we can see the list of child nodes, so we need
                 // to handle this case in a streaming manner.  Right now we don't track that
                 // that this pattern is being tested in the context of child nodes - FIXME!
-                if is_whitespace_str(text) {
+                if cx.whitespace {
                     self.empty()
                 } else {
                     self.not_allowed()
@@ -129,7 +236,7 @@ impl Schema {
             }
             Pat::NotAllowed | Pat::Attribute(_, _) => self.not_allowed(),
             Pat::Element(_, _) => {
-                if is_whitespace_str(text) {
+                if cx.whitespace {
                     pid
                 } else {
                     self.not_allowed()

@@ -125,17 +125,26 @@ impl Schema {
     ) -> PatId {
         let text = cx.text;
         let ns = cx.ns;
+        // Where the text leaves every sub-pattern unchanged (as whitespace usually does), the
+        // composite arms return `pid` itself rather than rebuilding an equivalent pattern.  A
+        // rebuilt pattern would be new to every cache, and the states reached from it multiply
+        // with each text node until the pattern table overflows.
         match pat {
             Pat::Choice(p1, p2, _) => {
                 let a = self.text_deriv_memo(p1, cx);
                 let b = self.text_deriv_memo(p2, cx);
+                if a == p1 && b == p2 {
+                    return pid;
+                }
                 self.choice(a, b)
             }
             Pat::Interleave(p1, p2, _) => {
                 let d1 = self.text_deriv_memo(p1, cx);
-                let a = self.interleave(d1, p2);
-
                 let d2 = self.text_deriv_memo(p2, cx);
+                if d1 == p1 && d2 == p2 {
+                    return pid;
+                }
+                let a = self.interleave(d1, p2);
                 let b = self.interleave(p1, d2);
                 self.choice(a, b)
             }
@@ -145,6 +154,10 @@ impl Schema {
                 let p = self.group(d1, p2);
                 if nullable {
                     let d2 = self.text_deriv_memo(p2, cx);
+                    // p1 is nullable, so `p1, p2` already matches everything `p2` does.
+                    if d1 == p1 && d2 == p2 {
+                        return pid;
+                    }
                     self.choice(p, d2)
                 } else {
                     p
@@ -156,6 +169,10 @@ impl Schema {
             }
             Pat::OneOrMore(p, _) => {
                 let d = self.text_deriv_memo(p, cx);
+                // `p, (p+ | empty)` matches the same as `p+`.
+                if d == p {
+                    return pid;
+                }
                 self.group(d, self.choice(self.one_or_more(p), self.empty()))
             }
             Pat::Text => {

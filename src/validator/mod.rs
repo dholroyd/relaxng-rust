@@ -2656,4 +2656,23 @@ mod tests {
         assert!(v.validate_all(br#"<s a="  "> </s>"#).is_err());
         assert!(v.validate_all(br#"<s a=" "> </s>"#).is_ok());
     }
+
+    // https://github.com/dholroyd/relaxng-rust/issues/35 — deriving whitespace between the
+    // children of an interleave rebuilt the pattern each time, multiplying the states reached
+    // until the pattern table overflowed and this valid document was rejected.
+    #[test]
+    fn indented_interleave_children_are_valid() {
+        let mut schema = String::from(
+            "start = element s { e0* & e1* & e2* & e3* & e4* & e5* & e6* & e7* & e8* & e9* }\n",
+        );
+        for i in 0..10 {
+            schema.push_str(&format!("e{i} = element e{i} {{ empty }}\n"));
+        }
+        let mut doc = String::from("<s>");
+        for i in 0..200 {
+            doc.push_str(&format!("\n  <e{}/>", (i * 7) % 10));
+        }
+        doc.push_str("\n</s>");
+        Fixture::correct(&schema).valid(&doc);
+    }
 }

@@ -17,6 +17,9 @@ use xml_syntax_reader::{ErrorKind, ParseError, QName, Span, Visitor};
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 const MAX_ATTRIBUTES: usize = 256;
 pub(crate) const MAX_ATTRIBUTE_VALUE: usize = 1024 * 1024;
+/// The deepest element nesting accepted.  Each open element adds to the
+/// validator's pattern table, so this prevents deep documents exhausting it.
+pub(crate) const MAX_ELEMENT_DEPTH: usize = 1024;
 
 /// A document that is not well-formed, or could not be read.
 #[derive(Debug)]
@@ -66,6 +69,10 @@ pub(crate) enum Error {
         span: Range<u64>,
     },
     AttributeValueTooLong {
+        span: Range<u64>,
+    },
+    /// An element nested more than [`MAX_ELEMENT_DEPTH`] deep. `span` is that of its name.
+    ElementTooDeep {
         span: Range<u64>,
     },
     /// Bytes that should be UTF-8 (e.g. a namespace prefix) were not valid UTF-8.
@@ -470,7 +477,13 @@ impl ElementStack {
         }
     }
 
-    fn push(&mut self, name: QName<'_>) {
+    fn push(&mut self, name: QName<'_>) -> Result<(), Error> {
+        if self.scopes.len() >= MAX_ELEMENT_DEPTH {
+            let span = name.span();
+            return Err(Error::ElementTooDeep {
+                span: span.start..span.end,
+            });
+        }
         let prefix = name.prefix().map(|p| push_name(&mut self.names, p));
         let local = push_name(&mut self.names, name.local_name());
         self.scopes.push(ElementScope {
@@ -480,6 +493,7 @@ impl ElementStack {
             ns_decl_start: self.ns_declarations.len() as u32,
             outer_default_ns: self.default_ns,
         });
+        Ok(())
     }
 
     /// Checks that `name` matches the name of the innermost open element, as the
@@ -810,8 +824,7 @@ impl<H: Handler> Visitor for Driver<'_, '_, H> {
             return Err(outside_root("element", name.span()));
         }
         self.end_text()?;
-        self.state.stack.push(name);
-        Ok(())
+        self.state.stack.push(name).map_err(Failure::Infoset)
     }
 
     fn attribute_name(&mut self, name: QName<'_>) -> Result<(), Self::Error> {

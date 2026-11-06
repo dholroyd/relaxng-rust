@@ -84,6 +84,11 @@ pub enum ValidatorError {
     AttributeValueTooLong {
         span: Range<u64>,
     },
+    /// Elements are nested too deeply. `span` is that of the name of the first element beyond
+    /// the limit.
+    ElementTooDeep {
+        span: Range<u64>,
+    },
     /// Bytes that should be UTF-8 (e.g. a namespace prefix) were not valid UTF-8.
     InvalidUtf8 {
         span: Range<u64>,
@@ -207,6 +212,13 @@ impl std::fmt::Display for ValidatorError {
                     infoset::MAX_ATTRIBUTE_VALUE
                 )
             }
+            ValidatorError::ElementTooDeep { .. } => {
+                write!(
+                    f,
+                    "elements nested too deeply (limit: {})",
+                    infoset::MAX_ELEMENT_DEPTH
+                )
+            }
             ValidatorError::InvalidUtf8 { kind, .. } => {
                 write!(f, "{kind} contains invalid UTF-8")
             }
@@ -253,6 +265,7 @@ impl From<infoset::Error> for ValidatorError {
             infoset::Error::AttributeValueTooLong { span } => {
                 ValidatorError::AttributeValueTooLong { span }
             }
+            infoset::Error::ElementTooDeep { span } => ValidatorError::ElementTooDeep { span },
             infoset::Error::InvalidUtf8 { span, kind } => {
                 ValidatorError::InvalidUtf8 { span, kind }
             }
@@ -1134,6 +1147,19 @@ impl Explainer<'_> {
                     spans: vec![label],
                 });
             }
+            ValidatorError::ElementTooDeep { span } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: file.span.subspan(span.start as _, span.end as _),
+                    label: None,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                };
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: err.to_string(),
+                    code: None,
+                    spans: vec![label],
+                });
+            }
             ValidatorError::InvalidUtf8 { span, kind } => {
                 let label = codemap_diagnostic::SpanLabel {
                     span: file.span.subspan(span.start as _, span.end as _),
@@ -1859,6 +1885,43 @@ mod tests {
             &errors[..],
             [super::ValidatorError::UndefinedEntity { name, span }, ..]
                 if name == "e" && doc[span.start as usize..span.end as usize] == *"e"
+        );
+    }
+
+    const NESTING_SCHEMA: &str = "start = e  e = element e { e? }";
+
+    fn nested(depth: usize) -> String {
+        "<e>".repeat(depth) + &"</e>".repeat(depth)
+    }
+
+    #[test]
+    fn element_depth_at_limit_is_allowed() {
+        let doc = nested(super::infoset::MAX_ELEMENT_DEPTH);
+        assert_matches!(validate_doc(NESTING_SCHEMA, &doc), Ok(()));
+    }
+
+    #[test]
+    fn element_depth_over_limit_is_rejected() {
+        let max = super::infoset::MAX_ELEMENT_DEPTH;
+        let doc = nested(max + 1);
+        let errors = validate_doc(NESTING_SCHEMA, &doc).unwrap_err();
+        assert_matches!(
+            &errors[..],
+            [super::ValidatorError::ElementTooDeep { span }]
+                if span.start as usize == max * 3 + 1 && doc[span.start as usize..span.end as usize] == *"e"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_document_does_not_exhaust_patterns() {
+        let doc = nested(40_000);
+        let errors = validate_doc(NESTING_SCHEMA, &doc).unwrap_err();
+        // Not assert_matches! - would print every error
+        assert!(
+            matches!(&errors[..], [super::ValidatorError::ElementTooDeep { .. }]),
+            "{} errors, first: {:?}",
+            errors.len(),
+            errors[0]
         );
     }
 

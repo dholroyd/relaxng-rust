@@ -8,7 +8,6 @@ use crate::syntax::types::{
     DatatypeName, Name, NamespaceUriLiteral, NamespacedName, NcName, QName, Schema,
 };
 use crate::syntax::{compact, types};
-use nom_locate::LocatedSpan;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -102,21 +101,14 @@ impl Syntax {
                 RelaxError::XmlParse(span, e)
             }),
             Syntax::Compact => {
-                let input = LocatedSpan::new(file.source());
-                let span = |input: compact::Span| {
-                    file.span.subspan(
-                        input.location_offset() as _,
-                        (input.location_offset() + input.fragment().len()) as _,
-                    )
+                let subspan = |span: std::ops::Range<usize>| {
+                    file.span.subspan(span.start as _, span.end as _)
                 };
-                let schema = compact::schema(input).map_err(|e| match e {
-                    nom::Err::Error(err) | nom::Err::Failure(err) => match err {
-                        compact::Error::Nom(input, code) => RelaxError::Parse(span(input), code),
-                        compact::Error::Escape(input, message) => {
-                            RelaxError::EscapeError(span(input), message)
-                        }
-                    },
-                    nom::Err::Incomplete(_n) => unimplemented!("{:?}", e),
+                let schema = compact::parse(file.source()).map_err(|e| match e {
+                    compact::CompactError::Input(e) => RelaxError::Input(subspan(e.span()), e),
+                    compact::CompactError::Syntax { span, kind } => {
+                        RelaxError::Parse(subspan(span), kind)
+                    }
                 })?;
                 Ok(schema)
             }
@@ -195,7 +187,8 @@ pub enum RelaxError {
         include_span: codemap::Span,
         name: String,
     },
-    EscapeError(codemap::Span, String),
+    /// The compact-syntax source text was rejected before tokenisation
+    Input(codemap::Span, compact::InputError),
 }
 
 pub(crate) enum Context<'a> {
@@ -1275,7 +1268,7 @@ impl<FS: Files> Compiler<FS> {
                     spans: vec![label],
                 }
             }
-            RelaxError::EscapeError(span, message) => {
+            RelaxError::Input(span, err) => {
                 let label = codemap_diagnostic::SpanLabel {
                     span: *span,
                     style: codemap_diagnostic::SpanStyle::Primary,
@@ -1283,7 +1276,7 @@ impl<FS: Files> Compiler<FS> {
                 };
                 codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: message.clone(),
+                    message: err.to_string(),
                     code: None,
                     spans: vec![label],
                 }

@@ -1,14 +1,13 @@
 use crate::syntax::types::*;
+use nom::Parser;
 use nom::character::complete::satisfy;
 use nom::combinator::cut;
 use nom::multi::separated_list1;
 use nom::sequence::preceded;
-use nom::{Input, Parser};
 use nom::{
     branch::alt,
-    bytes::complete::{is_not, tag, take, take_until},
-    character::{complete::multispace1, streaming::not_line_ending},
-    combinator::{all_consuming, map, not, opt, peek, recognize, verify},
+    bytes::complete::{is_not, tag, take_till, take_until, take_while, take_while1},
+    combinator::{all_consuming, map, not, opt, peek, recognize},
     error::ErrorKind,
     multi::{fold_many0, fold_many1, separated_list0},
     sequence::delimited,
@@ -16,6 +15,7 @@ use nom::{
 use nom_locate::{LocatedSpan, position};
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::fmt;
 use std::ops::Range;
 
 const MAX_RECURSION_DEPTH: usize = 30;
@@ -25,9 +25,6 @@ const MAX_RECURSION_DEPTH: usize = 30;
 pub enum Error<I> {
     /// The input doesn't match the grammar; the [`ErrorKind`] names the nom parser that gave up.
     Nom(I, ErrorKind),
-    /// The input is a `\x{N}` escape sequence that is malformed or names a character XML
-    /// doesn't allow.
-    Escape(I, String),
 }
 
 impl<I> nom::error::ParseError<I> for Error<I> {
@@ -70,109 +67,191 @@ impl Drop for RecursionGuard {
     }
 }
 
-pub type Span<'a> = LocatedSpan<&'a str>;
-
 // per https://www.oasis-open.org/committees/relax-ng/compact-20021121.html
 
 // TODO:
 //  - check rules are left-factored as required to avoid inefficiently rematching the same sub-rule
 //    in multiple alternatives
+//
+//  - the spec (Appendix A, sections 2.1 and 2.2) allows UTF-16 input (detected by a byte
+//    order mark, or specified by metadata such as a MIME charset), and supports a leading byte
+//    order mark in UTF-8.  We only support only UTF-8 without a BOM. It's not clear that
+//    there is a real-world need for anything else.
 
-/// Error from [`resolve_escapes`], with the byte offset span of the invalid
-/// escape sequence within the original input.
-#[derive(Debug)]
-struct EscapeError {
-    /// Byte range of the escape sequence in the original input.
-    pub span: Range<usize>,
-    pub message: String,
+/// Maps byte offsets in preprocessed text (see [`preprocess`]) back to offsets in the original
+/// source.
+///
+/// Each entry `(decoded, original)` records offsets at which the two texts realign after a
+/// transformation that changed the length of the text (an escape sequence, or a CR LF pair).
+/// Between entries, the two texts correspond byte for byte.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct SourceMap<'a>(&'a [(usize, usize)]);
+
+/// The entries from which a [`SourceMap`] is built.
+type OffsetPairs = Vec<(usize, usize)>;
+
+impl SourceMap<'_> {
+    fn original(&self, decoded: usize) -> usize {
+        match self.0.partition_point(|&(d, _)| d <= decoded) {
+            0 => decoded,
+            i => {
+                let (d, o) = self.0[i - 1];
+                o + (decoded - d)
+            }
+        }
+    }
 }
 
-/// Resolve a single `\x{N}` escape sequence, returning the character and the
-/// byte length consumed from `input` (which must start with `\x`).
-fn resolve_one_escape(input: &str) -> Result<(char, usize), EscapeError> {
+/// Parser input.
+///
+/// The text being parsed is the output of [`preprocess`], so `location_offset()` gives offsets
+/// that may differ from those in the original source.  Offsets that end up in the AST or in
+/// errors must be derived via [`span`] or [`original_offset`], which translate them back.
+pub type Span<'a> = LocatedSpan<&'a str, SourceMap<'a>>;
+
+fn original_offset(s: &Span) -> usize {
+    s.extra.original(s.location_offset())
+}
+
+/// Character substituted for an escaped line feed (`\x{A}`) in preprocessed text, so that the
+/// tokeniser can tell it apart from a newline in the source text.  The spec allows the former,
+/// but not the latter, inside single-line literals.  U+FFFF is not a legal XML character, and
+/// [`preprocess`] rejects it in the source text, so it can't be confused with real input.
+const ESCAPED_LF: char = '\u{FFFF}';
+
+/// Problems with the source text found before tokenisation, by [`preprocess`].
+///
+/// Spans are byte offsets in the original source.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputError {
+    /// A character in the source text that isn't a legal XML 1.0 `Char`.
+    InvalidChar { span: Range<usize>, ch: char },
+    /// A `\x{` sequence that doesn't form a complete escape sequence.
+    MalformedEscape {
+        span: Range<usize>,
+        problem: EscapeProblem,
+    },
+    /// A well-formed escape sequence whose value isn't a legal XML 1.0 `Char`.
+    InvalidEscapedChar { span: Range<usize>, code: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EscapeProblem {
+    /// The input ended before the closing `}`.
+    Unterminated,
+    /// No hex digits between the braces.
+    Empty,
+    /// Something other than a hex digit or `}` followed the opening `{`.
+    NonHexDigit(char),
+    /// The value exceeds the maximum Unicode code point, U+10FFFF.
+    OutOfRange,
+}
+
+impl InputError {
+    pub fn span(&self) -> Range<usize> {
+        match self {
+            InputError::InvalidChar { span, .. }
+            | InputError::MalformedEscape { span, .. }
+            | InputError::InvalidEscapedChar { span, .. } => span.clone(),
+        }
+    }
+
+    fn offset_by(mut self, by: usize) -> Self {
+        match &mut self {
+            InputError::InvalidChar { span, .. }
+            | InputError::MalformedEscape { span, .. }
+            | InputError::InvalidEscapedChar { span, .. } => {
+                span.start += by;
+                span.end += by;
+            }
+        }
+        self
+    }
+}
+
+impl fmt::Display for InputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InputError::InvalidChar { ch, .. } => write!(
+                f,
+                "character U+{:04X} is not allowed in a schema (not a legal XML character)",
+                *ch as u32
+            ),
+            InputError::MalformedEscape { problem, .. } => match problem {
+                EscapeProblem::Unterminated => {
+                    f.write_str("unterminated escape sequence (missing '}')")
+                }
+                EscapeProblem::Empty => f.write_str("empty escape sequence (no hex digits)"),
+                EscapeProblem::NonHexDigit(c) => write!(
+                    f,
+                    "invalid character {c:?} in escape sequence; expected a hex digit or '}}'"
+                ),
+                EscapeProblem::OutOfRange => f.write_str(
+                    "escape sequence value exceeds the maximum Unicode code point, 10FFFF",
+                ),
+            },
+            InputError::InvalidEscapedChar { code, .. } => {
+                if char::from_u32(*code).is_some() {
+                    write!(
+                        f,
+                        "escape sequence denotes U+{code:04X}, which is not a legal XML character"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "escape sequence denotes U+{code:04X}, a surrogate code point, which is not a legal XML character"
+                    )
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for InputError {}
+
+/// Error from [`parse`].
+#[derive(Debug)]
+pub enum CompactError {
+    /// The source text was rejected before tokenisation.
+    Input(InputError),
+    /// The text could not be parsed.  The span is in original source offsets.
+    Syntax { span: Range<usize>, kind: ErrorKind },
+}
+
+/// Resolve a single `\x{N}` escape sequence, returning the character and the byte length consumed
+/// from `input`, which must start with a `\x+{` escape opener.  Error spans are relative to the
+/// start of `input`.
+fn resolve_one_escape(input: &str) -> Result<(char, usize), InputError> {
     let bytes = input.as_bytes();
-    let hex_start = is_escape_at(bytes, 0).ok_or_else(|| EscapeError {
-        span: 0..input.len().min(2),
-        message: "not an escape sequence".into(),
-    })?;
+    let hex_start = is_escape_at(bytes, 0).expect("caller must check for an escape opener");
+    let malformed = |end, problem| InputError::MalformedEscape {
+        span: 0..end,
+        problem,
+    };
     let mut i = hex_start;
     while i < bytes.len() && bytes[i] != b'}' {
         if !bytes[i].is_ascii_hexdigit() {
-            return Err(EscapeError {
-                span: 0..i + 1,
-                message: format!(
-                    "invalid character '{}' in escape sequence",
-                    bytes[i] as char
-                ),
-            });
+            let c = input[i..].chars().next().unwrap();
+            return Err(malformed(i + c.len_utf8(), EscapeProblem::NonHexDigit(c)));
         }
         i += 1;
     }
     if i >= bytes.len() {
-        return Err(EscapeError {
-            span: 0..i,
-            message: "unterminated escape sequence".into(),
-        });
+        return Err(malformed(i, EscapeProblem::Unterminated));
     }
     let hex = &input[hex_start..i];
     let end = i + 1; // include closing '}'
     if hex.is_empty() {
-        return Err(EscapeError {
-            span: 0..end,
-            message: "empty escape sequence".into(),
-        });
+        return Err(malformed(end, EscapeProblem::Empty));
     }
-    let code = u32::from_str_radix(hex, 16).map_err(|_| EscapeError {
-        span: 0..end,
-        message: "escape value too large".into(),
-    })?;
-    let c = char::from_u32(code).ok_or_else(|| EscapeError {
-        span: 0..end,
-        message: format!("\\x{{{hex}}} is not a valid Unicode value"),
-    })?;
-    if !is_xml_char(c) {
-        return Err(EscapeError {
-            span: 0..end,
-            message: format!("\\x{{{hex}}} is not a valid XML character"),
-        });
+    let code = u32::from_str_radix(hex, 16)
+        .ok()
+        .filter(|&c| c <= 0x10FFFF)
+        .ok_or_else(|| malformed(end, EscapeProblem::OutOfRange))?;
+    match char::from_u32(code).filter(|&c| is_xml_char(c)) {
+        Some(c) => Ok((c, end)),
+        None => Err(InputError::InvalidEscapedChar { span: 0..end, code }),
     }
-    Ok((c, end))
-}
-
-/// Resolve `\x{N}` escape sequences in a string.
-///
-/// The escape format is `\x+{hex_digits}` where one or more `x` characters
-/// may appear. The hex value must be a valid XML 1.0 Char.
-fn resolve_escapes(input: &str) -> Result<Cow<'_, str>, EscapeError> {
-    let bytes = input.as_bytes();
-    let first_escape = find_escape(bytes, 0);
-    let Some(first_escape) = first_escape else {
-        return Ok(Cow::Borrowed(input));
-    };
-    let mut result = String::with_capacity(input.len());
-    result.push_str(&input[..first_escape]);
-    let mut i = first_escape;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            if is_escape_at(bytes, i).is_some() {
-                let (c, len) = resolve_one_escape(&input[i..]).map_err(|mut e| {
-                    e.span.start += i;
-                    e.span.end += i;
-                    e
-                })?;
-                result.push(c);
-                i += len;
-                continue;
-            }
-            result.push('\\');
-            i += 1;
-        } else {
-            let c = input[i..].chars().next().unwrap();
-            result.push(c);
-            i += c.len_utf8();
-        }
-    }
-    Ok(Cow::Owned(result))
 }
 
 /// If `bytes[pos]` is `\` followed by `x+{`, returns the byte index of the
@@ -191,18 +270,6 @@ fn is_escape_at(bytes: &[u8], pos: usize) -> Option<usize> {
     }
 }
 
-/// Find the byte offset of the first `\x+{` escape in `bytes` starting from `from`.
-fn find_escape(bytes: &[u8], from: usize) -> Option<usize> {
-    let mut i = from;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && is_escape_at(bytes, i).is_some() {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
 fn is_xml_char(c: char) -> bool {
     matches!(c,
         '\u{9}' | '\u{A}' | '\u{D}' |
@@ -212,26 +279,98 @@ fn is_xml_char(c: char) -> bool {
     )
 }
 
-/// Converts an [`EscapeError`] from resolving escapes in `input` to a parse failure spanning
-/// just the offending escape sequence.
-fn escape_failure(input: Span, e: EscapeError) -> nom::Err<Error<Span>> {
-    let escape = input.take_from(e.span.start).take(e.span.len());
-    nom::Err::Failure(Error::Escape(escape, e.message))
-}
-
-/// Parse a `\x+{hex}` escape sequence and return the resolved character.
-fn escape_char(input: Span) -> IResult<Span, char> {
-    let frag = input.fragment();
-    let bytes = frag.as_bytes();
-    if bytes.is_empty() || bytes[0] != b'\\' || is_escape_at(bytes, 0).is_none() {
-        return Err(nom::Err::Error(Error::Nom(input, ErrorKind::Char)));
+/// Performs the lexical stages that the spec (Appendix A, section 2) requires before
+/// tokenisation:
+///
+///  - newline normalisation: each CR LF pair, lone CR, or lone LF becomes `\n`
+///  - escape interpretation: each `\x{N}` escape is replaced by the character it denotes, except
+///    that an escaped line feed becomes [`ESCAPED_LF`]
+///
+/// This differs from the spec, which proposes that the literal linefeeds (after normalisation) be
+/// replaced by a sentinel, and escaped linefeeds be replaced by literal linefeeds.
+///
+/// Also rejects any character that isn't a legal XML 1.0 `Char`, since such characters are not
+/// valid, and it means that the sentinel value `ESCAPED_LF` can't appear in the input and clash.
+///
+/// Returns the text to tokenise, and the offset mapping for a [`SourceMap`].  If the source needs
+/// no changes, it is returned borrowed and the mapping is empty.
+fn preprocess(src: &str) -> Result<(Cow<'_, str>, OffsetPairs), InputError> {
+    let bytes = src.as_bytes();
+    let mut out: Option<String> = None;
+    let mut map = Vec::new();
+    // `src[..copied]` has been fully transferred to `out`
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                let crlf = bytes.get(i + 1) == Some(&b'\n');
+                let out = out.get_or_insert_with(|| String::with_capacity(src.len()));
+                out.push_str(&src[copied..i]);
+                out.push('\n');
+                i += if crlf { 2 } else { 1 };
+                copied = i;
+                if crlf {
+                    map.push((out.len(), i));
+                }
+            }
+            b'\\' if is_escape_at(bytes, i).is_some() => {
+                let (c, len) = resolve_one_escape(&src[i..]).map_err(|e| e.offset_by(i))?;
+                let out = out.get_or_insert_with(|| String::with_capacity(src.len()));
+                out.push_str(&src[copied..i]);
+                out.push(if c == '\n' { ESCAPED_LF } else { c });
+                i += len;
+                copied = i;
+                map.push((out.len(), i));
+            }
+            b @ (0x00..=0x08 | 0x0B | 0x0C | 0x0E..=0x1F) => {
+                return Err(InputError::InvalidChar {
+                    span: i..i + 1,
+                    ch: b as char,
+                });
+            }
+            // U+FFFE and U+FFFF are encoded as EF BF BE and EF BF BF.  0xEF is only ever a lead
+            // byte in UTF-8, so this can't match in the middle of some other character.
+            0xEF if bytes.get(i + 1) == Some(&0xBF)
+                && matches!(bytes.get(i + 2), Some(0xBE | 0xBF)) =>
+            {
+                return Err(InputError::InvalidChar {
+                    span: i..i + 3,
+                    ch: src[i..].chars().next().unwrap(),
+                });
+            }
+            _ => i += 1,
+        }
     }
-    let (c, len) = resolve_one_escape(frag).map_err(|e| escape_failure(input, e))?;
-    let (rest, _) = take(len).parse(input)?;
-    Ok((rest, c))
+    Ok(match out {
+        None => (Cow::Borrowed(src), map),
+        Some(mut out) => {
+            out.push_str(&src[copied..]);
+            (Cow::Owned(out), map)
+        }
+    })
 }
 
-pub fn schema(input: Span) -> Result<Schema, nom::Err<Error<Span>>> {
+/// Parse a schema in the compact syntax.
+pub fn parse(source: &str) -> Result<Schema, CompactError> {
+    let (text, map) = preprocess(source).map_err(CompactError::Input)?;
+    let input = Span::new_extra(&text, SourceMap(&map));
+    schema(input).map_err(|e| match e {
+        nom::Err::Error(Error::Nom(input, kind)) | nom::Err::Failure(Error::Nom(input, kind)) => {
+            let end = input.location_offset() + input.fragment().len();
+            CompactError::Syntax {
+                span: original_offset(&input)..input.extra.original(end),
+                kind,
+            }
+        }
+        nom::Err::Incomplete(_) => CompactError::Syntax {
+            span: source.len()..source.len(),
+            kind: ErrorKind::Eof,
+        },
+    })
+}
+
+fn schema(input: Span) -> Result<Schema, nom::Err<Error<Span>>> {
     all_consuming((space_comment0, top_level, space_comment0))
         .parse(input)
         .map(|(_, (_, r, _))| r)
@@ -245,7 +384,7 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
     } else {
         space_comment1(input)?
     };
-    let start = input.location_offset();
+    let (input, start) = position(input)?;
     let (input, pattern_or_grammar) = alt((
         map(
             separated_list1(space_comment1, grammar_content),
@@ -261,7 +400,7 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
     .parse(input)?;
     let pattern_or_grammar = match pattern_or_grammar {
         PatternOrGrammar::Grammar(mut g) => {
-            g.span = start..input.location_offset();
+            g.span = span(start, input);
             PatternOrGrammar::Grammar(g)
         }
         other => other,
@@ -391,21 +530,18 @@ fn literal_segment(input: Span) -> IResult<Span, LiteralSegment> {
     ))
     .parse(input)?;
 
-    let resolved = resolve_escapes(body.fragment()).map_err(|e| escape_failure(body, e))?;
-
+    // an escaped newline is allowed even in single-line literals, and denotes a newline
     IResult::Ok((
         input,
         LiteralSegment {
-            body: resolved.into_owned(),
+            body: body.fragment().replace(ESCAPED_LF, "\n"),
         },
     ))
 }
 
-fn span(start: LocatedSpan<&str>, end: LocatedSpan<&str>) -> Range<usize> {
-    Range {
-        start: start.location_offset(),
-        end: end.location_offset(),
-    }
+/// The range between two input positions, as byte offsets in the original source.
+fn span(start: Span, end: Span) -> Range<usize> {
+    original_offset(&start)..original_offset(&end)
 }
 
 // identifier	  ::=  	(NCName - keyword)
@@ -422,41 +558,15 @@ fn identifier(input: Span) -> IResult<Span, Identifier> {
 }
 
 pub(crate) fn nc_name(input: Span) -> IResult<Span, NcName> {
-    let (mut input, start) = position(input)?;
-    let (rest, first) = alt((nc_name_start_char, escaped_nc_name_start_char)).parse(input)?;
-    input = rest;
-    let mut name = String::new();
-    name.push(first);
-    loop {
-        match alt((nc_name_char, escaped_nc_name_char)).parse(input) {
-            Ok((rest, c)) => {
-                name.push(c);
-                input = rest;
-            }
-            Err(nom::Err::Error(_)) => break,
-            Err(e) => return Err(e),
-        }
-    }
+    let (input, start) = position(input)?;
+    let (input, name) =
+        recognize((satisfy(is_nc_name_start_char), take_while(is_nc_name_char))).parse(input)?;
     let (input, end) = position(input)?;
-    Ok((input, NcName(span(start, end), name)))
-}
-
-fn nc_name_start_char(input: Span) -> IResult<Span, char> {
-    satisfy(is_nc_name_start_char).parse(input)
+    Ok((input, NcName(span(start, end), name.fragment().to_string())))
 }
 
 fn nc_name_char(input: Span) -> IResult<Span, char> {
     satisfy(is_nc_name_char).parse(input)
-}
-
-/// An escape is just another way of writing a character, so the character it denotes must be
-/// acceptable at this position in the name
-fn escaped_nc_name_start_char(input: Span) -> IResult<Span, char> {
-    verify(escape_char, |c| is_nc_name_start_char(*c)).parse(input)
-}
-
-fn escaped_nc_name_char(input: Span) -> IResult<Span, char> {
-    verify(escape_char, |c| is_nc_name_char(*c)).parse(input)
 }
 
 fn is_nc_name_start_char(c: char) -> bool {
@@ -1193,7 +1303,7 @@ fn div_include_content(input: Span) -> IResult<Span, Vec<IncludeContent>> {
 
 fn space_comment0(input: Span) -> IResult<Span, Span> {
     recognize(fold_many0(
-        alt((multispace1, any_comment)),
+        alt((separator_chars, any_comment)),
         || (),
         |_, _| (),
     ))
@@ -1201,7 +1311,7 @@ fn space_comment0(input: Span) -> IResult<Span, Span> {
 }
 fn space_comment1(input: Span) -> IResult<Span, Span> {
     recognize(fold_many1(
-        alt((multispace1, any_comment)),
+        alt((separator_chars, any_comment)),
         || (),
         |_, _| (),
     ))
@@ -1211,7 +1321,7 @@ fn space_comment1(input: Span) -> IResult<Span, Span> {
 /// Consume whitespace and single-# comments only (not ## documentation comments)
 fn ws0(input: Span) -> IResult<Span, Span> {
     recognize(fold_many0(
-        alt((multispace1, single_comment)),
+        alt((separator_chars, single_comment)),
         || (),
         |_, _| (),
     ))
@@ -1219,32 +1329,43 @@ fn ws0(input: Span) -> IResult<Span, Span> {
 }
 fn ws1(input: Span) -> IResult<Span, Span> {
     recognize(fold_many1(
-        alt((multispace1, single_comment)),
+        alt((separator_chars, single_comment)),
         || (),
         |_, _| (),
     ))
     .parse(input)
 }
 
+/// Matches one or more whitespace characters.  Following escape interpretation, an escaped
+/// line feed counts as whitespace, but an escaped carriage return does not.
+fn separator_chars(input: Span) -> IResult<Span, Span> {
+    take_while1(|c| matches!(c, ' ' | '\t' | '\n' | ESCAPED_LF)).parse(input)
+}
+
+/// The remainder of a comment line; a comment is ended by either a newline or an escaped line
+/// feed
+fn rest_of_line(input: Span) -> IResult<Span, Span> {
+    take_till(|c| c == '\n' || c == ESCAPED_LF).parse(input)
+}
+
 /// Matches any comment line (both # and ##)
 fn any_comment(input: Span) -> IResult<Span, Span> {
-    recognize((tag("#"), not_line_ending)).parse(input)
+    recognize((tag("#"), rest_of_line)).parse(input)
 }
 
 /// Matches a single-# comment but NOT ## documentation comments
 fn single_comment(input: Span) -> IResult<Span, Span> {
-    recognize((tag("#"), not(peek(tag("#"))), not_line_ending)).parse(input)
+    recognize((tag("#"), not(peek(tag("#"))), rest_of_line)).parse(input)
 }
 
 /// Parse a single ## documentation line. Returns the content after ##,
 /// with one leading space stripped if present.
 fn documentation(input: Span) -> IResult<Span, Documentation> {
-    use nom::character::complete::not_line_ending as complete_not_line_ending;
     let (input, start) = position(input)?;
     let (input, _) = tag("##")(input)?;
     // Must NOT start with another # (that would be ###, not documentation)
     let (input, _) = not(peek(tag("#"))).parse(input)?;
-    let (input, content) = complete_not_line_ending(input)?;
+    let (input, content) = rest_of_line(input)?;
     let (input, end) = position(input)?;
     let content_str = content.fragment().to_string();
     // Strip one leading space after ## if present
@@ -1374,15 +1495,16 @@ fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
         separated_list0(space_comment1, annotation_element_or_literal),
         space_comment0,
         tag("]"),
+        position,
     );
 
     let mut parser = map(
         parse,
-        |(name, _, _, _, annotation_attributes, _, annotation_elements_or_literals, _, end)| {
+        |(name, _, _, _, annotation_attributes, _, annotation_elements_or_literals, _, _, end)| {
             AnnotationElement {
                 span: Range {
                     start: name.span().start,
-                    end: end.location_offset() + end.fragment().len(),
+                    end: original_offset(&end),
                 },
                 name,
                 annotation_attributes,
@@ -1406,16 +1528,14 @@ fn annotation_element_or_literal(input: Span) -> IResult<Span, AnnotationElement
 #[cfg(test)]
 mod test {
     use super::*;
-    use nom_locate::LocatedSpan;
-    use std::fmt;
 
     fn ck<T, F>(f: F, input: &str, expected: T)
     where
-        F: Fn(LocatedSpan<&str>) -> IResult<LocatedSpan<&str>, T>,
+        F: Fn(Span) -> IResult<Span, T>,
         T: PartialEq + fmt::Debug,
     {
         let (remaining, result) =
-            f(LocatedSpan::new(input)).unwrap_or_else(|_| panic!("failed to parse {input:#?}"));
+            f(Span::from(input)).unwrap_or_else(|_| panic!("failed to parse {input:#?}"));
         assert_eq!(result, expected);
         assert_eq!(remaining.fragment(), &"");
     }
@@ -1854,7 +1974,7 @@ mod test {
     #[test]
     fn test_documentations_multiple() {
         let input = "## Line one\n## Line two";
-        let (remaining, result) = documentations(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = documentations(Span::from(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].content, "Line one");
@@ -1864,8 +1984,7 @@ mod test {
     #[test]
     fn test_maybe_annotations_docs_only() {
         let input = "## A doc comment\nelement";
-        let (remaining, result) =
-            maybe_annotations(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = maybe_annotations(Span::from(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"element");
         let annos = result.unwrap();
         assert_eq!(annos.documentation.len(), 1);
@@ -1876,8 +1995,7 @@ mod test {
     #[test]
     fn test_maybe_annotations_bracket_only() {
         let input = "[ xml:lang=\"en\" ] element";
-        let (remaining, result) =
-            maybe_annotations(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = maybe_annotations(Span::from(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"element");
         let annos = result.unwrap();
         assert!(annos.documentation.is_empty());
@@ -1888,8 +2006,7 @@ mod test {
     #[test]
     fn test_maybe_annotations_docs_and_bracket() {
         let input = "## Some docs\n[ xml:lang=\"en\" ] element";
-        let (remaining, result) =
-            maybe_annotations(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = maybe_annotations(Span::from(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"element");
         let annos = result.unwrap();
         assert_eq!(annos.documentation.len(), 1);
@@ -1900,7 +2017,7 @@ mod test {
     #[test]
     fn test_pattern_with_doc_annotation() {
         let input = "## A greeting\nelement greeting { text }";
-        let (remaining, result) = pattern(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = pattern(Span::from(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
         match result {
             Pattern::Annotated(annos, inner) => {
@@ -1915,7 +2032,7 @@ mod test {
     #[test]
     fn test_pattern_with_bracket_annotation() {
         let input = "[ xml:lang=\"en\" ] element foo { text }";
-        let (remaining, result) = pattern(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = pattern(Span::from(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
         match result {
             Pattern::Annotated(annos, inner) => {
@@ -1935,8 +2052,7 @@ mod test {
     #[test]
     fn test_grammar_content_with_doc_annotation() {
         let input = "## The start\nstart = element root { empty }";
-        let (remaining, result) =
-            grammar_content(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = grammar_content(Span::from(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
         match result {
             GrammarContent::Define(d) => {
@@ -1953,7 +2069,7 @@ mod test {
     fn test_single_comment_not_doc() {
         // A single # comment should NOT be parsed as documentation
         let input = "# regular comment\nelement foo { text }";
-        let (remaining, result) = pattern(LocatedSpan::new(input)).expect("failed to parse");
+        let (remaining, result) = pattern(Span::from(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
         // No annotation wrapping since # comment is consumed as whitespace
         assert!(matches!(result, Pattern::Element(_)));
@@ -1962,7 +2078,7 @@ mod test {
     #[test]
     fn test_annotation_attribute_requires_cname() {
         // Unprefixed attribute names should fail
-        let result = annotation_attribute(LocatedSpan::new("lang=\"en\""));
+        let result = annotation_attribute(Span::from("lang=\"en\""));
         assert!(result.is_err());
     }
 
@@ -1970,7 +2086,7 @@ mod test {
     fn deeply_nested_parens_pattern() {
         let depth = 200;
         let input = "(".repeat(depth) + "empty" + &")".repeat(depth);
-        let result = schema(LocatedSpan::new(&input));
+        let result = schema(Span::from(input.as_str()));
         assert!(result.is_err());
     }
 
@@ -1979,7 +2095,7 @@ mod test {
         let depth = 200;
         let parens = "(".repeat(depth) + "foo" + &")".repeat(depth);
         let input = format!("start = element {parens} {{ text }}");
-        let result = schema(LocatedSpan::new(&input));
+        let result = schema(Span::from(input.as_str()));
         assert!(result.is_err());
     }
 
@@ -1989,7 +2105,7 @@ mod test {
         // because binary operators are parsed iteratively, not recursively.
         let names: Vec<String> = (0..50).map(|i| format!("x{i}")).collect();
         let input = format!("start = {}", names.join(" | "));
-        let result = schema(LocatedSpan::new(&input));
+        let result = schema(Span::from(input.as_str()));
         assert!(result.is_ok(), "50-way choice should parse: {result:?}");
     }
 
@@ -1997,7 +2113,7 @@ mod test {
     fn deeply_nested_div_grammar() {
         let depth = 200;
         let input = "div { ".repeat(depth) + "a = empty" + &" }".repeat(depth);
-        let result = schema(LocatedSpan::new(&input));
+        let result = schema(Span::from(input.as_str()));
         assert!(result.is_err());
     }
 
@@ -2006,7 +2122,7 @@ mod test {
         let depth = 200;
         let divs = "div { ".repeat(depth) + "a = empty" + &" }".repeat(depth);
         let input = format!("include \"foo.rnc\" {{ {divs} }}");
-        let result = schema(LocatedSpan::new(&input));
+        let result = schema(Span::from(input.as_str()));
         assert!(result.is_err());
     }
 
@@ -2015,7 +2131,7 @@ mod test {
         let depth = 200;
         let input = "a:x [ ".repeat(depth) + "\"leaf\"" + &" ]".repeat(depth);
         // Try parsing as an annotation element directly
-        let result = annotation_element(LocatedSpan::new(&input));
+        let result = annotation_element(Span::from(input.as_str()));
         assert!(result.is_err());
     }
 
@@ -2024,175 +2140,338 @@ mod test {
         // A moderate depth should still parse fine
         let depth = 20;
         let input = "(".repeat(depth) + "empty" + &")".repeat(depth);
-        let result = schema(LocatedSpan::new(&input));
+        let result = schema(Span::from(input.as_str()));
         assert!(result.is_ok());
+    }
+
+    fn decoded(src: &str) -> String {
+        preprocess(src).unwrap().0.into_owned()
+    }
+
+    fn input_error(src: &str) -> InputError {
+        match parse(src) {
+            Err(CompactError::Input(e)) => e,
+            other => panic!("expected InputError for {src:?}, got {other:?}"),
+        }
+    }
+
+    fn only_define(schema: Schema) -> Define {
+        match schema.pattern_or_grammar {
+            PatternOrGrammar::Grammar(mut g) if g.content.len() == 1 => match g.content.remove(0) {
+                GrammarContent::Define(d) => d,
+                other => panic!("expected Define, got {other:?}"),
+            },
+            other => panic!("expected single-item grammar, got {other:?}"),
+        }
     }
 
     #[test]
     fn escape_basic() {
-        // \x{66}\x{6f}\x{6f} == "foo"
-        assert_eq!(resolve_escapes(r"\x{66}\x{6f}\x{6f}").unwrap(), "foo");
+        assert_eq!(decoded(r"\x{66}\x{6f}\x{6f}"), "foo");
     }
 
     #[test]
     fn escape_multiple_x() {
-        // Multiple x's are allowed: \xx{41} == "A"
-        assert_eq!(resolve_escapes(r"\xx{41}").unwrap(), "A");
-        assert_eq!(resolve_escapes(r"\xxx{41}").unwrap(), "A");
+        assert_eq!(decoded(r"\xx{41}"), "A");
+        assert_eq!(decoded(r"\xxx{41}"), "A");
     }
 
     #[test]
     fn escape_mixed_with_text() {
-        assert_eq!(
-            resolve_escapes(r"hello \x{20} world").unwrap(),
-            "hello   world"
-        );
+        assert_eq!(decoded(r"hello \x{20} world"), "hello   world");
     }
 
     #[test]
-    fn escape_no_escapes() {
-        assert_eq!(resolve_escapes("plain text").unwrap(), "plain text");
+    fn preprocess_borrows_when_unchanged() {
+        let (text, map) = preprocess("plain text\n").unwrap();
+        assert!(matches!(text, Cow::Borrowed(_)));
+        assert!(map.is_empty());
     }
 
     #[test]
     fn escape_backslash_not_followed_by_x() {
         // \keyword should pass through unchanged
-        assert_eq!(resolve_escapes(r"\keyword").unwrap(), r"\keyword");
+        assert_eq!(decoded(r"\keyword"), r"\keyword");
+        assert_eq!(decoded(r"\x41"), r"\x41");
     }
 
     #[test]
-    fn escape_invalid_xml_char() {
-        // U+0000 is not a valid XML char
-        assert!(resolve_escapes(r"\x{0}").is_err());
-    }
-
-    #[test]
-    fn escape_unterminated() {
-        assert!(resolve_escapes(r"\x{41").is_err());
-    }
-
-    #[test]
-    fn escape_empty_hex() {
-        assert!(resolve_escapes(r"\x{}").is_err());
+    fn escape_is_not_rescanned() {
+        // \x{5C} is '\'; the result must not be treated as the start of another escape
+        assert_eq!(decoded(r"\x{5C}x{41}"), r"\x{41}");
     }
 
     #[test]
     fn escape_non_bmp() {
-        // U+10000 LINEAR B SYLLABLE B008 A
-        assert_eq!(resolve_escapes(r"\x{10000}").unwrap(), "\u{10000}");
+        assert_eq!(decoded(r"\x{10000}"), "\u{10000}");
     }
 
     #[test]
-    fn escape_in_element_name() {
-        // element \x{66}\x{6f}\x{6f} { empty } -- from the spec
-        // Escapes in NCName position are resolved by the parser directly
-        let input = LocatedSpan::new(r"element \x{66}\x{6f}\x{6f} { empty }");
-        let result = schema(input);
-        assert!(result.is_ok());
+    fn newline_normalisation() {
+        assert_eq!(decoded("a\r\nb\rc\nd"), "a\nb\nc\nd");
     }
 
     #[test]
-    fn escape_newline_in_string_literal() {
-        // \x{a} (newline) in a string literal should parse successfully
-        let input = LocatedSpan::new(r#"element foo { attribute bar { "\x{a}" } }"#);
-        let result = schema(input);
-        assert!(
-            result.is_ok(),
-            "schema with \\x{{a}} in string should parse: {:?}",
-            result.err()
+    fn escaped_newlines_are_distinguished() {
+        assert_eq!(decoded(r"a\x{A}b"), format!("a{ESCAPED_LF}b"));
+        // escaped CR is just a character, not a newline
+        assert_eq!(decoded(r"a\x{D}b"), "a\rb");
+    }
+
+    #[test]
+    fn escape_errors() {
+        assert_eq!(
+            input_error(r"start = \x{0}"),
+            InputError::InvalidEscapedChar {
+                span: 8..13,
+                code: 0
+            }
+        );
+        assert_eq!(
+            input_error(r"start = \x{D800}"),
+            InputError::InvalidEscapedChar {
+                span: 8..16,
+                code: 0xD800
+            }
+        );
+        assert_eq!(
+            input_error(r"start = \x{FFFF}"),
+            InputError::InvalidEscapedChar {
+                span: 8..16,
+                code: 0xFFFF
+            }
+        );
+        assert_eq!(
+            input_error(r"\x{110000}"),
+            InputError::MalformedEscape {
+                span: 0..10,
+                problem: EscapeProblem::OutOfRange
+            }
+        );
+        assert_eq!(
+            input_error(r"\x{FFFFFFFFFF}"),
+            InputError::MalformedEscape {
+                span: 0..14,
+                problem: EscapeProblem::OutOfRange
+            }
+        );
+        assert_eq!(
+            input_error(r"\x{41"),
+            InputError::MalformedEscape {
+                span: 0..5,
+                problem: EscapeProblem::Unterminated
+            }
+        );
+        assert_eq!(
+            input_error(r"\x{}"),
+            InputError::MalformedEscape {
+                span: 0..4,
+                problem: EscapeProblem::Empty
+            }
+        );
+        assert_eq!(
+            input_error(r"\x{4G}"),
+            InputError::MalformedEscape {
+                span: 0..5,
+                problem: EscapeProblem::NonHexDigit('G')
+            }
         );
     }
 
     #[test]
-    fn escape_newline_in_triple_quoted_string() {
-        let input = LocatedSpan::new(r#"element foo { attribute bar { """\x{a}""" } }"#);
-        let result = schema(input);
-        assert!(result.is_ok());
+    fn invalid_raw_chars() {
+        for (src, start, ch) in [
+            ("start = \"a\u{1}\"", 10, '\u{1}'),
+            ("# \u{B}\nstart = empty", 2, '\u{B}'),
+            ("start = \"\u{FFFE}\"", 9, '\u{FFFE}'),
+            ("start = \"\u{FFFF}\"", 9, '\u{FFFF}'),
+        ] {
+            assert_eq!(
+                input_error(src),
+                InputError::InvalidChar {
+                    span: start..start + ch.len_utf8(),
+                    ch
+                }
+            );
+        }
+        // tab, LF, CR, and characters merely discouraged by XML are fine
+        assert!(parse("start =\t\"\u{7F}\u{85}\u{FDD0}\u{1FFFF}\"\r\n").is_ok());
     }
 
     #[test]
-    fn escape_tab_in_string_literal() {
-        let input = LocatedSpan::new(r#"element foo { attribute bar { "\x{9}" } }"#);
-        let result = schema(input);
-        assert!(result.is_ok());
+    fn input_error_messages() {
+        assert_eq!(
+            input_error("start = \"\u{1}\"").to_string(),
+            "character U+0001 is not allowed in a schema (not a legal XML character)"
+        );
+        assert_eq!(
+            input_error(r"start = \x{1}").to_string(),
+            "escape sequence denotes U+0001, which is not a legal XML character"
+        );
+        assert_eq!(
+            input_error(r"start = \x{4G}").to_string(),
+            "invalid character 'G' in escape sequence; expected a hex digit or '}'"
+        );
     }
 
     #[test]
-    fn literal_segment_resolves_escape() {
-        let input = LocatedSpan::new(r#""\x{41}""#);
-        let (_, seg) = literal_segment(input).unwrap();
-        assert_eq!(seg.body, "A");
+    fn escape_in_keyword() {
+        // issue #32: escape processing happens before tokenisation, so this is the keyword
+        // 'element'
+        match parse(r"\x{65}lement foo { empty }")
+            .unwrap()
+            .pattern_or_grammar
+        {
+            PatternOrGrammar::Pattern(Pattern::Element(e)) => assert_eq!(e.span, 0..26),
+            other => panic!("expected element pattern, got {other:?}"),
+        }
     }
 
     #[test]
-    fn literal_segment_resolves_newline_escape() {
-        // \x{a} should produce a newline in the literal body
-        let input = LocatedSpan::new(r#""hello\x{a}world""#);
-        let (_, seg) = literal_segment(input).unwrap();
-        assert_eq!(seg.body, "hello\nworld");
+    fn escaped_keyword_is_still_a_keyword() {
+        // issue #32: a keyword may not be used where an identifier is expected, even if escaped
+        assert!(parse(r"start = \x{65}lement").is_err());
+        assert!(parse(r"\x{65}lement = empty").is_err());
     }
 
     #[test]
-    fn literal_segment_mixed_text_and_escapes() {
-        let input = LocatedSpan::new(r#""a\x{62}c""#);
-        let (_, seg) = literal_segment(input).unwrap();
-        assert_eq!(seg.body, "abc");
+    fn escaped_backslash_quotes_identifier() {
+        // \x{5C} is '\', so this is the quoted identifier \element
+        let define = only_define(parse(r"\x{5C}element = empty").unwrap());
+        assert_eq!(define.identifier.0, 0..13);
     }
 
     #[test]
-    fn escape_char_in_ncname() {
-        // \x{41} should resolve to 'A' and be usable in an NCName
-        let input = LocatedSpan::new(r"\x{41}bc");
-        let (rest, name) = nc_name(input).unwrap();
-        assert_eq!(name.1, "Abc");
+    fn escaped_newline_separates_tokens() {
+        assert!(parse(r"element\x{A}foo { empty }").is_ok());
+    }
+
+    #[test]
+    fn escaped_cr_is_not_a_separator() {
+        assert!(parse(r"element\x{D}foo { empty }").is_err());
+    }
+
+    #[test]
+    fn escaped_newline_ends_comment() {
+        assert!(parse(r"# comment\x{A}start = element foo { empty }").is_ok());
+    }
+
+    #[test]
+    fn escaped_newline_ends_documentation_line() {
+        // calls grammar_content() directly, because schema() currently discards leading
+        // documentation comments as ordinary comments
+        let (text, map) = preprocess(r"## doc\x{A}start = element foo { empty }").unwrap();
+        let (rest, content) = grammar_content(Span::new_extra(&text, SourceMap(&map))).unwrap();
         assert_eq!(*rest.fragment(), "");
+        let GrammarContent::Define(define) = content else {
+            panic!("expected Define, got {content:?}");
+        };
+        let docs = define.annotations.unwrap().documentation;
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].content, "doc");
     }
 
     #[test]
-    fn escape_char_mid_ncname() {
-        let input = LocatedSpan::new(r"a\x{62}c");
-        let (_, name) = nc_name(input).unwrap();
-        assert_eq!(name.1, "abc");
+    fn comment_at_end_of_input() {
+        assert!(parse("start = empty # no trailing newline").is_ok());
     }
 
     #[test]
-    fn escape_cannot_smuggle_illegal_char_into_ncname() {
-        // \x{21} is '!', which is not an NCName character
-        let input = LocatedSpan::new(r"element a\x{21}b { empty }");
-        assert!(schema(input).is_err());
+    fn escaped_quote_ends_literal() {
+        // \x{22} is '"', which terminates the literal like any other '"' -- so this becomes
+        // the unterminated triple-quoted literal """ }
+        assert!(parse(r#"element foo { "\x{22}" }"#).is_err());
+        // ...whereas this is the one-character literal "'"
+        assert!(parse(r#"element foo { "\x{27}" }"#).is_ok());
+    }
+
+    fn literal_body(src: &str) -> String {
+        match parse(&format!("start = {src}")).map(only_define) {
+            Ok(Define {
+                pattern: Pattern::DatatypeValue(DatatypeValuePattern(_, _, lit, _, _)),
+                ..
+            }) => lit.as_string_value(),
+            other => panic!("expected literal pattern for {src:?}, got {other:?}"),
+        }
     }
 
     #[test]
-    fn escape_cannot_smuggle_illegal_start_char_into_ncname() {
-        // \x{31} is '1', which may continue but not start an NCName
-        assert!(nc_name(LocatedSpan::new(r"\x{31}a")).is_err());
-        let (_, name) = nc_name(LocatedSpan::new(r"a\x{31}")).unwrap();
-        assert_eq!(name.1, "a1");
+    fn escape_newline_in_string_literal() {
+        assert_eq!(literal_body(r#""hello\x{a}world""#), "hello\nworld");
+        assert_eq!(literal_body(r#"'hello\x{a}world'"#), "hello\nworld");
+    }
+
+    #[test]
+    fn real_newline_in_string_literal_rejected() {
+        assert!(parse("start = \"hello\nworld\"").is_err());
+        assert!(parse("start = \"hello\rworld\"").is_err());
+        assert!(parse("start = \"hello\r\nworld\"").is_err());
+    }
+
+    #[test]
+    fn newlines_in_triple_quoted_string() {
+        assert_eq!(literal_body(r#""""a\x{a}b""""#), "a\nb");
+        assert_eq!(literal_body("'''a\r\nb\rc'''"), "a\nb\nc");
+    }
+
+    #[test]
+    fn escaped_cr_in_string_literal() {
+        // unlike a raw CR, an escaped CR is not a newline
+        assert_eq!(literal_body(r#""\x{d}""#), "\r");
+    }
+
+    #[test]
+    fn spans_refer_to_original_source() {
+        let define = only_define(parse("\\x{66}oo = a |\r\n \\x{62}").unwrap());
+        assert_eq!(define.identifier.0, 0..8);
+        assert_eq!(define.span, 0..23);
+        match define.pattern {
+            Pattern::ChoicePair(a, b) => {
+                assert_eq!(*a, Pattern::Identifier(Identifier(11..12, "a".to_string())));
+                assert_eq!(*b, Pattern::Identifier(Identifier(17..23, "b".to_string())));
+            }
+            other => panic!("expected choice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn syntax_error_span_refers_to_original_source() {
+        // the error is reported at the '!' following the escapes
+        match parse(r"start = \x{61}\x{62} !") {
+            Err(CompactError::Syntax { span, .. }) => assert_eq!(span, 21..22),
+            other => panic!("expected syntax error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nc_name_does_not_interpret_escapes() {
+        // nc_name() also validates xsd:NCName values, where escapes have no special meaning
+        let (rest, name) = nc_name(Span::from(r"a\x{62}")).unwrap();
+        assert_eq!(name.1, "a");
+        assert_eq!(*rest.fragment(), r"\x{62}");
     }
 
     #[test]
     fn invalid_escape_in_string_literal_reports_the_escape() {
-        let input = LocatedSpan::new(r#"element foo { attribute bar { "a\x{20}b\x{0}c" } }"#);
-        match schema(input) {
-            Err(nom::Err::Failure(Error::Escape(span, message))) => {
-                assert_eq!(*span.fragment(), r"\x{0}");
-                assert_eq!(span.location_offset(), 39);
-                assert_eq!(message, r"\x{0} is not a valid XML character");
-            }
-            other => panic!("expected an escape error, got {other:?}"),
-        }
+        let src = r#"element foo { attribute bar { "a\x{20}b\x{0}c" } }"#;
+        let err = input_error(src);
+        assert_eq!(&src[err.span()], r"\x{0}");
+        assert_eq!(err.span().start, 39);
+        assert_eq!(
+            err.to_string(),
+            "escape sequence denotes U+0000, which is not a legal XML character"
+        );
     }
 
     #[test]
     fn invalid_escape_in_name_reports_the_escape() {
-        let input = LocatedSpan::new(r"element f\x{zz} { empty }");
-        match schema(input) {
-            Err(nom::Err::Failure(Error::Escape(span, message))) => {
-                assert_eq!(*span.fragment(), r"\x{z");
-                assert_eq!(span.location_offset(), 9);
-                assert_eq!(message, "invalid character 'z' in escape sequence");
-            }
-            other => panic!("expected an escape error, got {other:?}"),
-        }
+        let src = r"element f\x{zz} { empty }";
+        let err = input_error(src);
+        assert_eq!(&src[err.span()], r"\x{z");
+        assert_eq!(err.span().start, 9);
+        assert_eq!(
+            err.to_string(),
+            "invalid character 'z' in escape sequence; expected a hex digit or '}'"
+        );
     }
 }

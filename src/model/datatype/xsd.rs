@@ -442,7 +442,7 @@ fn is_valid_name(text: &str) -> bool {
 }
 
 fn is_valid_ncname(text: &str) -> bool {
-    match crate::syntax::compact::nc_name(crate::syntax::compact::Span::new(text)) {
+    match crate::syntax::compact::nc_name(crate::syntax::compact::Span::from(text)) {
         Ok((rest, _name)) => rest.fragment().is_empty(),
         Err(_) => false,
     }

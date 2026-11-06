@@ -5,7 +5,6 @@ pub mod xml;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom_locate::LocatedSpan;
 
     #[test]
     fn it_works() {
@@ -73,6 +72,6 @@ mod tests {
         anyAttribute = attribute * { text }
         ";
 
-        assert!(compact::schema(LocatedSpan::new(schema_data)).is_ok());
+        assert!(compact::parse(schema_data).is_ok());
     }
 }

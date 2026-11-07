@@ -244,70 +244,71 @@ impl Schema {
         }
     }
 
+    /// Builds `left | right`, normalised so that no leaf appears twice and no two `After` leaves
+    /// have the same first operand: `After(p, x) | After(p, y)` becomes `After(p, x | y)`.
+    ///
+    /// Duplicate leaves arise when the same sub-pattern is reached by several derivative paths
+    /// (e.g. interleaved alternatives sharing a common attribute), and would otherwise accumulate.
+    /// Without merging `After`s, a recursive element that can match at two places in its parent,
+    /// followed by different things, doubles the number of leaves at each level of nesting, and
+    /// validation time grows exponentially with depth.  With it, the top level of a state has at
+    /// most one leaf per distinct element content, and each continuation is bounded in the same
+    /// way, so the cost of each event depends only on the schema.
     pub(crate) fn choice(&self, left: PatId, right: PatId) -> Result<PatId, Overflow> {
         match (self.patt(left), self.patt(right)) {
-            (Pat::NotAllowed, _) => Ok(right),
-            (_, Pat::NotAllowed) => Ok(left),
+            (Pat::NotAllowed, _) => return Ok(right),
+            (_, Pat::NotAllowed) => return Ok(left),
+            _ if left == right => return Ok(left),
+            (Pat::Choice(..), _) | (_, Pat::Choice(..)) => {}
+            (Pat::After(p, _), Pat::After(q, _)) if p == q => {}
+            // Two distinct leaves, so there is nothing to normalise.
             (l, r) => {
-                if left == right {
-                    return Ok(left);
-                }
-                if !matches!(l, Pat::Choice(..)) && !matches!(r, Pat::Choice(..)) {
-                    // Both are single non-Choice leaves and are already distinct —
-                    // no deduplication is possible, take the fast path.
-                    return self.push(Pat::Choice(left, right, l.is_nullable() || r.is_nullable()));
-                }
-                // At least one side is a Choice tree: eliminate duplicate leaves to
-                // prevent polynomial growth when the same sub-pattern appears via
-                // multiple derivative paths (e.g. interleaved alternatives sharing a
-                // common attribute).
-                let inner = self.inner.borrow();
-                let mut left_set = HashSet::new();
-                Self::collect_leaves_into_set(left, &inner, &mut left_set);
-                let mut new_right = Vec::new();
-                Self::collect_new_leaves(right, &inner, &left_set, &mut new_right);
-                drop(inner);
-                if new_right.is_empty() {
-                    return Ok(left);
-                }
-                new_right.into_iter().try_fold(left, |acc, r| {
-                    let nullable = self.patt(acc).is_nullable() || self.patt(r).is_nullable();
-                    self.push(Pat::Choice(acc, r, nullable))
-                })
+                return self.push(Pat::Choice(left, right, l.is_nullable() || r.is_nullable()));
             }
         }
-    }
-
-    // Traverses a Choice tree and inserts every leaf PatId into `set`.
-    fn collect_leaves_into_set(id: PatId, inner: &Inner, set: &mut HashSet<PatId>) {
-        match &inner.patterns[id.0 as usize] {
-            Pat::Choice(l, r, _) => {
-                Self::collect_leaves_into_set(*l, inner, set);
-                Self::collect_leaves_into_set(*r, inner, set);
-            }
-            _ => {
-                set.insert(id);
-            }
+        let mut leaves = Vec::new();
+        {
+            let inner = self.inner.borrow();
+            Self::collect_leaves(left, &inner, &mut leaves);
+            Self::collect_leaves(right, &inner, &mut leaves);
         }
+        let mut seen = HashSet::new();
+        // The index in `merged` of the `After` leaf with each first operand.
+        let mut by_head: HashMap<PatId, usize> = HashMap::new();
+        let mut merged: Vec<PatId> = Vec::with_capacity(leaves.len());
+        for leaf in leaves {
+            if !seen.insert(leaf) {
+                continue;
+            }
+            if let Pat::After(p, k) = self.patt(leaf) {
+                if let Some(&i) = by_head.get(&p) {
+                    let Pat::After(_, k0) = self.patt(merged[i]) else {
+                        unreachable!("by_head only indexes After leaves")
+                    };
+                    let k = self.choice(k0, k)?;
+                    merged[i] = self.after(p, k)?;
+                    continue;
+                }
+                by_head.insert(p, merged.len());
+            }
+            merged.push(leaf);
+        }
+        let mut merged = merged.into_iter();
+        let first = merged.next().expect("a choice has at least one leaf");
+        merged.try_fold(first, |acc, r| {
+            let nullable = self.patt(acc).is_nullable() || self.patt(r).is_nullable();
+            self.push(Pat::Choice(acc, r, nullable))
+        })
     }
 
-    // Traverses a Choice tree and appends to `out` any leaf PatId not present in `left_set`.
-    fn collect_new_leaves(
-        id: PatId,
-        inner: &Inner,
-        left_set: &HashSet<PatId>,
-        out: &mut Vec<PatId>,
-    ) {
+    // Traverses a Choice tree and appends every leaf PatId to `out`, left to right.
+    fn collect_leaves(id: PatId, inner: &Inner, out: &mut Vec<PatId>) {
         match &inner.patterns[id.0 as usize] {
             Pat::Choice(l, r, _) => {
-                Self::collect_new_leaves(*l, inner, left_set, out);
-                Self::collect_new_leaves(*r, inner, left_set, out);
+                Self::collect_leaves(*l, inner, out);
+                Self::collect_leaves(*r, inner, out);
             }
-            _ => {
-                if !left_set.contains(&id) {
-                    out.push(id);
-                }
-            }
+            _ => out.push(id),
         }
     }
 

@@ -2,6 +2,7 @@ use crate::model::compiler::Context;
 use crate::model::datatype::relax::normalize_whitespace;
 use crate::syntax::types;
 use crate::syntax::types::DatatypeName;
+use crate::xml_whitespace::{is_xml_whitespace, split_xml_whitespace, trim_xml_whitespace};
 use lazy_static::lazy_static;
 use std::fmt;
 use std::str::FromStr;
@@ -120,7 +121,7 @@ lazy_static! {
     static ref GDAY_RE: regex::Regex = regex::Regex::new(r"^---[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref GMONTH_RE: regex::Regex = regex::Regex::new(r"^--[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref HEX_RE: regex::Regex = regex::Regex::new(r"^([0-9a-fA-F]{2})*$").unwrap();
-    static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^[A-Za-z0-9+/\s]*={0,2}$").unwrap();
+    static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^[A-Za-z0-9+/]*={0,2}$").unwrap();
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -303,7 +304,7 @@ impl super::Datatype for XsdDatatypes {
                     && pat.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::NmTokens(len, patt) => {
-                let tokens: Vec<&str> = value.split_whitespace().collect();
+                let tokens: Vec<&str> = split_xml_whitespace(value).collect();
                 !tokens.is_empty()
                     && tokens.iter().all(|t| is_valid_nmtoken(t))
                     && len.is_valid_count(tokens.len())
@@ -316,7 +317,7 @@ impl super::Datatype for XsdDatatypes {
                 is_valid_ncname(value) && str_facets.is_valid(value)
             }
             XsdDatatypes::QName(str_facets) => {
-                let value = value.trim();
+                let value = trim_xml_whitespace(value);
                 parse_qname(value).is_some() && str_facets.is_valid(value)
             }
             XsdDatatypes::Name(str_facets) => is_valid_name(value) && str_facets.is_valid(value),
@@ -367,7 +368,7 @@ impl super::Datatype for XsdDatatypes {
             }
             XsdDatatypes::Base64Binary(len, patt) => {
                 let stripped: std::string::String =
-                    value.chars().filter(|c| !c.is_whitespace()).collect();
+                    value.chars().filter(|&c| !is_xml_whitespace(c)).collect();
                 if !BASE64_RE.is_match(&stripped) {
                     return false;
                 }
@@ -421,7 +422,7 @@ impl super::Datatype for XsdDatatypes {
             XsdDatatypes::Id(str_facets) => is_valid_ncname(value) && str_facets.is_valid(value),
             XsdDatatypes::IdRef(str_facets) => is_valid_ncname(value) && str_facets.is_valid(value),
             XsdDatatypes::IdRefs(len, patt) => {
-                let tokens: Vec<&str> = value.split_whitespace().collect();
+                let tokens: Vec<&str> = split_xml_whitespace(value).collect();
                 !tokens.is_empty()
                     && tokens.iter().all(|t| is_valid_ncname(t))
                     && len.is_valid_count(tokens.len())
@@ -431,7 +432,7 @@ impl super::Datatype for XsdDatatypes {
                 is_valid_ncname(value) && str_facets.is_valid(value)
             }
             XsdDatatypes::Entities(len, patt) => {
-                let tokens: Vec<&str> = value.split_whitespace().collect();
+                let tokens: Vec<&str> = split_xml_whitespace(value).collect();
                 !tokens.is_empty()
                     && tokens.iter().all(|t| is_valid_ncname(t))
                     && len.is_valid_count(tokens.len())
@@ -480,7 +481,7 @@ fn is_valid_ncname(text: &str) -> bool {
 /// Split a QName into its optional prefix and local part, after collapsing surrounding
 /// whitespace.  Returns `None` if the text is not lexically a QName.
 fn parse_qname(text: &str) -> Option<(Option<&str>, &str)> {
-    let text = text.trim();
+    let text = trim_xml_whitespace(text);
     match text.split_once(':') {
         Some((prefix, local)) if is_valid_ncname(prefix) && is_valid_ncname(local) => {
             Some((Some(prefix), local))
@@ -2784,6 +2785,21 @@ mod test {
         assert!(dt.is_valid("_underscore"));
         assert!(!dt.is_valid("123"));
         assert!(!dt.is_valid(""));
+    }
+
+    #[test]
+    fn only_xml_whitespace_is_collapsed() {
+        let dt = compile_no_params("NMTOKENS");
+        assert!(dt.is_valid(" a\tb\r\nc "));
+        assert!(!dt.is_valid("a\u{A0}b"));
+        let dt = compile_no_params("IDREFS");
+        assert!(!dt.is_valid("a\u{2003}b"));
+        let dt = compile_no_params("QName");
+        assert!(dt.is_valid("\t\neg:foo\r "));
+        assert!(!dt.is_valid("\u{A0}eg:foo"));
+        let dt = compile_no_params("base64Binary");
+        assert!(dt.is_valid("AQID\nBAUG"));
+        assert!(!dt.is_valid("AQID\u{A0}BAUG"));
     }
 
     #[test]

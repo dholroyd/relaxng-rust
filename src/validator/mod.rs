@@ -2158,6 +2158,23 @@ mod tests {
     }
 
     #[test]
+    fn list_splits_only_on_xml_whitespace() {
+        let f = Fixture::correct("start = element e1 { list { 'x'+ } }");
+        f.valid("<e1>\tx\r\nx x </e1>");
+        // U+00A0 and U+2003 are Unicode whitespace but not XML whitespace, so they don't
+        // separate list items
+        f.invalid("<e1>x&#xA0;x</e1>");
+        f.invalid("<e1>x\u{2003}x</e1>");
+    }
+
+    #[test]
+    fn non_xml_whitespace_text_is_significant() {
+        let f = Fixture::correct("start = element a { element b { empty } }");
+        f.valid("<a> \t<b/>\n</a>");
+        f.invalid("<a>&#xA0;<b/></a>");
+    }
+
+    #[test]
     fn element_whitespace_one_or_more() {
         // the whitespace prior to the initial <b/> should not make the doc invalid
         Fixture::correct("start = element a { element b { empty }+ }")

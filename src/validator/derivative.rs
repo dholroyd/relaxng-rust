@@ -5,14 +5,7 @@ use std::collections::HashMap;
 use crate::validator::infoset::NamespaceScope;
 use crate::validator::nameclass::NameKey;
 use crate::validator::schema::{Overflow, Pat, PatId, Schema};
-
-fn is_whitespace_char(c: char) -> bool {
-    ['\x20', '\x09', '\x0d', '\x0a'].contains(&c)
-}
-
-pub(crate) fn is_whitespace_str(s: &str) -> bool {
-    s.chars().all(is_whitespace_char)
-}
+use crate::xml_whitespace::{is_all_xml_whitespace, split_xml_whitespace};
 
 /// Checks `text` against `dt`, resolving any QName prefix against the declarations in `ns`.
 fn datatype_is_valid(dt: &Datatypes, text: &str, ns: &NamespaceScope<'_>) -> bool {
@@ -42,7 +35,7 @@ impl Schema {
     ) -> Result<PatId, Overflow> {
         let mut cx = TextDerivCx {
             text,
-            whitespace: is_whitespace_str(text),
+            whitespace: is_all_xml_whitespace(text.as_bytes()),
             ns,
             memo: FnvHashMap::default(),
             depends: false,
@@ -223,7 +216,7 @@ impl Schema {
             }
             Pat::List(p) => {
                 let mut p = p;
-                for item in text.split_whitespace() {
+                for item in split_xml_whitespace(text) {
                     p = self.text_deriv(p, item, ns)?;
                     if let Pat::NotAllowed = self.patt(p) {
                         return Ok(p);
@@ -525,7 +518,7 @@ impl Schema {
         ns: &NamespaceScope<'_>,
     ) -> Result<bool, Overflow> {
         let pat = self.patt(pid);
-        if pat.is_nullable() && is_whitespace_str(val) {
+        if pat.is_nullable() && is_all_xml_whitespace(val.as_bytes()) {
             Ok(true)
         } else {
             let d = self.text_deriv(pid, val, ns)?;

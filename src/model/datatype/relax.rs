@@ -4,14 +4,15 @@
 use crate::model::compiler::Context;
 use crate::syntax::types::NamespacedName;
 use crate::syntax::types::{DatatypeName, NcName, Param, QName};
+use crate::xml_whitespace::is_xml_whitespace;
 
 // TODO: return Cow
 pub(crate) fn normalize_whitespace(val: &str) -> String {
     // TODO: return Cow to optimise the case when input does not required modification?
     let mut last_space = false;
     let mut out = String::new();
-    for c in val.chars().skip_while(|c| c.is_ascii_whitespace()) {
-        if c.is_ascii_whitespace() {
+    for c in val.chars().skip_while(|c| is_xml_whitespace(*c)) {
+        if is_xml_whitespace(c) {
             last_space = true;
         } else {
             if last_space {
@@ -150,5 +151,9 @@ mod test {
         assert_eq!(normalize_whitespace(" a"), "a");
         assert_eq!(normalize_whitespace("a a"), "a a");
         assert_eq!(normalize_whitespace("\na\t a\r"), "a a");
+        assert_eq!(
+            normalize_whitespace("\u{A0}a\u{2003} b"),
+            "\u{A0}a\u{2003} b"
+        );
     }
 }

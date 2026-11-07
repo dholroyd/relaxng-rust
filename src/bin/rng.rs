@@ -246,7 +246,14 @@ fn lint(syntax: Syntax, schema: PathBuf) {
         }
 
         // Check for grammar ambiguity
-        let ambiguity_warnings = relaxng::model::ambiguity::check_ambiguity(rule.pattern());
+        let ambiguity_warnings = match relaxng::model::ambiguity::check_ambiguity(rule.pattern()) {
+            Ok(warnings) => warnings,
+            Err(e) => {
+                eprintln!("warning: ambiguity check skipped: {e}");
+                warning_count += 1;
+                Vec::new()
+            }
+        };
         for w in &ambiguity_warnings {
             match &w.kind {
                 relaxng::model::ambiguity::AmbiguityKind::AmbiguousGrammar { ambiguous_pairs } => {

@@ -11,6 +11,7 @@ mod name;
 
 pub(crate) use name::{Name, NameTable};
 
+use crate::xml_whitespace::is_all_xml_whitespace;
 use std::ops::Range;
 use xml_syntax_reader::{ErrorKind, ParseError, QName, Span, Visitor};
 
@@ -791,12 +792,6 @@ fn outside_root<E>(kind: &'static str, span: Span) -> Failure<E> {
     })
 }
 
-// TODO: deduplicate vs is_whitespace_str() elsewhere in the codebase
-pub(crate) fn is_whitespace(text: &[u8]) -> bool {
-    text.iter()
-        .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
-}
-
 /// The text of the predefined entity `name`, referenced at `span`. Entities declared in a DTD
 /// are not supported.
 fn entity_text<E>(name: &[u8], span: Span) -> Result<&'static str, Failure<E>> {
@@ -941,7 +936,7 @@ impl<H: Handler> Visitor for Driver<'_, '_, H> {
     fn characters(&mut self, text: &[u8], span: Span) -> Result<(), Self::Error> {
         if self.outside_root() {
             // Whitespace here is not part of the document's content, so is not passed on
-            return if is_whitespace(text) {
+            return if is_all_xml_whitespace(text) {
                 Ok(())
             } else {
                 Err(outside_root("text", span))

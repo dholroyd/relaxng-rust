@@ -7,6 +7,7 @@ use crate::exemplifier::datatypes::{
     gen_ncname, gen_short_ascii, generate_datatype, generate_datatype_value,
 };
 use crate::exemplifier::names::{NameContext, Vocabulary, pick_name};
+use crate::xml_whitespace::is_all_xml_whitespace;
 
 /// An XML attribute (namespace, local-name, value).
 #[derive(Debug, Clone)]
@@ -537,7 +538,7 @@ fn serialize_element_pretty(
             match child {
                 XmlContent::Text(t) => {
                     let escaped = escape_text(t);
-                    if !escaped.trim().is_empty() {
+                    if !is_all_xml_whitespace(escaped.as_bytes()) {
                         buf.push_str(&child_indent);
                         buf.push_str(&escaped);
                         buf.push('\n');

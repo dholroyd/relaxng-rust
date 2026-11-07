@@ -14,3 +14,4 @@ pub mod model;
 pub mod syntax;
 #[cfg(feature = "validator")]
 pub mod validator;
+mod xml_whitespace;

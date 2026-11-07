@@ -1,4 +1,5 @@
 use crate::syntax::types::*;
+use crate::xml_whitespace::trim_xml_whitespace;
 use roxmltree::{Attribute, Node};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -534,7 +535,10 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
         .ok_or(Error::Expected(node.range(), "type attribute"))?;
     // 'string' and 'token' name the built-in datatypes only under the empty
     // datatypeLibrary; under any other library they are that library's types.
-    let type_name = match (&datatype_ns.as_string_value()[..], type_attr.value().trim()) {
+    let type_name = match (
+        &datatype_ns.as_string_value()[..],
+        trim_xml_whitespace(type_attr.value()),
+    ) {
         ("", "string") => DatatypeName::String,
         ("", "token") => DatatypeName::Token,
         (_, val) => {
@@ -693,7 +697,7 @@ fn grammar_content(node: Node) -> Result<GrammarContent> {
 
 fn start(node: Node) -> Result<Define> {
     let combine = if let Some(combine) = node.attribute_node("combine") {
-        match combine.value().trim() {
+        match trim_xml_whitespace(combine.value()) {
             "choice" => AssignMethod::Choice,
             "interleave" => AssignMethod::Interleave,
             _ => {
@@ -736,7 +740,7 @@ fn start(node: Node) -> Result<Define> {
 
 fn define(node: Node) -> Result<Define> {
     let combine = if let Some(combine) = node.attribute_node("combine") {
-        match combine.value().trim() {
+        match trim_xml_whitespace(combine.value()) {
             "choice" => AssignMethod::Choice,
             "interleave" => AssignMethod::Interleave,
             _ => {
@@ -783,7 +787,7 @@ fn attr_ncname(attr: &Attribute) -> Result<Identifier> {
     if attr.value().contains(':') {
         Err(Error::Unexpected(attr.range_value(), "Colon in NCName"))
     } else {
-        ident(attr.range_value(), attr.value().trim())
+        ident(attr.range_value(), trim_xml_whitespace(attr.value()))
     }
 }
 
@@ -888,7 +892,7 @@ fn qname_att(node: Node, name: &Attribute, inherit_ns: bool) -> Result<Name> {
         let end = name.range_value().end;
         let prefix = &val[0..pos];
         let prefix_span = start..(start + pos);
-        let namespace = lookup_namespace_def(node, Some(prefix.trim()))
+        let namespace = lookup_namespace_def(node, Some(trim_xml_whitespace(prefix)))
             .ok_or_else(|| Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix"))?;
         let localname = ncname(start + pos + 1..end, &val[pos + 1..])?;
         let ns = Literal::new(prefix_span, namespace.to_string());
@@ -923,9 +927,10 @@ fn qname_el(name: Node) -> Result<Name> {
             let end = text_range.end;
             let prefix = &val[0..pos];
             let prefix_span = start..(start + pos);
-            let namespace = lookup_namespace_def(name, Some(prefix.trim())).ok_or_else(|| {
-                Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix")
-            })?;
+            let namespace = lookup_namespace_def(name, Some(trim_xml_whitespace(prefix)))
+                .ok_or_else(|| {
+                    Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix")
+                })?;
             let localname = ncname(start + pos + 1..end, &val[pos + 1..])?;
             let ns = Literal::new(prefix_span, namespace.to_string());
             Ok(Name::NamespacedName(NamespacedName {
@@ -946,7 +951,7 @@ fn qname_el(name: Node) -> Result<Name> {
 }
 
 fn ncname(range: Range<usize>, val: &str) -> Result<NcName> {
-    let val = val.trim();
+    let val = trim_xml_whitespace(val);
     if val.is_empty() {
         return Err(Error::Expected(range, "Expected identifier"));
     }
@@ -982,7 +987,7 @@ fn lookup_namespace_def<'a, 'input: 'a>(
 }
 
 fn ident(range: Range<usize>, val: &str) -> Result<Identifier> {
-    let val = val.trim();
+    let val = trim_xml_whitespace(val);
     if val.is_empty() {
         return Err(Error::Expected(range, "Expected identifier"));
     }

@@ -95,6 +95,9 @@ pub enum ValidatorError {
         kind: &'static str,
     },
     TextBufferOverflow,
+    /// Validating the document needed more patterns, derived from the schema's own, than the
+    /// pattern table can hold.  The document's validity is unknown.
+    TooManyDerivedPatterns,
     Schema(SchemaError),
 }
 
@@ -225,6 +228,13 @@ impl std::fmt::Display for ValidatorError {
             ValidatorError::TextBufferOverflow => {
                 write!(f, "Text content exceeds maximum buffer size")
             }
+            ValidatorError::TooManyDerivedPatterns => {
+                write!(
+                    f,
+                    "too many patterns derived while validating (limit: {})",
+                    schema::MAX_PATTERNS
+                )
+            }
             ValidatorError::Schema(SchemaError::TooManyPatterns) => {
                 write!(f, "Schema exceeds maximum number of patterns (65535)")
             }
@@ -270,6 +280,12 @@ impl From<infoset::Error> for ValidatorError {
                 ValidatorError::InvalidUtf8 { span, kind }
             }
         }
+    }
+}
+
+impl From<Overflow> for ValidatorError {
+    fn from(_: Overflow) -> Self {
+        ValidatorError::TooManyDerivedPatterns
     }
 }
 
@@ -530,6 +546,11 @@ impl<S: Sink> Engine<S> {
 
     /// Resets the per-document state that must match a fresh parse.
     fn reset(&mut self) {
+        // A full table would fail every later document that needs a new pattern, so start
+        // afresh.  Nothing holds a derived `PatId` between documents.
+        if self.schema.is_full() {
+            self.schema.discard_derived_patterns();
+        }
         self.current_step = self.start;
         self.last_was_start_element = false;
         self.text_buffer.clear();
@@ -569,7 +590,7 @@ impl<S: Sink> Engine<S> {
         }
         let next_id = self
             .schema
-            .text_deriv(self.current_step, &self.text_buffer, ns);
+            .text_deriv(self.current_step, &self.text_buffer, ns)?;
         let buf_span = self.text_buffer_span.take();
         self.text_buffer.clear();
         if matches!(self.schema.patt(next_id), Pat::NotAllowed) {
@@ -612,15 +633,17 @@ impl<S: Sink> Engine<S> {
     /// Every name is checked to be a valid NCName here, since the reader does not check them:
     /// looking it up in the schema's names proves a name valid, as every name in the schema is,
     /// and any other name is checked explicitly.
+    ///
+    /// The outer `Result` fails only if the pattern table overflows, which is fatal.
     fn close_element_start(
         &mut self,
         ns: &NamespaceScope<'_>,
         element: &StartElement<'_>,
-    ) -> Result<PatId, CloseStartError> {
+    ) -> Result<Result<PatId, CloseStartError>, Overflow> {
         let elem_name_span = element.name_span;
         let pat_id = self.current_step;
         let next_pat = match self.schema.schema_names.key(&element.name) {
-            Some(key) => self.schema.start_tag_open_deriv(pat_id, key),
+            Some(key) => self.schema.start_tag_open_deriv(pat_id, key)?,
             None => PAT_NOT_ALLOWED,
         };
         if matches!(self.schema.patt(next_pat), Pat::NotAllowed) {
@@ -638,7 +661,7 @@ impl<S: Sink> Engine<S> {
             };
             // The element name itself is not allowed here, so there is no content model to
             // descend into and nothing to recover to.
-            return Err(CloseStartError::unrecoverable(err));
+            return Ok(Err(CloseStartError::unrecoverable(err)));
         }
 
         // A rejected attribute is recorded but does not abandon the derivation: the
@@ -651,8 +674,8 @@ impl<S: Sink> Engine<S> {
             let attr_name_span = attr.name_span;
             let derived = match self.schema.schema_names.key(&attr.name) {
                 Some(key) => {
-                    let mid = self.schema.start_att_deriv(pat, key);
-                    self.schema.att_value_deriv(mid, attr.value, ns)
+                    let mid = self.schema.start_att_deriv(pat, key)?;
+                    self.schema.att_value_deriv(mid, attr.value, ns)?
                 }
                 None => PAT_NOT_ALLOWED,
             };
@@ -677,9 +700,9 @@ impl<S: Sink> Engine<S> {
             }
         }
 
-        let closed = self.schema.start_tag_close_deriv(pat);
+        let closed = self.schema.start_tag_close_deriv(pat)?;
         if !matches!(self.schema.patt(closed), Pat::NotAllowed) {
-            return match first_attr_error {
+            return Ok(match first_attr_error {
                 None => Ok(closed),
                 // The bad attribute aside, the start tag is complete, so the children can be
                 // checked from here.
@@ -687,7 +710,7 @@ impl<S: Sink> Engine<S> {
                     error,
                     recovery: Some(closed),
                 }),
-            };
+            });
         }
 
         // The start tag did not close: a required attribute was left unsatisfied, either
@@ -702,10 +725,10 @@ impl<S: Sink> Engine<S> {
             kind: "element-end",
             expected: Expected(pat_id),
         });
-        let recovered = self.schema.force_start_tag_close_deriv(pat);
+        let recovered = self.schema.force_start_tag_close_deriv(pat)?;
         let recovery =
             (!matches!(self.schema.patt(recovered), Pat::NotAllowed)).then_some(recovered);
-        Err(CloseStartError { error, recovery })
+        Ok(Err(CloseStartError { error, recovery }))
     }
 
     fn handle_start_tag_close(
@@ -713,7 +736,7 @@ impl<S: Sink> Engine<S> {
         ns: &NamespaceScope<'_>,
         element: &StartElement<'_>,
     ) -> Result<(), ValidatorError> {
-        match self.close_element_start(ns, element) {
+        match self.close_element_start(ns, element)? {
             Ok(next_pat) => {
                 self.current_step = next_pat;
                 self.last_was_start_element = true;
@@ -751,9 +774,9 @@ impl<S: Sink> Engine<S> {
             // The element had no child elements or text nodes, so complete it through the
             // same empty-content rule as a self-closing tag.
             self.schema
-                .close_empty_element(self.current_step, false, ns)
+                .close_empty_element(self.current_step, false, ns)?
         } else {
-            self.schema.end_tag_deriv(self.current_step)
+            self.schema.end_tag_deriv(self.current_step)?
         };
         if matches!(self.schema.patt(result), Pat::NotAllowed) {
             // Some required content is missing. Report it against the element's content
@@ -761,9 +784,9 @@ impl<S: Sink> Engine<S> {
             // the right depth. If even that fails, leave the position alone.
             let before = self.current_step;
             let forced = if self.last_was_start_element {
-                self.schema.close_empty_element(before, true, ns)
+                self.schema.close_empty_element(before, true, ns)?
             } else {
-                self.schema.force_end_tag_deriv(before)
+                self.schema.force_end_tag_deriv(before)?
             };
             if !matches!(self.schema.patt(forced), Pat::NotAllowed) {
                 self.current_step = forced;
@@ -788,7 +811,7 @@ impl<S: Sink> Engine<S> {
         element: &StartElement<'_>,
     ) -> Result<(), ValidatorError> {
         let span = element.close_span;
-        let next_id = match self.close_element_start(ns, element) {
+        let next_id = match self.close_element_start(ns, element)? {
             Ok(next_id) => next_id,
             Err(CloseStartError {
                 mut error,
@@ -801,7 +824,7 @@ impl<S: Sink> Engine<S> {
                     // required child) as well, since this element's own error has already been
                     // reported and there is nothing more to gain from cascading that into every
                     // sibling. If even that can't produce a sound position, leave it alone.
-                    let closed = self.schema.close_empty_element(recovered, true, ns);
+                    let closed = self.schema.close_empty_element(recovered, true, ns)?;
                     if !matches!(self.schema.patt(closed), Pat::NotAllowed) {
                         self.current_step = closed;
                         self.last_was_start_element = false;
@@ -812,11 +835,11 @@ impl<S: Sink> Engine<S> {
                 return Ok(());
             }
         };
-        let result = self.schema.close_empty_element(next_id, false, ns);
+        let result = self.schema.close_empty_element(next_id, false, ns)?;
         if matches!(self.schema.patt(result), Pat::NotAllowed) {
             // As in `handle_end_tag`: report the missing content, then force the element
             // closed.
-            let forced = self.schema.close_empty_element(next_id, true, ns);
+            let forced = self.schema.close_empty_element(next_id, true, ns)?;
             if !matches!(self.schema.patt(forced), Pat::NotAllowed) {
                 self.current_step = forced;
                 self.last_was_start_element = false;
@@ -1181,6 +1204,14 @@ impl Explainer<'_> {
                     spans: vec![],
                 });
             }
+            ValidatorError::TooManyDerivedPatterns => {
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: err.to_string(),
+                    code: None,
+                    spans: vec![],
+                });
+            }
             ValidatorError::Schema(SchemaError::TooManyPatterns) => {
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
@@ -1242,7 +1273,7 @@ impl<S: Sink> Handler for Engine<S> {
         // so clear the flag that would trigger an empty-text derivative on close.
         self.last_was_start_element = false;
         if self.skip_depth > 0
-            || self.schema.mixed_text_deriv(self.current_step) == self.current_step
+            || self.schema.mixed_text_deriv(self.current_step)? == self.current_step
         {
             return Ok(());
         }
@@ -1922,6 +1953,49 @@ mod tests {
             "{} errors, first: {:?}",
             errors.len(),
             errors[0]
+        );
+    }
+
+    // Open elements are represented by a chain of `After` patterns that records the schema
+    // position in every ancestor.  In this schema the position within each `e` depends on
+    // whether the child `e` was preceded by `a` or `b`, so every distinct path from the root
+    // yields a new chain, and a full binary tree of modest depth (far below MAX_ELEMENT_DEPTH)
+    // visits enough distinct paths to exhaust the 16-bit pattern table.
+    const WIDE_SCHEMA: &str = "
+        start = e
+        e = element e { ((element a { empty }, e?, element a { empty })
+                       | (element b { empty }, e?, element b { empty }))* }
+    ";
+
+    /// A valid document for [`WIDE_SCHEMA`]: a full binary tree of `e` elements `depth` deep.
+    ///
+    /// Whitespace between the elements exercises the whitespace-text cache too.
+    fn wide(depth: usize) -> String {
+        fn content(depth: usize, out: &mut String) {
+            if depth == 0 {
+                return;
+            }
+            for x in ["a", "b"] {
+                out.push_str(&format!("<{x}/> <e>"));
+                content(depth - 1, out);
+                out.push_str(&format!("</e> <{x}/>"));
+            }
+        }
+        let mut doc = "<e>".to_string();
+        content(depth, &mut doc);
+        doc.push_str("</e>");
+        doc
+    }
+
+    #[test]
+    fn exhausting_patterns_is_reported() {
+        // The document is valid, so it must not be reported as invalid against the schema.
+        let errors = validate_doc(WIDE_SCHEMA, &wide(16)).unwrap_err();
+        assert!(
+            matches!(&errors[..], [super::ValidatorError::TooManyDerivedPatterns]),
+            "{} errors, first: {:?}",
+            errors.len(),
+            errors.first()
         );
     }
 

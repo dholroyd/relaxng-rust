@@ -9,18 +9,16 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::rc::Rc;
 
-// ---------------------------------------------------------------------------
-// Error
-// ---------------------------------------------------------------------------
+pub(crate) const MAX_PATTERNS: usize = 1 << 16;
+
+/// Validation needed a new pattern when the pattern table was already full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Overflow;
 
 #[derive(Debug)]
 pub enum SchemaError {
     TooManyPatterns,
 }
-
-// ---------------------------------------------------------------------------
-// Pattern types
-// ---------------------------------------------------------------------------
 
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub(crate) struct PatId(pub(crate) u16);
@@ -121,11 +119,18 @@ impl Pat {
 
 pub(crate) type NameCache = FnvHashMap<(PatId, NameKey), PatId>;
 
+// TODO: think about keeping the compile-time and run-time state separate, so that the pattern
+//       list etc in the schema can be immutable, meaning that we don't need to track compiled_len
+//       in order to reset this state if we want to reuse an existing Schema instance to perform
+//       a new validation, or maybe even share it between multiple concurrent validations.
 #[derive(Default)]
 pub(crate) struct Inner {
     pub(crate) memo: HashMap<Pat, PatId>,
     pub(crate) patterns: Vec<Pat>,
     pub(crate) span_map: HashMap<u16, Vec<codemap::Span>>,
+    /// The number of patterns the compiled schema itself has; those created by derivation
+    /// during validation come after them.
+    pub(crate) compiled_len: usize,
 
     // Our implementation of https://relaxng.org/jclark/derivative.html#Memoization
 
@@ -175,19 +180,46 @@ impl Schema {
         &self.datatype_values[id.0 as usize]
     }
 
-    pub(crate) fn push(&self, p: Pat) -> PatId {
+    pub(crate) fn push(&self, p: Pat) -> Result<PatId, Overflow> {
         let mut inner = self.inner.borrow_mut();
-        if inner.patterns.len() > 0xffff {
-            return PAT_NOT_ALLOWED;
-        }
         if let Some(id) = inner.memo.get(&p) {
-            *id
+            Ok(*id)
+        } else if inner.patterns.len() >= MAX_PATTERNS {
+            Err(Overflow)
         } else {
             let id = PatId(inner.patterns.len() as u16);
             inner.memo.insert(p, id);
             inner.patterns.push(p);
-            id
+            Ok(id)
         }
+    }
+
+    /// Whether the pattern table is full, so that deriving anything new will overflow.
+    pub(crate) fn is_full(&self) -> bool {
+        self.inner.borrow().patterns.len() >= MAX_PATTERNS
+    }
+
+    /// Discards every pattern created by derivation, and everything cached about them, to make
+    /// room for more.  Any `PatId` created during validation is invalid afterwards.
+    pub(crate) fn discard_derived_patterns(&self) {
+        let mut inner = self.inner.borrow_mut();
+        let Inner {
+            mut memo,
+            mut patterns,
+            span_map,
+            compiled_len,
+            ..
+        } = std::mem::take(&mut *inner);
+        patterns.truncate(compiled_len);
+        memo.retain(|_, id| (id.0 as usize) < compiled_len);
+        // Every cache is rebuilt empty, including any added later.
+        *inner = Inner {
+            memo,
+            patterns,
+            span_map,
+            compiled_len,
+            ..Default::default()
+        };
     }
 
     #[inline(always)]
@@ -212,13 +244,13 @@ impl Schema {
         }
     }
 
-    pub(crate) fn choice(&self, left: PatId, right: PatId) -> PatId {
+    pub(crate) fn choice(&self, left: PatId, right: PatId) -> Result<PatId, Overflow> {
         match (self.patt(left), self.patt(right)) {
-            (Pat::NotAllowed, _) => right,
-            (_, Pat::NotAllowed) => left,
+            (Pat::NotAllowed, _) => Ok(right),
+            (_, Pat::NotAllowed) => Ok(left),
             (l, r) => {
                 if left == right {
-                    return left;
+                    return Ok(left);
                 }
                 if !matches!(l, Pat::Choice(..)) && !matches!(r, Pat::Choice(..)) {
                     // Both are single non-Choice leaves and are already distinct —
@@ -236,9 +268,9 @@ impl Schema {
                 Self::collect_new_leaves(right, &inner, &left_set, &mut new_right);
                 drop(inner);
                 if new_right.is_empty() {
-                    return left;
+                    return Ok(left);
                 }
-                new_right.into_iter().fold(left, |acc, r| {
+                new_right.into_iter().try_fold(left, |acc, r| {
                     let nullable = self.patt(acc).is_nullable() || self.patt(r).is_nullable();
                     self.push(Pat::Choice(acc, r, nullable))
                 })
@@ -279,12 +311,12 @@ impl Schema {
         }
     }
 
-    pub(crate) fn interleave(&self, left: PatId, right: PatId) -> PatId {
+    pub(crate) fn interleave(&self, left: PatId, right: PatId) -> Result<PatId, Overflow> {
         match (self.patt(left), self.patt(right)) {
-            (Pat::NotAllowed, _) => self.not_allowed(),
-            (_, Pat::NotAllowed) => self.not_allowed(),
-            (Pat::Empty, _) => right,
-            (_, Pat::Empty) => left,
+            (Pat::NotAllowed, _) => Ok(self.not_allowed()),
+            (_, Pat::NotAllowed) => Ok(self.not_allowed()),
+            (Pat::Empty, _) => Ok(right),
+            (_, Pat::Empty) => Ok(left),
             (l, r) => self.push(Pat::Interleave(
                 left,
                 right,
@@ -293,19 +325,19 @@ impl Schema {
         }
     }
 
-    pub(crate) fn group(&self, left: PatId, right: PatId) -> PatId {
+    pub(crate) fn group(&self, left: PatId, right: PatId) -> Result<PatId, Overflow> {
         match (self.patt(left), self.patt(right)) {
-            (Pat::NotAllowed, _) => self.not_allowed(),
-            (_, Pat::NotAllowed) => self.not_allowed(),
-            (Pat::Empty, _) => right,
-            (_, Pat::Empty) => left,
+            (Pat::NotAllowed, _) => Ok(self.not_allowed()),
+            (_, Pat::NotAllowed) => Ok(self.not_allowed()),
+            (Pat::Empty, _) => Ok(right),
+            (_, Pat::Empty) => Ok(left),
             (l, r) => self.push(Pat::Group(left, right, l.is_nullable() && r.is_nullable())),
         }
     }
 
-    pub(crate) fn after(&self, p1: PatId, p2: PatId) -> PatId {
+    pub(crate) fn after(&self, p1: PatId, p2: PatId) -> Result<PatId, Overflow> {
         match (self.patt(p1), self.patt(p2)) {
-            (Pat::NotAllowed, _) | (_, Pat::NotAllowed) => self.not_allowed(),
+            (Pat::NotAllowed, _) | (_, Pat::NotAllowed) => Ok(self.not_allowed()),
             (_, _) => self.push(Pat::After(p1, p2)),
         }
     }
@@ -319,11 +351,11 @@ impl Schema {
     pub(crate) fn not_allowed(&self) -> PatId {
         PAT_NOT_ALLOWED
     }
-    pub(crate) fn one_or_more(&self, pattern: PatId) -> PatId {
+    pub(crate) fn one_or_more(&self, pattern: PatId) -> Result<PatId, Overflow> {
         let p = self.patt(pattern);
         self.push(Pat::OneOrMore(pattern, p.is_nullable()))
     }
-    pub(crate) fn list(&self, p: PatId) -> PatId {
+    pub(crate) fn list(&self, p: PatId) -> Result<PatId, Overflow> {
         self.push(Pat::List(p))
     }
     pub(crate) fn patt(&self, id: PatId) -> Pat {
@@ -755,6 +787,7 @@ impl SchemaBuilder {
             .collect();
         let inner = Inner {
             memo: self.memo,
+            compiled_len: patterns.len(),
             patterns,
             span_map: self.span_map,
             ..Default::default()

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::validator::infoset::NamespaceScope;
 use crate::validator::nameclass::NameKey;
-use crate::validator::schema::{Pat, PatId, Schema};
+use crate::validator::schema::{Overflow, Pat, PatId, Schema};
 
 fn is_whitespace_char(c: char) -> bool {
     ['\x20', '\x09', '\x0d', '\x0a'].contains(&c)
@@ -34,7 +34,12 @@ struct TextDerivCx<'t, 'n, 's> {
 }
 
 impl Schema {
-    pub(crate) fn text_deriv(&mut self, pid: PatId, text: &str, ns: &NamespaceScope<'_>) -> PatId {
+    pub(crate) fn text_deriv(
+        &mut self,
+        pid: PatId,
+        text: &str,
+        ns: &NamespaceScope<'_>,
+    ) -> Result<PatId, Overflow> {
         let mut cx = TextDerivCx {
             text,
             whitespace: is_whitespace_str(text),
@@ -53,7 +58,11 @@ impl Schema {
     // since that case recurs in nearly every context and so is worth keeping across calls.
     // Everything else goes into `cx.memo`, which lasts for this `text_deriv` call only.  See
     // [`TextDerivCx::depends`] for how the two cases are told apart.
-    fn text_deriv_memo(&mut self, pid: PatId, cx: &mut TextDerivCx<'_, '_, '_>) -> PatId {
+    fn text_deriv_memo(
+        &mut self,
+        pid: PatId,
+        cx: &mut TextDerivCx<'_, '_, '_>,
+    ) -> Result<PatId, Overflow> {
         let pat = self.patt(pid);
         // Only patterns that recurse into sub-patterns are memoized.  Since every such parent is
         // memoized, a leaf (including Element and Attribute, whose derivative never looks inside
@@ -64,18 +73,18 @@ impl Schema {
         if cx.whitespace
             && let Some(cached) = self.whitespace_text_cache_entry(pid)
         {
-            return cached;
+            return Ok(cached);
         }
         if let Some(&(cached, depends)) = cx.memo.get(&pid) {
             // Re-apply the flag so every parent of a shared child sees the dependency, not just
             // the first one to derive it.
             cx.depends |= depends;
-            return cached;
+            return Ok(cached);
         }
         // Find whether this pattern's own derivative depends on the text, then fold that into
         // the enclosing pattern's.
         let outer = std::mem::replace(&mut cx.depends, false);
-        let result = self.text_deriv_uncached(pid, pat, cx);
+        let result = self.text_deriv_uncached(pid, pat, cx)?;
         let depends = cx.depends;
         cx.depends |= outer;
         if cx.whitespace && !depends {
@@ -90,7 +99,7 @@ impl Schema {
         } else {
             cx.memo.insert(pid, (result, depends));
         }
-        result
+        Ok(result)
     }
 
     fn whitespace_text_cache_entry(&self, pid: PatId) -> Option<PatId> {
@@ -122,58 +131,58 @@ impl Schema {
         pid: PatId,
         pat: Pat,
         cx: &mut TextDerivCx<'_, '_, '_>,
-    ) -> PatId {
+    ) -> Result<PatId, Overflow> {
         let text = cx.text;
         let ns = cx.ns;
         // Where the text leaves every sub-pattern unchanged (as whitespace usually does), the
         // composite arms return `pid` itself rather than rebuilding an equivalent pattern.  A
         // rebuilt pattern would be new to every cache, and the states reached from it multiply
         // with each text node until the pattern table overflows.
-        match pat {
+        Ok(match pat {
             Pat::Choice(p1, p2, _) => {
-                let a = self.text_deriv_memo(p1, cx);
-                let b = self.text_deriv_memo(p2, cx);
+                let a = self.text_deriv_memo(p1, cx)?;
+                let b = self.text_deriv_memo(p2, cx)?;
                 if a == p1 && b == p2 {
-                    return pid;
+                    return Ok(pid);
                 }
-                self.choice(a, b)
+                self.choice(a, b)?
             }
             Pat::Interleave(p1, p2, _) => {
-                let d1 = self.text_deriv_memo(p1, cx);
-                let d2 = self.text_deriv_memo(p2, cx);
+                let d1 = self.text_deriv_memo(p1, cx)?;
+                let d2 = self.text_deriv_memo(p2, cx)?;
                 if d1 == p1 && d2 == p2 {
-                    return pid;
+                    return Ok(pid);
                 }
-                let a = self.interleave(d1, p2);
-                let b = self.interleave(p1, d2);
-                self.choice(a, b)
+                let a = self.interleave(d1, p2)?;
+                let b = self.interleave(p1, d2)?;
+                self.choice(a, b)?
             }
             Pat::Group(p1, p2, _) => {
                 let nullable = self.patt(p1).is_nullable();
-                let d1 = self.text_deriv_memo(p1, cx);
-                let p = self.group(d1, p2);
+                let d1 = self.text_deriv_memo(p1, cx)?;
+                let p = self.group(d1, p2)?;
                 if nullable {
-                    let d2 = self.text_deriv_memo(p2, cx);
+                    let d2 = self.text_deriv_memo(p2, cx)?;
                     // p1 is nullable, so `p1, p2` already matches everything `p2` does.
                     if d1 == p1 && d2 == p2 {
-                        return pid;
+                        return Ok(pid);
                     }
-                    self.choice(p, d2)
+                    self.choice(p, d2)?
                 } else {
                     p
                 }
             }
             Pat::After(p1, p2) => {
-                let d = self.text_deriv_memo(p1, cx);
-                self.after(d, p2)
+                let d = self.text_deriv_memo(p1, cx)?;
+                self.after(d, p2)?
             }
             Pat::OneOrMore(p, _) => {
-                let d = self.text_deriv_memo(p, cx);
+                let d = self.text_deriv_memo(p, cx)?;
                 // `p, (p+ | empty)` matches the same as `p+`.
                 if d == p {
-                    return pid;
+                    return Ok(pid);
                 }
-                self.group(d, self.choice(self.one_or_more(p), self.empty()))
+                self.repeat_rest(d, p)?
             }
             Pat::Text => {
                 self.mark_covered(pid);
@@ -203,7 +212,7 @@ impl Schema {
             }
             Pat::DatatypeExcept(dt, except) => {
                 cx.depends = true;
-                let d = self.text_deriv_memo(except, cx);
+                let d = self.text_deriv_memo(except, cx)?;
                 let pat2 = self.patt(d);
                 if datatype_is_valid(self.datatype(dt), text, ns) && !pat2.is_nullable() {
                     self.mark_covered(pid);
@@ -215,9 +224,9 @@ impl Schema {
             Pat::List(p) => {
                 let mut p = p;
                 for item in text.split_whitespace() {
-                    p = self.text_deriv(p, item, ns);
+                    p = self.text_deriv(p, item, ns)?;
                     if let Pat::NotAllowed = self.patt(p) {
-                        return p;
+                        return Ok(p);
                     }
                 }
                 let last_patt = self.patt(p);
@@ -229,9 +238,10 @@ impl Schema {
                     // whereas processing instructions CDATA sections etc may mean we see
                     // text children piecemeal here.  To accommodate this, we make the list
                     // optional here (TODO: should we rather adjust List to be nullable?)
-                    self.choice(self.list(p), self.empty())
+                    let list = self.list(p)?;
+                    self.choice(list, self.empty())?
                 } else {
-                    self.list(p)
+                    self.list(p)?
                 }
             }
             Pat::Empty => {
@@ -259,53 +269,60 @@ impl Schema {
                     self.not_allowed()
                 }
             }
-        }
+        })
+    }
+
+    /// `d, (p+ | empty)`: what remains of `p+` once `p` has been derived to `d`.
+    fn repeat_rest(&mut self, d: PatId, p: PatId) -> Result<PatId, Overflow> {
+        let more = self.one_or_more(p)?;
+        let rest = self.choice(more, self.empty())?;
+        self.group(d, rest)
     }
 
     // Per https://relaxng.org/jclark/derivative.html — text nodes in mixed content can only
     // match Text patterns (RELAX NG spec §7.2).  This lets us memoize on PatId alone, ignoring
     // the actual text value.  Returns the same PatId for patterns where text is a fixed-point
     // (e.g. After(Text, cont)), enabling a fast skip of text_deriv at call sites.
-    pub(crate) fn mixed_text_deriv(&mut self, pid: PatId) -> PatId {
+    pub(crate) fn mixed_text_deriv(&mut self, pid: PatId) -> Result<PatId, Overflow> {
         let idx = pid.0 as usize;
         {
             let inner = self.inner.borrow();
             if let Some(Some(cached)) = inner.mixed_text_cache.get(idx) {
-                return *cached;
+                return Ok(*cached);
             }
         }
         let pat = self.patt(pid);
         let result = match pat {
             Pat::Choice(p1, p2, _) => {
-                let c1 = self.mixed_text_deriv(p1);
-                let c2 = self.mixed_text_deriv(p2);
-                self.choice(c1, c2)
+                let c1 = self.mixed_text_deriv(p1)?;
+                let c2 = self.mixed_text_deriv(p2)?;
+                self.choice(c1, c2)?
             }
             Pat::Interleave(p1, p2, _) => {
-                let d1 = self.mixed_text_deriv(p1);
-                let c1 = self.interleave(d1, p2);
-                let d2 = self.mixed_text_deriv(p2);
-                let c2 = self.interleave(p1, d2);
-                self.choice(c1, c2)
+                let d1 = self.mixed_text_deriv(p1)?;
+                let c1 = self.interleave(d1, p2)?;
+                let d2 = self.mixed_text_deriv(p2)?;
+                let c2 = self.interleave(p1, d2)?;
+                self.choice(c1, c2)?
             }
             Pat::After(p1, p2) => {
-                let d = self.mixed_text_deriv(p1);
-                self.after(d, p2)
+                let d = self.mixed_text_deriv(p1)?;
+                self.after(d, p2)?
             }
             Pat::Group(p1, p2, _) => {
                 let nullable = self.patt(p1).is_nullable();
-                let d1 = self.mixed_text_deriv(p1);
-                let p = self.group(d1, p2);
+                let d1 = self.mixed_text_deriv(p1)?;
+                let p = self.group(d1, p2)?;
                 if nullable {
-                    let d2 = self.mixed_text_deriv(p2);
-                    self.choice(p, d2)
+                    let d2 = self.mixed_text_deriv(p2)?;
+                    self.choice(p, d2)?
                 } else {
                     p
                 }
             }
             Pat::OneOrMore(p, _) => {
-                let d = self.mixed_text_deriv(p);
-                self.group(d, self.choice(self.one_or_more(p), self.empty()))
+                let d = self.mixed_text_deriv(p)?;
+                self.repeat_rest(d, p)?
             }
             Pat::Text => {
                 self.mark_covered(pid);
@@ -318,45 +335,47 @@ impl Schema {
             inner.mixed_text_cache.resize(idx + 1, None);
         }
         inner.mixed_text_cache[idx] = Some(result);
-        result
+        Ok(result)
     }
 
-    pub(crate) fn start_tag_open_deriv(&mut self, pid: PatId, name: NameKey) -> PatId {
+    pub(crate) fn start_tag_open_deriv(
+        &mut self,
+        pid: PatId,
+        name: NameKey,
+    ) -> Result<PatId, Overflow> {
         // Cache check (borrow released before any mutation)
         {
             let inner = self.inner.borrow();
             if let Some(&cached) = inner.start_tag_open_cache.get(&(pid, name)) {
-                return cached;
+                return Ok(cached);
             }
         }
 
         let current = self.patt(pid);
         let result = match current {
             Pat::Choice(l, r, _) => {
-                let d1 = self.start_tag_open_deriv(l, name);
-                let d2 = self.start_tag_open_deriv(r, name);
-                self.choice(d1, d2)
+                let d1 = self.start_tag_open_deriv(l, name)?;
+                let d2 = self.start_tag_open_deriv(r, name)?;
+                self.choice(d1, d2)?
             }
             Pat::OneOrMore(inner_pid, _) => {
-                let deriv = self.start_tag_open_deriv(inner_pid, name);
-                self.apply_after(self.patt(deriv), |pat, s| {
-                    s.group(pat, s.choice(s.one_or_more(inner_pid), s.empty()))
-                })
+                let deriv = self.start_tag_open_deriv(inner_pid, name)?;
+                self.apply_after(self.patt(deriv), |pat, s| s.repeat_rest(pat, inner_pid))?
             }
             Pat::Interleave(pid1, pid2, _) => {
-                let d1 = self.start_tag_open_deriv(pid1, name);
-                let c1 = self.apply_after(self.patt(d1), |pat, s| s.interleave(pat, pid2));
-                let d2 = self.start_tag_open_deriv(pid2, name);
-                let c2 = self.apply_after(self.patt(d2), |pat, s| s.interleave(pid1, pat));
-                self.choice(c1, c2)
+                let d1 = self.start_tag_open_deriv(pid1, name)?;
+                let c1 = self.apply_after(self.patt(d1), |pat, s| s.interleave(pat, pid2))?;
+                let d2 = self.start_tag_open_deriv(pid2, name)?;
+                let c2 = self.apply_after(self.patt(d2), |pat, s| s.interleave(pid1, pat))?;
+                self.choice(c1, c2)?
             }
             Pat::Group(pid1, pid2, _) => {
                 let nullable = self.patt(pid1).is_nullable();
-                let d1 = self.start_tag_open_deriv(pid1, name);
-                let x = self.apply_after(self.patt(d1), |pat, s| s.group(pat, pid2));
+                let d1 = self.start_tag_open_deriv(pid1, name)?;
+                let x = self.apply_after(self.patt(d1), |pat, s| s.group(pat, pid2))?;
                 if nullable {
-                    let d2 = self.start_tag_open_deriv(pid2, name);
-                    self.choice(x, d2)
+                    let d2 = self.start_tag_open_deriv(pid2, name)?;
+                    self.choice(x, d2)?
                 } else {
                     x
                 }
@@ -365,14 +384,14 @@ impl Schema {
                 if self.name_matcher(nc).matches(name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
-                    self.after(inner_pat, empty)
+                    self.after(inner_pat, empty)?
                 } else {
                     self.not_allowed()
                 }
             }
             Pat::After(pid1, pid2) => {
-                let d = self.start_tag_open_deriv(pid1, name);
-                self.apply_after(self.patt(d), |pat, s| s.after(pat, pid2))
+                let d = self.start_tag_open_deriv(pid1, name)?;
+                self.apply_after(self.patt(d), |pat, s| s.after(pat, pid2))?
             }
 
             Pat::Empty
@@ -389,58 +408,56 @@ impl Schema {
             .borrow_mut()
             .start_tag_open_cache
             .insert((pid, name), result);
-        result
+        Ok(result)
     }
 
-    pub(crate) fn start_att_deriv(&mut self, pid: PatId, name: NameKey) -> PatId {
+    pub(crate) fn start_att_deriv(&mut self, pid: PatId, name: NameKey) -> Result<PatId, Overflow> {
         {
             let inner = self.inner.borrow();
             if let Some(&cached) = inner.start_att_cache.get(&(pid, name)) {
-                return cached;
+                return Ok(cached);
             }
         }
 
         let current = self.patt(pid);
         let result = match current {
             Pat::Choice(l, r, _) => {
-                let d1 = self.start_att_deriv(l, name);
-                let d2 = self.start_att_deriv(r, name);
-                self.choice(d1, d2)
+                let d1 = self.start_att_deriv(l, name)?;
+                let d2 = self.start_att_deriv(r, name)?;
+                self.choice(d1, d2)?
             }
             Pat::OneOrMore(inner_pid, _) => {
-                let deriv = self.start_att_deriv(inner_pid, name);
-                self.apply_after(self.patt(deriv), |pat, s| {
-                    s.group(pat, s.choice(s.one_or_more(inner_pid), s.empty()))
-                })
+                let deriv = self.start_att_deriv(inner_pid, name)?;
+                self.apply_after(self.patt(deriv), |pat, s| s.repeat_rest(pat, inner_pid))?
             }
             Pat::Interleave(pid1, pid2, _) => {
-                let d1 = self.start_att_deriv(pid1, name);
-                let c1 = self.apply_after(self.patt(d1), |pat, s| s.interleave(pat, pid2));
-                let d2 = self.start_att_deriv(pid2, name);
-                let c2 = self.apply_after(self.patt(d2), |pat, s| s.interleave(pid1, pat));
-                self.choice(c1, c2)
+                let d1 = self.start_att_deriv(pid1, name)?;
+                let c1 = self.apply_after(self.patt(d1), |pat, s| s.interleave(pat, pid2))?;
+                let d2 = self.start_att_deriv(pid2, name)?;
+                let c2 = self.apply_after(self.patt(d2), |pat, s| s.interleave(pid1, pat))?;
+                self.choice(c1, c2)?
             }
             Pat::Group(pid1, pid2, _) => {
                 // Attributes may appear in any order, so unlike start_tag_open_deriv
                 // we always try both branches unconditionally.
-                let d1 = self.start_att_deriv(pid1, name);
-                let x = self.apply_after(self.patt(d1), |pat, s| s.group(pat, pid2));
-                let d2 = self.start_att_deriv(pid2, name);
-                let y = self.apply_after(self.patt(d2), |pat, s| s.group(pid1, pat));
-                self.choice(x, y)
+                let d1 = self.start_att_deriv(pid1, name)?;
+                let x = self.apply_after(self.patt(d1), |pat, s| s.group(pat, pid2))?;
+                let d2 = self.start_att_deriv(pid2, name)?;
+                let y = self.apply_after(self.patt(d2), |pat, s| s.group(pid1, pat))?;
+                self.choice(x, y)?
             }
             Pat::Attribute(nc, val_pat) => {
                 if self.name_matcher(nc).matches(name) {
                     self.mark_covered(pid);
                     let empty = self.empty();
-                    self.after(val_pat, empty)
+                    self.after(val_pat, empty)?
                 } else {
                     self.not_allowed()
                 }
             }
             Pat::After(pid1, pid2) => {
-                let d = self.start_att_deriv(pid1, name);
-                self.apply_after(self.patt(d), |pat, s| s.after(pat, pid2))
+                let d = self.start_att_deriv(pid1, name)?;
+                self.apply_after(self.patt(d), |pat, s| s.after(pat, pid2))?
             }
             _ => self.not_allowed(),
         };
@@ -449,7 +466,7 @@ impl Schema {
             .borrow_mut()
             .start_att_cache
             .insert((pid, name), result);
-        result
+        Ok(result)
     }
 
     pub(crate) fn att_value_deriv(
@@ -457,94 +474,99 @@ impl Schema {
         pid: PatId,
         value: &str,
         ns: &NamespaceScope<'_>,
-    ) -> PatId {
+    ) -> Result<PatId, Overflow> {
         let pat = self.patt(pid);
-        match pat {
+        Ok(match pat {
             Pat::After(val_pat, cont) => {
-                if self.value_match(val_pat, value, ns) {
+                if self.value_match(val_pat, value, ns)? {
                     cont
                 } else {
                     self.not_allowed()
                 }
             }
             Pat::Choice(p1, p2, _) => {
-                let c1 = self.att_value_deriv(p1, value, ns);
-                let c2 = self.att_value_deriv(p2, value, ns);
-                self.choice(c1, c2)
+                let c1 = self.att_value_deriv(p1, value, ns)?;
+                let c2 = self.att_value_deriv(p2, value, ns)?;
+                self.choice(c1, c2)?
             }
             _ => self.not_allowed(),
-        }
+        })
     }
 
     // in the spec, the applyAfter() 'f' argument comes before the pattern, in rust it's more
     // convenient if the 'f' argument is last in the list
-    pub(crate) fn apply_after<F>(&mut self, pat: Pat, f: F) -> PatId
+    pub(crate) fn apply_after<F>(&mut self, pat: Pat, f: F) -> Result<PatId, Overflow>
     where
-        F: Fn(PatId, &mut Schema) -> PatId + Clone,
+        F: Fn(PatId, &mut Schema) -> Result<PatId, Overflow> + Clone,
     {
         match pat {
             Pat::After(p1, p2) => {
-                let p2 = f(p2, self);
+                let p2 = f(p2, self)?;
                 self.after(p1, p2)
             }
             Pat::Choice(p1, p2, _) => {
                 let p1 = self.patt(p1);
                 let p2 = self.patt(p2);
-                let c1 = self.apply_after(p1, f.clone());
-                let c2 = self.apply_after(p2, f);
+                let c1 = self.apply_after(p1, f.clone())?;
+                let c2 = self.apply_after(p2, f)?;
                 self.choice(c1, c2)
             }
-            Pat::NotAllowed => self.not_allowed(),
+            Pat::NotAllowed => Ok(self.not_allowed()),
             _ => panic!(
                 "Only 'Choice', 'Interleave' or 'NotAllowed' patterns may be passed to apply_after(): {pat:?}"
             ),
         }
     }
 
-    pub(crate) fn value_match(&mut self, pid: PatId, val: &str, ns: &NamespaceScope<'_>) -> bool {
+    pub(crate) fn value_match(
+        &mut self,
+        pid: PatId,
+        val: &str,
+        ns: &NamespaceScope<'_>,
+    ) -> Result<bool, Overflow> {
         let pat = self.patt(pid);
         if pat.is_nullable() && is_whitespace_str(val) {
-            true
+            Ok(true)
         } else {
-            let d = self.text_deriv(pid, val, ns);
-            self.patt(d).is_nullable()
+            let d = self.text_deriv(pid, val, ns)?;
+            Ok(self.patt(d).is_nullable())
         }
     }
 
     /// See [`Self::force_start_tag_close_deriv`] for the error-recovery counterpart of this
     /// function — keep the `Attribute` arm of the two in sync; every other arm must stay
     /// structurally identical.
-    pub(crate) fn start_tag_close_deriv(&mut self, pid: PatId) -> PatId {
+    pub(crate) fn start_tag_close_deriv(&mut self, pid: PatId) -> Result<PatId, Overflow> {
         {
             let inner = self.inner.borrow();
             if let Some(&cached) = inner.start_tag_close_cache.get(&pid) {
-                return cached;
+                return Ok(cached);
             }
         }
         let pat = self.patt(pid);
         let result = match pat {
             Pat::After(p1, p2) => {
-                let a1 = self.start_tag_close_deriv(p1);
-                self.after(a1, p2)
+                let a1 = self.start_tag_close_deriv(p1)?;
+                self.after(a1, p2)?
             }
             Pat::Choice(p1, p2, _) => {
-                let c1 = self.start_tag_close_deriv(p1);
-                let c2 = self.start_tag_close_deriv(p2);
-                self.choice(c1, c2)
+                let c1 = self.start_tag_close_deriv(p1)?;
+                let c2 = self.start_tag_close_deriv(p2)?;
+                self.choice(c1, c2)?
             }
             Pat::Group(p1, p2, _) => {
-                let c1 = self.start_tag_close_deriv(p1);
-                let c2 = self.start_tag_close_deriv(p2);
-                self.group(c1, c2)
+                let c1 = self.start_tag_close_deriv(p1)?;
+                let c2 = self.start_tag_close_deriv(p2)?;
+                self.group(c1, c2)?
             }
             Pat::Interleave(p1, p2, _) => {
-                let c1 = self.start_tag_close_deriv(p1);
-                let c2 = self.start_tag_close_deriv(p2);
-                self.interleave(c1, c2)
+                let c1 = self.start_tag_close_deriv(p1)?;
+                let c2 = self.start_tag_close_deriv(p2)?;
+                self.interleave(c1, c2)?
             }
             Pat::OneOrMore(p, _) => {
-                let _o = self.start_tag_close_deriv(p);
-                self.one_or_more(p)
+                let _o = self.start_tag_close_deriv(p)?;
+                self.one_or_more(p)?
             }
             Pat::Attribute(_, _) => self.not_allowed(),
             _ => pid,
@@ -553,7 +575,7 @@ impl Schema {
             .borrow_mut()
             .start_tag_close_cache
             .insert(pid, result);
-        result
+        Ok(result)
     }
 
     /// As [`Self::start_tag_close_deriv`], but treats still-outstanding required attributes as
@@ -569,7 +591,7 @@ impl Schema {
     /// function recurses into *both* children of `Group`/`Interleave`/`Choice` regardless of
     /// nullability, so an unmemoized walk of a heavily-shared pattern DAG can be exponential in
     /// the DAG's depth.
-    pub(crate) fn force_start_tag_close_deriv(&mut self, pid: PatId) -> PatId {
+    pub(crate) fn force_start_tag_close_deriv(&mut self, pid: PatId) -> Result<PatId, Overflow> {
         self.force_start_tag_close_deriv_memo(pid, &mut HashMap::new())
     }
 
@@ -577,38 +599,38 @@ impl Schema {
         &mut self,
         pid: PatId,
         memo: &mut HashMap<PatId, PatId>,
-    ) -> PatId {
+    ) -> Result<PatId, Overflow> {
         if let Some(&cached) = memo.get(&pid) {
-            return cached;
+            return Ok(cached);
         }
         let result = match self.patt(pid) {
             Pat::After(p1, p2) => {
-                let a1 = self.force_start_tag_close_deriv_memo(p1, memo);
-                self.after(a1, p2)
+                let a1 = self.force_start_tag_close_deriv_memo(p1, memo)?;
+                self.after(a1, p2)?
             }
             Pat::Choice(p1, p2, _) => {
-                let c1 = self.force_start_tag_close_deriv_memo(p1, memo);
-                let c2 = self.force_start_tag_close_deriv_memo(p2, memo);
-                self.choice(c1, c2)
+                let c1 = self.force_start_tag_close_deriv_memo(p1, memo)?;
+                let c2 = self.force_start_tag_close_deriv_memo(p2, memo)?;
+                self.choice(c1, c2)?
             }
             Pat::Group(p1, p2, _) => {
-                let c1 = self.force_start_tag_close_deriv_memo(p1, memo);
-                let c2 = self.force_start_tag_close_deriv_memo(p2, memo);
-                self.group(c1, c2)
+                let c1 = self.force_start_tag_close_deriv_memo(p1, memo)?;
+                let c2 = self.force_start_tag_close_deriv_memo(p2, memo)?;
+                self.group(c1, c2)?
             }
             Pat::Interleave(p1, p2, _) => {
-                let c1 = self.force_start_tag_close_deriv_memo(p1, memo);
-                let c2 = self.force_start_tag_close_deriv_memo(p2, memo);
-                self.interleave(c1, c2)
+                let c1 = self.force_start_tag_close_deriv_memo(p1, memo)?;
+                let c2 = self.force_start_tag_close_deriv_memo(p2, memo)?;
+                self.interleave(c1, c2)?
             }
             // Mirrors `start_tag_close_deriv`, which likewise leaves the body untouched; an
             // attribute nested under a repeat is therefore not force-matched here either.
-            Pat::OneOrMore(p, _) => self.one_or_more(p),
+            Pat::OneOrMore(p, _) => self.one_or_more(p)?,
             Pat::Attribute(_, _) => self.empty(),
             _ => pid,
         };
         memo.insert(pid, result);
-        result
+        Ok(result)
     }
 
     // Note: the spec lists endTagDeriv as efficiently memoizable, but benchmarking showed
@@ -618,13 +640,13 @@ impl Schema {
     //
     // See `force_end_tag_deriv` below for the error-recovery counterpart of this function —
     // keep the two structurally in sync.
-    pub(crate) fn end_tag_deriv(&mut self, pid: PatId) -> PatId {
+    pub(crate) fn end_tag_deriv(&mut self, pid: PatId) -> Result<PatId, Overflow> {
         let pat = self.patt(pid);
-        match pat {
+        Ok(match pat {
             Pat::Choice(p1, p2, _) => {
-                let c1 = self.end_tag_deriv(p1);
-                let c2 = self.end_tag_deriv(p2);
-                self.choice(c1, c2)
+                let c1 = self.end_tag_deriv(p1)?;
+                let c2 = self.end_tag_deriv(p2)?;
+                self.choice(c1, c2)?
             }
             Pat::After(p1, p2) => {
                 if self.patt(p1).is_nullable() {
@@ -634,7 +656,7 @@ impl Schema {
                 }
             }
             _ => self.not_allowed(),
-        }
+        })
     }
 
     /// As [`Self::end_tag_deriv`], but treats the element's outstanding content requirements
@@ -648,16 +670,16 @@ impl Schema {
     /// point the pattern is Choice/After nesting only (no Group/Interleave/OneOrMore, which are
     /// already gone by the time a start tag has closed), so an unmemoized walk stays bounded by
     /// the same reasoning that already applies to `end_tag_deriv`.
-    pub(crate) fn force_end_tag_deriv(&mut self, pid: PatId) -> PatId {
-        match self.patt(pid) {
+    pub(crate) fn force_end_tag_deriv(&mut self, pid: PatId) -> Result<PatId, Overflow> {
+        Ok(match self.patt(pid) {
             Pat::Choice(p1, p2, _) => {
-                let c1 = self.force_end_tag_deriv(p1);
-                let c2 = self.force_end_tag_deriv(p2);
-                self.choice(c1, c2)
+                let c1 = self.force_end_tag_deriv(p1)?;
+                let c2 = self.force_end_tag_deriv(p2)?;
+                self.choice(c1, c2)?
             }
             Pat::After(_, p2) => p2,
             _ => self.not_allowed(),
-        }
+        })
     }
 
     /// Complete a self-closing element from `pid`.
@@ -676,13 +698,13 @@ impl Schema {
         pid: PatId,
         force: bool,
         ns: &NamespaceScope<'_>,
-    ) -> PatId {
-        let p = self.text_deriv(pid, "", ns);
-        let closed = self.end_tag_deriv(p);
+    ) -> Result<PatId, Overflow> {
+        let p = self.text_deriv(pid, "", ns)?;
+        let closed = self.end_tag_deriv(p)?;
         if force && matches!(self.patt(closed), Pat::NotAllowed) {
             self.force_end_tag_deriv(p)
         } else {
-            closed
+            Ok(closed)
         }
     }
 }

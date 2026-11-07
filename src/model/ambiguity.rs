@@ -194,8 +194,27 @@ impl Nfa {
         }
     }
 
+    /// If no transition carries a label, the language is either `{ε}` or empty, so
+    /// replace the NFA with the equivalent single-state NFA.
+    fn collapse_if_label_free(self) -> Nfa {
+        if self.num_states == 1 {
+            return self;
+        }
+        let has_label = self
+            .transitions
+            .iter()
+            .flatten()
+            .any(|(label, _)| label.is_some());
+        if has_label {
+            self
+        } else if self.is_empty() {
+            Nfa::new_dead()
+        } else {
+            Nfa::new_empty()
+        }
+    }
+
     /// Returns true if the NFA accepts no strings (language is empty).
-    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         if !self.accept.iter().any(|&a| a) {
             return true;
@@ -363,7 +382,20 @@ fn enumerate_walk(
 
 /// Convert a content model pattern into an NFA over the label alphabet.
 /// Element patterns become single transitions; we do NOT recurse into their bodies.
+///
+/// Any sub-pattern whose NFA has no labelled transitions (attributes, text, data, and
+/// groups or interleaves of those) is collapsed to a single-state NFA. Without this,
+/// attribute-heavy interleaves produce shuffle products of epsilon-only states that
+/// can reach hundreds of thousands of states.
 fn pattern_to_nfa(
+    pattern: &Pattern,
+    ptr_to_label: &HashMap<usize, LabelId>,
+    seen_refs: &mut HashSet<usize>,
+) -> Nfa {
+    pattern_to_nfa_inner(pattern, ptr_to_label, seen_refs).collapse_if_label_free()
+}
+
+fn pattern_to_nfa_inner(
     pattern: &Pattern,
     ptr_to_label: &HashMap<usize, LabelId>,
     seen_refs: &mut HashSet<usize>,
@@ -1261,5 +1293,61 @@ mod tests {
             !warnings.is_empty(),
             "Overlapping content models should be ambiguous"
         );
+    }
+
+    fn optional_attr(name: &str) -> Pattern {
+        Pattern::Optional(
+            Box::new(Pattern::Attribute(
+                NameClass::Named {
+                    namespace_uri: String::new(),
+                    name: name.to_string(),
+                },
+                Box::new(Pattern::Text(None)),
+                None,
+                None,
+            )),
+            None,
+        )
+    }
+
+    #[test]
+    fn attribute_interleave_does_not_inflate_nfa() {
+        // interleave { (6 groups of 4 optional attributes) & element child { empty } }
+        // Without collapsing label-free sub-NFAs, the shuffle product of the attribute
+        // groups alone is thousands of epsilon-only states.
+        let mut arms: Vec<Pattern> = (0..6)
+            .map(|g| {
+                Pattern::Group(
+                    (0..4)
+                        .map(|a| optional_attr(&format!("a{g}_{a}")))
+                        .collect(),
+                    None,
+                )
+            })
+            .collect();
+        let child = make_element("", "child", Pattern::Empty(None));
+        arms.push(child);
+        let body = Pattern::Interleave(arms, None);
+        let root = make_element("", "root", body);
+
+        let (elements, ptr_to_label) = enumerate_elements(&root);
+        let nfas = build_content_nfas(&root, &elements, &ptr_to_label);
+        let root_nfa = &nfas[0];
+        assert!(
+            root_nfa.num_states <= 4,
+            "root content NFA has {} states",
+            root_nfa.num_states
+        );
+        assert!(root_nfa.accepts(&[LabelId(1)]));
+        assert!(!root_nfa.accepts(&[]));
+    }
+
+    #[test]
+    fn label_free_unsatisfiable_collapses_to_dead() {
+        // group { attribute a { text }?, notAllowed } accepts nothing
+        let pattern = Pattern::Group(vec![optional_attr("a"), Pattern::NotAllowed(None)], None);
+        let nfa = pattern_to_nfa(&pattern, &HashMap::new(), &mut HashSet::new());
+        assert_eq!(nfa.num_states, 1);
+        assert!(nfa.is_empty());
     }
 }

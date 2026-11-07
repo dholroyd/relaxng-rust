@@ -6,6 +6,38 @@ use lazy_static::lazy_static;
 use std::fmt;
 use std::str::FromStr;
 
+/// XSD 1.0 anyURI lexical check: the value must be a valid URI reference
+/// once the characters that XLink 1.0 §5.4 says to escape (controls, space,
+/// `<>"{}|\\^\``, DEL and non-ASCII) have been %-escaped. This is what Jing
+/// does. Other URI syntax, such as `%`, `#` and `:`, still has to be valid.
+fn is_valid_any_uri(value: &str) -> bool {
+    use std::borrow::Cow;
+    use std::fmt::Write;
+    fn must_escape(c: char) -> bool {
+        matches!(
+            c,
+            '\0'..=' ' | '<' | '>' | '"' | '{' | '}' | '|' | '\\' | '^' | '`'
+        ) || c >= '\u{7f}'
+    }
+    let escaped = if value.chars().any(must_escape) {
+        let mut out = String::with_capacity(value.len() * 3);
+        for c in value.chars() {
+            if must_escape(c) {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    let _ = write!(out, "%{b:02X}");
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(value)
+    };
+    uriparse::URIReference::try_from(escaped.as_ref()).is_ok()
+}
+
 pub(crate) const NAMESPACE_URI: &str = "http://www.w3.org/2001/XMLSchema-datatypes";
 
 /// Wrapper for finite floats that implements Eq and Hash.
@@ -365,10 +397,7 @@ impl super::Datatype for XsdDatatypes {
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::AnyURI(str_facets) => {
-                // XSD 1.0 anyURI only requires a valid URI reference after
-                // XLink-style %-escaping, so any finite string is lexically
-                // valid; Jing accepts accordingly.
-                str_facets.is_valid(value)
+                is_valid_any_uri(value) && str_facets.is_valid(value)
             }
             XsdDatatypes::Language(str_facets) => {
                 LANG_RE.is_match(value) && str_facets.is_valid(value)
@@ -2421,10 +2450,25 @@ mod test {
         let ctx = Context::new(file);
         let c = Compiler;
         let dt = c.any_uri(&ctx, &[]).unwrap();
-        for value in ["https://example.com/x", "a name with spaces", "100%"] {
+        // Characters that XLink escaping makes valid: spaces, non-ASCII etc.
+        for value in [
+            "https://example.com/x",
+            "a name with spaces",
+            "\u{fc}n\u{ef}code",
+            "<x>",
+            "a|b",
+            "",
+        ] {
             assert!(
                 crate::model::datatype::Datatype::is_valid(&dt, value),
                 "anyURI must accept {value:?}"
+            );
+        }
+        // Still invalid after escaping (Jing rejects these too)
+        for value in ["100%", "%zz", "a#b#c", "1abc:foo", ":foo", "http://["] {
+            assert!(
+                !crate::model::datatype::Datatype::is_valid(&dt, value),
+                "anyURI must reject {value:?}"
             );
         }
     }

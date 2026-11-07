@@ -1999,6 +1999,22 @@ mod tests {
         );
     }
 
+    // A child `e` can match either of two places in its parent, followed by different things,
+    // and nothing after it decides which until the parent's following sibling.  Each open `e`
+    // therefore has two possible continuations, which double at every level unless `choice()`
+    // merges them; without that, the pattern table filled at depth 14.
+    const AMBIGUOUS_RECURSION_SCHEMA: &str = "
+        start = e
+        e = element e { (e, element a { empty }?) | (e, element b { empty }?) | empty }
+    ";
+
+    #[test]
+    fn ambiguous_recursion_does_not_multiply_states() {
+        let depth = super::infoset::MAX_ELEMENT_DEPTH;
+        let doc = nested(depth);
+        assert_matches!(validate_doc(AMBIGUOUS_RECURSION_SCHEMA, &doc), Ok(()));
+    }
+
     #[test]
     fn attribute_value_at_limit_is_allowed() {
         let value = "x".repeat(super::infoset::MAX_ATTRIBUTE_VALUE);

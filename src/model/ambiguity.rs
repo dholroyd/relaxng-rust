@@ -7,6 +7,32 @@
 use crate::model::restrictions;
 use crate::model::{NameClass, Pattern};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
+
+/// The ambiguity check was abandoned because an automaton built from the grammar
+/// would have more states than a `StateId` can number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateSpaceOverflow;
+
+impl fmt::Display for StateSpaceOverflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "content-model automaton would exceed {} states",
+            StateId::MAX
+        )
+    }
+}
+
+impl std::error::Error for StateSpaceOverflow {}
+
+fn add_states(a: StateId, b: StateId) -> Result<StateId, StateSpaceOverflow> {
+    a.checked_add(b).ok_or(StateSpaceOverflow)
+}
+
+fn mul_states(a: StateId, b: StateId) -> Result<StateId, StateSpaceOverflow> {
+    a.checked_mul(b).ok_or(StateSpaceOverflow)
+}
 
 /// Unique identifier for an Element pattern in the grammar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -56,7 +82,9 @@ impl Nfa {
 
     /// Sequential composition: accepts sequences `ab` where `a` is accepted by `self`
     /// and `b` is accepted by `other`.
-    fn concatenate(mut self, other: Nfa) -> Nfa {
+    fn concatenate(mut self, other: Nfa) -> Result<Nfa, StateSpaceOverflow> {
+        // Checked up front; every renumbered state below is less than this total.
+        let num_states = add_states(self.num_states, other.num_states)?;
         let offset = self.num_states;
         // Add other's states (renumbered)
         for trans in &other.transitions {
@@ -73,7 +101,7 @@ impl Nfa {
                 self.transitions[acc as usize].push((None, offset));
             }
         }
-        self.num_states += other.num_states;
+        self.num_states = num_states;
         // Accept states are now only other's accept states
         let mut new_accept = vec![false; self.num_states as usize];
         for (s, &is_acc) in other.accept.iter().enumerate() {
@@ -82,16 +110,22 @@ impl Nfa {
             }
         }
         self.accept = new_accept;
-        self
+        Ok(self)
     }
 
     /// Choice: accepts any sequence accepted by any of the given NFAs.
-    fn alternate(nfas: Vec<Nfa>) -> Nfa {
+    fn alternate(nfas: Vec<Nfa>) -> Result<Nfa, StateSpaceOverflow> {
         if nfas.is_empty() {
-            return Nfa::new_dead();
+            return Ok(Nfa::new_dead());
         }
         if nfas.len() == 1 {
-            return nfas.into_iter().next().unwrap();
+            return Ok(nfas.into_iter().next().unwrap());
+        }
+        // Checked up front (new start state plus every sub-NFA); the running
+        // offsets below never exceed this total.
+        let mut total: StateId = 1;
+        for nfa in &nfas {
+            total = add_states(total, nfa.num_states)?;
         }
         // New start state (state 0), epsilon to each sub-NFA's start
         let mut result = Nfa {
@@ -122,7 +156,8 @@ impl Nfa {
             }
             result.num_states += nfa.num_states;
         }
-        result
+        debug_assert_eq!(result.num_states, total);
+        Ok(result)
     }
 
     /// Kleene plus: one or more repetitions.
@@ -157,10 +192,11 @@ impl Nfa {
 
     /// Shuffle product (for interleave): accepts all interleavings of sequences
     /// from `self` and `other`.
-    fn shuffle(self, other: &Nfa) -> Nfa {
+    fn shuffle(self, other: &Nfa) -> Result<Nfa, StateSpaceOverflow> {
         // States are (state_in_self, state_in_other) pairs.
-        // We map pair (a, b) -> a * other.num_states + b
-        let total_states = self.num_states * other.num_states;
+        // We map pair (a, b) -> a * other.num_states + b, which is less than
+        // total_states for a < self.num_states and b < other.num_states.
+        let total_states = mul_states(self.num_states, other.num_states)?;
         let pair_to_id = |a: StateId, b: StateId| -> StateId { a * other.num_states + b };
 
         let mut transitions = vec![vec![]; total_states as usize];
@@ -187,11 +223,11 @@ impl Nfa {
             }
         }
 
-        Nfa {
+        Ok(Nfa {
             num_states: total_states,
             transitions,
             accept,
-        }
+        })
     }
 
     /// If no transition carries a label, the language is either `{ε}` or empty, so
@@ -391,16 +427,16 @@ fn pattern_to_nfa(
     pattern: &Pattern,
     ptr_to_label: &HashMap<usize, LabelId>,
     seen_refs: &mut HashSet<usize>,
-) -> Nfa {
-    pattern_to_nfa_inner(pattern, ptr_to_label, seen_refs).collapse_if_label_free()
+) -> Result<Nfa, StateSpaceOverflow> {
+    Ok(pattern_to_nfa_inner(pattern, ptr_to_label, seen_refs)?.collapse_if_label_free())
 }
 
 fn pattern_to_nfa_inner(
     pattern: &Pattern,
     ptr_to_label: &HashMap<usize, LabelId>,
     seen_refs: &mut HashSet<usize>,
-) -> Nfa {
-    match pattern {
+) -> Result<Nfa, StateSpaceOverflow> {
+    let nfa = match pattern {
         Pattern::Element(_, _, _, _) => {
             let ptr = pattern as *const Pattern as usize;
             if let Some(&label) = ptr_to_label.get(&ptr) {
@@ -411,16 +447,16 @@ fn pattern_to_nfa_inner(
             }
         }
         Pattern::Choice(children, _) => {
-            let nfas: Vec<Nfa> = children
+            let nfas = children
                 .iter()
                 .map(|c| pattern_to_nfa(c, ptr_to_label, seen_refs))
-                .collect();
-            Nfa::alternate(nfas)
+                .collect::<Result<Vec<Nfa>, _>>()?;
+            Nfa::alternate(nfas)?
         }
         Pattern::Group(children, _) => {
             let mut result = Nfa::new_empty();
             for child in children {
-                result = result.concatenate(pattern_to_nfa(child, ptr_to_label, seen_refs));
+                result = result.concatenate(pattern_to_nfa(child, ptr_to_label, seen_refs)?)?;
             }
             result
         }
@@ -430,10 +466,10 @@ fn pattern_to_nfa_inner(
             match first {
                 None => Nfa::new_empty(),
                 Some(first) => {
-                    let mut result = pattern_to_nfa(first, ptr_to_label, seen_refs);
+                    let mut result = pattern_to_nfa(first, ptr_to_label, seen_refs)?;
                     for child in iter {
-                        let child_nfa = pattern_to_nfa(child, ptr_to_label, seen_refs);
-                        result = result.shuffle(&child_nfa);
+                        let child_nfa = pattern_to_nfa(child, ptr_to_label, seen_refs)?;
+                        result = result.shuffle(&child_nfa)?;
                     }
                     result
                 }
@@ -442,29 +478,29 @@ fn pattern_to_nfa_inner(
         Pattern::Mixed(body, _) => {
             // Mixed = interleave(text, body). Text contributes no element children,
             // so the NFA is just the body's NFA.
-            pattern_to_nfa(body, ptr_to_label, seen_refs)
+            pattern_to_nfa(body, ptr_to_label, seen_refs)?
         }
-        Pattern::OneOrMore(body, _) => pattern_to_nfa(body, ptr_to_label, seen_refs).one_or_more(),
+        Pattern::OneOrMore(body, _) => pattern_to_nfa(body, ptr_to_label, seen_refs)?.one_or_more(),
         Pattern::ZeroOrMore(body, _) => {
-            pattern_to_nfa(body, ptr_to_label, seen_refs).zero_or_more()
+            pattern_to_nfa(body, ptr_to_label, seen_refs)?.zero_or_more()
         }
-        Pattern::Optional(body, _) => pattern_to_nfa(body, ptr_to_label, seen_refs).optional(),
+        Pattern::Optional(body, _) => pattern_to_nfa(body, ptr_to_label, seen_refs)?.optional(),
         Pattern::Ref(_, _, pat_ref) => {
             let ptr = pat_ref.0.as_ptr() as usize;
             if !seen_refs.insert(ptr) {
                 // Cycle — RELAX NG spec requires recursion through Element,
                 // so this shouldn't happen in valid schemas. Return dead NFA.
-                return Nfa::new_dead();
+                return Ok(Nfa::new_dead());
             }
             let result = {
                 let borrowed = pat_ref.0.borrow();
                 match borrowed.as_ref() {
                     Some(rule) => pattern_to_nfa(rule.pattern(), ptr_to_label, seen_refs),
-                    None => Nfa::new_dead(),
+                    None => Ok(Nfa::new_dead()),
                 }
             };
             seen_refs.remove(&ptr);
-            result
+            result?
         }
         Pattern::Attribute(_, _, _, _) => {
             // Attributes don't contribute child elements
@@ -476,7 +512,8 @@ fn pattern_to_nfa_inner(
         Pattern::NotAllowed(_) => Nfa::new_dead(),
         Pattern::DatatypeValue { .. } => Nfa::new_empty(),
         Pattern::DatatypeName { .. } => Nfa::new_empty(),
-    }
+    };
+    Ok(nfa)
 }
 
 // ---------------------------------------------------------------------------
@@ -531,13 +568,13 @@ fn dtla(
     elements: &[ElementInfo],
     nfas: &[Nfa],
     score: &ScoreMatrix,
-) -> DtlaResult {
+) -> Result<DtlaResult, StateSpaceOverflow> {
     let e1 = &elements[l1.0 as usize];
     let e2 = &elements[l2.0 as usize];
 
     // Different element names can never be confused
     if !restrictions::name_class_overlaps(&e1.name_class, &e2.name_class) {
-        return DtlaResult::Unambiguous;
+        return Ok(DtlaResult::Unambiguous);
     }
 
     let nfa1 = &nfas[l1.0 as usize];
@@ -546,22 +583,22 @@ fn dtla(
     // Check M*: alphabet restricted to pairs where a==b or score(a,b)==Ambiguous
     let m_star_nonempty = product_nonempty(nfa1, nfa2, |a, b| {
         a == b || score.get(a, b) == Some(Score::Ambiguous)
-    });
+    })?;
 
     if m_star_nonempty {
-        return DtlaResult::Ambiguous;
+        return Ok(DtlaResult::Ambiguous);
     }
 
     // Check M+: alphabet includes undecided pairs too
     let m_plus_nonempty = product_nonempty(nfa1, nfa2, |a, b| {
         a == b || score.get(a, b) != Some(Score::Unambiguous)
-    });
+    })?;
 
     if !m_plus_nonempty {
-        return DtlaResult::Unambiguous;
+        return Ok(DtlaResult::Unambiguous);
     }
 
-    DtlaResult::Undecidable
+    Ok(DtlaResult::Undecidable)
 }
 
 /// Compute epsilon closure of a single NFA state, returned as a sorted Vec.
@@ -598,8 +635,15 @@ fn non_eps_transitions(nfa: &Nfa) -> Vec<Vec<(LabelId, StateId)>> {
 
 /// Lazy BFS to check if the product automaton of two NFAs is non-empty.
 /// `allow` determines which symbol pairs (a, b) are valid transitions.
-fn product_nonempty(nfa1: &Nfa, nfa2: &Nfa, allow: impl Fn(LabelId, LabelId) -> bool) -> bool {
+fn product_nonempty(
+    nfa1: &Nfa,
+    nfa2: &Nfa,
+    allow: impl Fn(LabelId, LabelId) -> bool,
+) -> Result<bool, StateSpaceOverflow> {
     let n2 = nfa2.num_states;
+    // Checked before any other work; every flat index s1 * n2 + s2 below is less
+    // than this.
+    let product_size = mul_states(nfa1.num_states, n2)?;
 
     // Precompute epsilon closures for all states
     let eps1: Vec<Vec<StateId>> = (0..nfa1.num_states).map(|s| eps_closure(nfa1, s)).collect();
@@ -609,7 +653,7 @@ fn product_nonempty(nfa1: &Nfa, nfa2: &Nfa, allow: impl Fn(LabelId, LabelId) -> 
     let trans2 = non_eps_transitions(nfa2);
 
     // Flat visited array indexed by s1 * n2 + s2
-    let mut visited = vec![false; (nfa1.num_states * n2) as usize];
+    let mut visited = vec![false; product_size as usize];
     let mut queue: VecDeque<(StateId, StateId)> = VecDeque::new();
 
     // Initialize with all pairs in eps_closure(start1) x eps_closure(start2)
@@ -619,7 +663,7 @@ fn product_nonempty(nfa1: &Nfa, nfa2: &Nfa, allow: impl Fn(LabelId, LabelId) -> 
             if !visited[idx] {
                 visited[idx] = true;
                 if nfa1.accept[s1 as usize] && nfa2.accept[s2 as usize] {
-                    return true;
+                    return Ok(true);
                 }
                 queue.push_back((s1, s2));
             }
@@ -636,7 +680,7 @@ fn product_nonempty(nfa1: &Nfa, nfa2: &Nfa, allow: impl Fn(LabelId, LabelId) -> 
                             if !visited[idx] {
                                 visited[idx] = true;
                                 if nfa1.accept[t1 as usize] && nfa2.accept[t2 as usize] {
-                                    return true;
+                                    return Ok(true);
                                 }
                                 queue.push_back((t1, t2));
                             }
@@ -647,7 +691,7 @@ fn product_nonempty(nfa1: &Nfa, nfa2: &Nfa, allow: impl Fn(LabelId, LabelId) -> 
         }
     }
 
-    false
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -662,12 +706,12 @@ fn is_catalyst(
     elements: &[ElementInfo],
     nfas: &[Nfa],
     score: &ScoreMatrix,
-) -> bool {
+) -> Result<bool, StateSpaceOverflow> {
     let e1 = &elements[l1.0 as usize];
     let e2 = &elements[l2.0 as usize];
 
     if !restrictions::name_class_overlaps(&e1.name_class, &e2.name_class) {
-        return false;
+        return Ok(false);
     }
 
     let nfa1 = &nfas[l1.0 as usize];
@@ -680,9 +724,12 @@ fn is_catalyst(
 
 /// Build the product automaton, trim right-unreachable states, and check
 /// whether any transition uses a pair (a, b) where a != b and score(a,b) == Ambiguous.
-fn catalyst_check(nfa1: &Nfa, nfa2: &Nfa, score: &ScoreMatrix) -> bool {
+fn catalyst_check(nfa1: &Nfa, nfa2: &Nfa, score: &ScoreMatrix) -> Result<bool, StateSpaceOverflow> {
     let n2 = nfa2.num_states;
-    let product_size = (nfa1.num_states as usize) * (n2 as usize);
+    // Checked before any other work; every flat index s1 * n2 + s2 below is less
+    // than this, and so is every compact index (one per visited product state).
+    // Compact indices therefore never reach the u32::MAX "unassigned" sentinel.
+    let product_size = mul_states(nfa1.num_states, n2)? as usize;
 
     let eps1: Vec<Vec<StateId>> = (0..nfa1.num_states).map(|s| eps_closure(nfa1, s)).collect();
     let eps2: Vec<Vec<StateId>> = (0..nfa2.num_states).map(|s| eps_closure(nfa2, s)).collect();
@@ -761,7 +808,9 @@ fn catalyst_check(nfa1: &Nfa, nfa2: &Nfa, score: &ScoreMatrix) -> bool {
 
     for (edge_idx, &(from_idx, _, _, to_idx)) in edges.iter().enumerate() {
         reverse_adj[to_idx as usize].push(from_idx);
-        forward_edges_by_source[from_idx as usize].push(edge_idx as u32);
+        // Edges are not bounded by product_size, so this conversion is checked.
+        let edge_idx = u32::try_from(edge_idx).map_err(|_| StateSpaceOverflow)?;
+        forward_edges_by_source[from_idx as usize].push(edge_idx);
     }
 
     let mut right_reachable = vec![false; n];
@@ -793,12 +842,12 @@ fn catalyst_check(nfa1: &Nfa, nfa2: &Nfa, score: &ScoreMatrix) -> bool {
                 && label_a != label_b
                 && score.get(label_a, label_b) == Some(Score::Ambiguous)
             {
-                return true;
+                return Ok(true);
             }
         }
     }
 
-    false
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -826,17 +875,20 @@ pub enum AmbiguityKind {
 ///
 /// Returns a list of ambiguity warnings. An empty list means the grammar
 /// is unambiguous (every valid document has exactly one interpretation).
-pub fn check_ambiguity(start: &Pattern) -> Vec<AmbiguityWarning> {
+///
+/// Returns `Err` if the grammar's content models are too large for the check to
+/// represent, in which case nothing is known about the grammar's ambiguity.
+pub fn check_ambiguity(start: &Pattern) -> Result<Vec<AmbiguityWarning>, StateSpaceOverflow> {
     // Phase 1: Enumerate all Element patterns
     let (elements, ptr_to_label) = enumerate_elements(start);
     let n = elements.len();
 
     if n == 0 {
-        return vec![];
+        return Ok(vec![]);
     }
 
     // Phase 2: Build NFAs for each element's content model
-    let nfas = build_content_nfas(start, &elements, &ptr_to_label);
+    let nfas = build_content_nfas(start, &elements, &ptr_to_label)?;
 
     // Phase 3: Initialize score matrix
     let mut score = ScoreMatrix::new(n);
@@ -863,7 +915,7 @@ pub fn check_ambiguity(start: &Pattern) -> Vec<AmbiguityWarning> {
                 if score.get(li, lj).is_some() {
                     continue; // Already determined
                 }
-                match dtla(li, lj, &elements, &nfas, &score) {
+                match dtla(li, lj, &elements, &nfas, &score)? {
                     DtlaResult::Ambiguous => {
                         score.set(li, lj, Score::Ambiguous);
                         changed = true;
@@ -905,31 +957,36 @@ pub fn check_ambiguity(start: &Pattern) -> Vec<AmbiguityWarning> {
     }
 
     if ambiguous_pairs.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
 
     // A grammar is only truly ambiguous if a catalyst exists — an element
     // whose content model can exercise an ambiguous pair.
-    let has_catalyst = (0..n).any(|i| {
-        (i..n).any(|j| {
+    let mut has_catalyst = false;
+    'search: for i in 0..n {
+        for j in i..n {
             let li = LabelId(i as u32);
             let lj = LabelId(j as u32);
-            (i == j
+            if (i == j
                 || restrictions::name_class_overlaps(
                     &elements[i].name_class,
                     &elements[j].name_class,
                 ))
-                && is_catalyst(li, lj, &elements, &nfas, &score)
-        })
-    });
-
-    if !has_catalyst {
-        return vec![];
+                && is_catalyst(li, lj, &elements, &nfas, &score)?
+            {
+                has_catalyst = true;
+                break 'search;
+            }
+        }
     }
 
-    vec![AmbiguityWarning {
+    if !has_catalyst {
+        return Ok(vec![]);
+    }
+
+    Ok(vec![AmbiguityWarning {
         kind: AmbiguityKind::AmbiguousGrammar { ambiguous_pairs },
-    }]
+    }])
 }
 
 /// Build NFA content models for each element by re-walking the pattern tree.
@@ -937,15 +994,16 @@ fn build_content_nfas(
     start: &Pattern,
     elements: &[ElementInfo],
     ptr_to_label: &HashMap<usize, LabelId>,
-) -> Vec<Nfa> {
+) -> Result<Vec<Nfa>, StateSpaceOverflow> {
     let mut nfas: Vec<Option<Nfa>> = (0..elements.len()).map(|_| None).collect();
     let mut seen_refs = HashSet::new();
-    build_nfas_walk(start, ptr_to_label, &mut nfas, &mut seen_refs);
+    build_nfas_walk(start, ptr_to_label, &mut nfas, &mut seen_refs)?;
 
     // Fill any missing NFAs with empty (shouldn't happen)
-    nfas.into_iter()
+    Ok(nfas
+        .into_iter()
         .map(|opt| opt.unwrap_or_else(Nfa::new_empty))
-        .collect()
+        .collect())
 }
 
 fn build_nfas_walk(
@@ -953,7 +1011,7 @@ fn build_nfas_walk(
     ptr_to_label: &HashMap<usize, LabelId>,
     nfas: &mut [Option<Nfa>],
     seen_refs: &mut HashSet<usize>,
-) {
+) -> Result<(), StateSpaceOverflow> {
     match pattern {
         Pattern::Element(_, body, _, _) => {
             let ptr = pattern as *const Pattern as usize;
@@ -961,9 +1019,9 @@ fn build_nfas_walk(
                 let idx = label.0 as usize;
                 if nfas[idx].is_none() {
                     let mut nfa_seen = HashSet::new();
-                    nfas[idx] = Some(pattern_to_nfa(body, ptr_to_label, &mut nfa_seen));
+                    nfas[idx] = Some(pattern_to_nfa(body, ptr_to_label, &mut nfa_seen)?);
                     // Continue into body to build NFAs for nested elements
-                    build_nfas_walk(body, ptr_to_label, nfas, seen_refs);
+                    build_nfas_walk(body, ptr_to_label, nfas, seen_refs)?;
                 }
             }
         }
@@ -971,7 +1029,7 @@ fn build_nfas_walk(
         | Pattern::Interleave(children, _)
         | Pattern::Group(children, _) => {
             for child in children {
-                build_nfas_walk(child, ptr_to_label, nfas, seen_refs);
+                build_nfas_walk(child, ptr_to_label, nfas, seen_refs)?;
             }
         }
         Pattern::OneOrMore(body, _)
@@ -979,23 +1037,23 @@ fn build_nfas_walk(
         | Pattern::Optional(body, _)
         | Pattern::Mixed(body, _)
         | Pattern::List(body, _) => {
-            build_nfas_walk(body, ptr_to_label, nfas, seen_refs);
+            build_nfas_walk(body, ptr_to_label, nfas, seen_refs)?;
         }
         Pattern::Attribute(_, body, _, _) => {
-            build_nfas_walk(body, ptr_to_label, nfas, seen_refs);
+            build_nfas_walk(body, ptr_to_label, nfas, seen_refs)?;
         }
         Pattern::Ref(_, _, pat_ref) => {
             let ptr = pat_ref.0.as_ptr() as usize;
             if seen_refs.insert(ptr) {
                 let borrowed = pat_ref.0.borrow();
                 if let Some(rule) = borrowed.as_ref() {
-                    build_nfas_walk(rule.pattern(), ptr_to_label, nfas, seen_refs);
+                    build_nfas_walk(rule.pattern(), ptr_to_label, nfas, seen_refs)?;
                 }
             }
         }
         Pattern::DatatypeName { except, .. } => {
             if let Some(e) = except {
-                build_nfas_walk(e, ptr_to_label, nfas, seen_refs);
+                build_nfas_walk(e, ptr_to_label, nfas, seen_refs)?;
             }
         }
         Pattern::Empty(_)
@@ -1003,6 +1061,7 @@ fn build_nfas_walk(
         | Pattern::NotAllowed(_)
         | Pattern::DatatypeValue { .. } => {}
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,7 +1103,7 @@ mod tests {
     fn nfa_concatenation() {
         let a = Nfa::new_single(LabelId(0));
         let b = Nfa::new_single(LabelId(1));
-        let ab = a.concatenate(b);
+        let ab = a.concatenate(b).unwrap();
         assert!(!ab.accepts(&[]));
         assert!(!ab.accepts(&[LabelId(0)]));
         assert!(!ab.accepts(&[LabelId(1)]));
@@ -1056,7 +1115,7 @@ mod tests {
     fn nfa_alternation() {
         let a = Nfa::new_single(LabelId(0));
         let b = Nfa::new_single(LabelId(1));
-        let alt = Nfa::alternate(vec![a, b]);
+        let alt = Nfa::alternate(vec![a, b]).unwrap();
         assert!(!alt.accepts(&[]));
         assert!(alt.accepts(&[LabelId(0)]));
         assert!(alt.accepts(&[LabelId(1)]));
@@ -1097,7 +1156,7 @@ mod tests {
     fn nfa_shuffle_two_symbols() {
         let a = Nfa::new_single(LabelId(0));
         let b = Nfa::new_single(LabelId(1));
-        let shuf = a.shuffle(&b);
+        let shuf = a.shuffle(&b).unwrap();
         assert!(!shuf.accepts(&[]));
         assert!(!shuf.accepts(&[LabelId(0)]));
         assert!(!shuf.accepts(&[LabelId(1)]));
@@ -1109,9 +1168,11 @@ mod tests {
     #[test]
     fn nfa_shuffle_sequence_and_single() {
         // shuffle(a.b, c) should accept: a.b.c, a.c.b, c.a.b
-        let ab = Nfa::new_single(LabelId(0)).concatenate(Nfa::new_single(LabelId(1)));
+        let ab = Nfa::new_single(LabelId(0))
+            .concatenate(Nfa::new_single(LabelId(1)))
+            .unwrap();
         let c = Nfa::new_single(LabelId(2));
-        let shuf = ab.shuffle(&c);
+        let shuf = ab.shuffle(&c).unwrap();
         assert!(shuf.accepts(&[LabelId(0), LabelId(1), LabelId(2)]));
         assert!(shuf.accepts(&[LabelId(0), LabelId(2), LabelId(1)]));
         assert!(shuf.accepts(&[LabelId(2), LabelId(0), LabelId(1)]));
@@ -1126,19 +1187,25 @@ mod tests {
         assert!(!Nfa::new_single(LabelId(0)).is_empty());
 
         // Concatenate with dead = empty
-        let dead_concat = Nfa::new_single(LabelId(0)).concatenate(Nfa::new_dead());
+        let dead_concat = Nfa::new_single(LabelId(0))
+            .concatenate(Nfa::new_dead())
+            .unwrap();
         assert!(dead_concat.is_empty());
     }
 
     #[test]
     fn nfa_concatenation_with_empty() {
         // empty.a = a
-        let ea = Nfa::new_empty().concatenate(Nfa::new_single(LabelId(0)));
+        let ea = Nfa::new_empty()
+            .concatenate(Nfa::new_single(LabelId(0)))
+            .unwrap();
         assert!(ea.accepts(&[LabelId(0)]));
         assert!(!ea.accepts(&[]));
 
         // a.empty = a
-        let ae = Nfa::new_single(LabelId(0)).concatenate(Nfa::new_empty());
+        let ae = Nfa::new_single(LabelId(0))
+            .concatenate(Nfa::new_empty())
+            .unwrap();
         assert!(ae.accepts(&[LabelId(0)]));
         assert!(!ae.accepts(&[]));
     }
@@ -1149,7 +1216,7 @@ mod tests {
     fn product_identical_nfas_nonempty() {
         // Two identical NFAs accepting [a] — product with allow(a,a) should be non-empty
         let nfa = Nfa::new_single(LabelId(0));
-        assert!(product_nonempty(&nfa, &nfa, |a, b| a == b));
+        assert!(product_nonempty(&nfa, &nfa, |a, b| a == b).unwrap());
     }
 
     #[test]
@@ -1157,7 +1224,7 @@ mod tests {
         // NFA1 accepts [a], NFA2 accepts [b] — product with allow(x,y) only if x==y is empty
         let nfa1 = Nfa::new_single(LabelId(0));
         let nfa2 = Nfa::new_single(LabelId(1));
-        assert!(!product_nonempty(&nfa1, &nfa2, |a, b| a == b));
+        assert!(!product_nonempty(&nfa1, &nfa2, |a, b| a == b).unwrap());
     }
 
     #[test]
@@ -1166,12 +1233,16 @@ mod tests {
         // Product with allow(x,y) if x==y should be non-empty (both start with a)
         // Wait, actually the product requires both to accept the SAME sequence length.
         // [a,b] vs [a,c]: pair (a,a) is ok, then (b,c) — only allowed if allow(b,c).
-        let nfa1 = Nfa::new_single(LabelId(0)).concatenate(Nfa::new_single(LabelId(1)));
-        let nfa2 = Nfa::new_single(LabelId(0)).concatenate(Nfa::new_single(LabelId(2)));
+        let nfa1 = Nfa::new_single(LabelId(0))
+            .concatenate(Nfa::new_single(LabelId(1)))
+            .unwrap();
+        let nfa2 = Nfa::new_single(LabelId(0))
+            .concatenate(Nfa::new_single(LabelId(2)))
+            .unwrap();
         // Only allow equal pairs
-        assert!(!product_nonempty(&nfa1, &nfa2, |a, b| a == b));
+        assert!(!product_nonempty(&nfa1, &nfa2, |a, b| a == b).unwrap());
         // Allow all pairs
-        assert!(product_nonempty(&nfa1, &nfa2, |_, _| true));
+        assert!(product_nonempty(&nfa1, &nfa2, |_, _| true).unwrap());
     }
 
     // -- Integration test: simple ambiguity detection --
@@ -1202,7 +1273,7 @@ mod tests {
                 None,
             ),
         );
-        let warnings = check_ambiguity(&root);
+        let warnings = check_ambiguity(&root).unwrap();
         assert!(
             warnings.is_empty(),
             "Different element names should not be ambiguous"
@@ -1225,7 +1296,7 @@ mod tests {
                 None,
             ),
         );
-        let warnings = check_ambiguity(&root);
+        let warnings = check_ambiguity(&root).unwrap();
         assert!(
             !warnings.is_empty(),
             "Same name, same content should be ambiguous"
@@ -1248,7 +1319,7 @@ mod tests {
                 None,
             ),
         );
-        let warnings = check_ambiguity(&root);
+        let warnings = check_ambiguity(&root).unwrap();
         assert!(
             warnings.is_empty(),
             "Same name but disjoint content should not be ambiguous"
@@ -1288,7 +1359,7 @@ mod tests {
                 None,
             ),
         );
-        let warnings = check_ambiguity(&root);
+        let warnings = check_ambiguity(&root).unwrap();
         assert!(
             !warnings.is_empty(),
             "Overlapping content models should be ambiguous"
@@ -1331,7 +1402,7 @@ mod tests {
         let root = make_element("", "root", body);
 
         let (elements, ptr_to_label) = enumerate_elements(&root);
-        let nfas = build_content_nfas(&root, &elements, &ptr_to_label);
+        let nfas = build_content_nfas(&root, &elements, &ptr_to_label).unwrap();
         let root_nfa = &nfas[0];
         assert!(
             root_nfa.num_states <= 4,
@@ -1346,8 +1417,65 @@ mod tests {
     fn label_free_unsatisfiable_collapses_to_dead() {
         // group { attribute a { text }?, notAllowed } accepts nothing
         let pattern = Pattern::Group(vec![optional_attr("a"), Pattern::NotAllowed(None)], None);
-        let nfa = pattern_to_nfa(&pattern, &HashMap::new(), &mut HashSet::new());
+        let nfa = pattern_to_nfa(&pattern, &HashMap::new(), &mut HashSet::new()).unwrap();
         assert_eq!(nfa.num_states, 1);
         assert!(nfa.is_empty());
+    }
+
+    /// An NFA with `n` states and no transitions, cheap to build even when large.
+    fn wide_nfa(n: u32) -> Nfa {
+        Nfa {
+            num_states: n,
+            transitions: vec![vec![]; n as usize],
+            accept: vec![false; n as usize],
+        }
+    }
+
+    /// An NFA that claims `n` states without allocating them. Only valid for
+    /// operations that must reject it before touching its storage.
+    fn phantom_nfa(n: u32) -> Nfa {
+        Nfa {
+            num_states: n,
+            transitions: vec![],
+            accept: vec![],
+        }
+    }
+
+    #[test]
+    fn concatenate_overflow_is_an_error() {
+        let result = phantom_nfa(u32::MAX).concatenate(Nfa::new_single(LabelId(0)));
+        assert_eq!(result.unwrap_err(), StateSpaceOverflow);
+    }
+
+    #[test]
+    fn alternate_overflow_is_an_error() {
+        // The new start state plus u32::MAX states does not fit.
+        let result = Nfa::alternate(vec![phantom_nfa(u32::MAX), Nfa::new_empty()]);
+        assert_eq!(result.unwrap_err(), StateSpaceOverflow);
+    }
+
+    #[test]
+    fn shuffle_overflow_is_an_error() {
+        // 65536 * 65536 = 2^32, which wraps to 0 in unchecked u32 arithmetic.
+        let a = wide_nfa(1 << 16);
+        let b = wide_nfa(1 << 16);
+        assert_eq!(a.shuffle(&b).unwrap_err(), StateSpaceOverflow);
+    }
+
+    #[test]
+    fn product_overflow_is_an_error() {
+        // The product state space 2^32 must be rejected before it is allocated
+        // or indexed.
+        let a = wide_nfa(1 << 16);
+        let b = wide_nfa(1 << 16);
+        assert_eq!(
+            product_nonempty(&a, &b, |_, _| true).unwrap_err(),
+            StateSpaceOverflow
+        );
+        let score = ScoreMatrix::new(1);
+        assert_eq!(
+            catalyst_check(&a, &b, &score).unwrap_err(),
+            StateSpaceOverflow
+        );
     }
 }

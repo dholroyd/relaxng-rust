@@ -41,6 +41,10 @@ struct LabelId(u32);
 /// NFA state identifier.
 type StateId = u32;
 
+/// An epsilon-free NFA in pieces: per-state labelled transitions, and per-state
+/// acceptance. State 0 is the start state.
+type EpsilonFree = (Vec<Vec<(LabelId, StateId)>>, Vec<bool>);
+
 /// An NFA over a LabelId alphabet (with epsilon transitions).
 /// Start state is always state 0.
 #[derive(Debug, Clone)]
@@ -172,22 +176,34 @@ impl Nfa {
     }
 
     /// Kleene star: zero or more repetitions.
-    fn zero_or_more(mut self) -> Nfa {
-        // Epsilon from each accept state back to start
-        for acc in 0..self.num_states {
-            if self.accept[acc as usize] {
-                self.transitions[acc as usize].push((None, 0));
-            }
-        }
-        // Start state is also accepting
-        self.accept[0] = true;
-        self
+    fn zero_or_more(self) -> Result<Nfa, StateSpaceOverflow> {
+        self.one_or_more().optional()
     }
 
     /// Optional: zero or one occurrence.
-    fn optional(mut self) -> Nfa {
-        self.accept[0] = true;
-        self
+    ///
+    /// Making the start state accepting only adds the empty sequence when nothing
+    /// re-enters the start state except by an epsilon edge from an accepting state.
+    /// After `reduce()` merges states that need not hold, so a fresh start state
+    /// is added instead.
+    fn optional(mut self) -> Result<Nfa, StateSpaceOverflow> {
+        if self.accept[0] {
+            return Ok(self);
+        }
+        // Re-entering the start state is harmless only via an epsilon edge from an
+        // accepting state (as one_or_more() adds): whatever was read to get there is
+        // already accepted. Any other edge into it would gain new accepted words.
+        let start_reentered_unsafely = self.transitions.iter().enumerate().any(|(from, trans)| {
+            trans
+                .iter()
+                .any(|&(label, target)| target == 0 && (label.is_some() || !self.accept[from]))
+        });
+        if start_reentered_unsafely {
+            Nfa::alternate(vec![Nfa::new_empty(), self])
+        } else {
+            self.accept[0] = true;
+            Ok(self)
+        }
     }
 
     /// Shuffle product (for interleave): accepts all interleavings of sequences
@@ -230,27 +246,95 @@ impl Nfa {
         })
     }
 
-    /// If no transition carries a label, the language is either `{ε}` or empty, so
-    /// replace the NFA with the equivalent single-state NFA.
-    fn collapse_if_label_free(self) -> Nfa {
-        if self.num_states == 1 {
-            return self;
+    /// Return an NFA accepting the same language, usually with far fewer states.
+    ///
+    /// 1. Epsilon removal: each state takes on the labelled transitions and
+    ///    acceptance of its epsilon closure.
+    /// 2. Trimming: states unreachable from the start, or that cannot reach an
+    ///    accepting state, are dropped.
+    /// 3. Bisimulation: states with the same acceptance whose transitions lead,
+    ///    label for label, to equivalent states are merged (partition refinement).
+    ///
+    /// None of these steps can increase the state count. This matters most before
+    /// `shuffle()`, whose output size is the product of its operands' sizes.
+    fn reduce(self) -> Nfa {
+        let (trans, accept) = self.remove_epsilons();
+        let Some((trans, accept)) = trim(trans, accept) else {
+            return Nfa::new_dead();
+        };
+        let (block, num_blocks) = bisimulation_blocks(&trans, &accept);
+
+        let mut q_trans: Vec<Vec<(Option<LabelId>, StateId)>> = vec![vec![]; num_blocks];
+        let mut q_accept = vec![false; num_blocks];
+        for (s, s_trans) in trans.iter().enumerate() {
+            let b = block[s] as usize;
+            q_accept[b] = accept[s];
+            for &(label, target) in s_trans {
+                q_trans[b].push((Some(label), block[target as usize]));
+            }
         }
-        let has_label = self
-            .transitions
-            .iter()
-            .flatten()
-            .any(|(label, _)| label.is_some());
-        if has_label {
-            self
-        } else if self.is_empty() {
-            Nfa::new_dead()
-        } else {
-            Nfa::new_empty()
+        for t in &mut q_trans {
+            t.sort_unstable();
+            t.dedup();
+        }
+        Nfa {
+            // num_blocks <= original num_states, so it fits in a StateId
+            num_states: num_blocks as StateId,
+            transitions: q_trans,
+            accept: q_accept,
         }
     }
 
+    /// Epsilon-free transitions and acceptance for every state.
+    fn remove_epsilons(self) -> EpsilonFree {
+        let n = self.num_states as usize;
+        let has_eps = self.transitions.iter().flatten().any(|(l, _)| l.is_none());
+        if !has_eps {
+            let trans = self
+                .transitions
+                .into_iter()
+                .map(|t| {
+                    t.into_iter()
+                        .map(|(l, target)| (l.unwrap(), target))
+                        .collect()
+                })
+                .collect();
+            return (trans, self.accept);
+        }
+        let mut trans = Vec::with_capacity(n);
+        let mut accept = Vec::with_capacity(n);
+        // stamp[q] == s marks q as already in the closure of s
+        let mut stamp = vec![usize::MAX; n];
+        let mut stack = Vec::new();
+        for s in 0..n {
+            let mut out = Vec::new();
+            let mut acc = false;
+            stamp[s] = s;
+            stack.push(s);
+            while let Some(q) = stack.pop() {
+                acc |= self.accept[q];
+                for &(label, target) in &self.transitions[q] {
+                    match label {
+                        Some(l) => out.push((l, target)),
+                        None => {
+                            if stamp[target as usize] != s {
+                                stamp[target as usize] = s;
+                                stack.push(target as usize);
+                            }
+                        }
+                    }
+                }
+            }
+            out.sort_unstable();
+            out.dedup();
+            trans.push(out);
+            accept.push(acc);
+        }
+        (trans, accept)
+    }
+
     /// Returns true if the NFA accepts no strings (language is empty).
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         if !self.accept.iter().any(|&a| a) {
             return true;
@@ -314,6 +398,107 @@ impl Nfa {
         }
 
         current.iter().any(|s| self.accept[*s as usize])
+    }
+}
+
+/// Drop states that are unreachable from state 0 or cannot reach an accepting
+/// state, renumbering the rest (state 0 stays 0). Returns `None` when state 0
+/// itself cannot reach an accepting state, i.e. the language is empty.
+fn trim(trans: Vec<Vec<(LabelId, StateId)>>, accept: Vec<bool>) -> Option<EpsilonFree> {
+    let n = trans.len();
+    let mut forward = vec![false; n];
+    let mut stack = vec![0usize];
+    forward[0] = true;
+    while let Some(s) = stack.pop() {
+        for &(_, t) in &trans[s] {
+            if !forward[t as usize] {
+                forward[t as usize] = true;
+                stack.push(t as usize);
+            }
+        }
+    }
+    let mut reverse: Vec<Vec<usize>> = vec![vec![]; n];
+    for (s, s_trans) in trans.iter().enumerate() {
+        for &(_, t) in s_trans {
+            reverse[t as usize].push(s);
+        }
+    }
+    let mut backward = vec![false; n];
+    for s in 0..n {
+        if accept[s] {
+            backward[s] = true;
+            stack.push(s);
+        }
+    }
+    while let Some(s) = stack.pop() {
+        for &p in &reverse[s] {
+            if !backward[p] {
+                backward[p] = true;
+                stack.push(p);
+            }
+        }
+    }
+    if !backward[0] {
+        return None;
+    }
+    let mut new_id = vec![StateId::MAX; n];
+    let mut next: StateId = 0;
+    for s in 0..n {
+        if forward[s] && backward[s] {
+            new_id[s] = next;
+            next += 1;
+        }
+    }
+    let mut new_trans = Vec::with_capacity(next as usize);
+    let mut new_accept = Vec::with_capacity(next as usize);
+    for (s, s_trans) in trans.into_iter().enumerate() {
+        if new_id[s] == StateId::MAX {
+            continue;
+        }
+        new_trans.push(
+            s_trans
+                .into_iter()
+                .filter(|&(_, t)| new_id[t as usize] != StateId::MAX)
+                .map(|(l, t)| (l, new_id[t as usize]))
+                .collect(),
+        );
+        new_accept.push(accept[s]);
+    }
+    Some((new_trans, new_accept))
+}
+
+/// Partition states into bisimulation classes by iterated refinement.
+///
+/// Returns each state's block and the number of blocks. Blocks are numbered in
+/// order of their lowest state, so state 0 is always in block 0.
+fn bisimulation_blocks(
+    trans: &[Vec<(LabelId, StateId)>],
+    accept: &[bool],
+) -> (Vec<StateId>, usize) {
+    let n = trans.len();
+    let mut block: Vec<StateId> = accept.iter().map(|&a| a as StateId).collect();
+    let mut num_blocks = usize::MAX;
+    let mut sig: Vec<(LabelId, StateId)> = Vec::new();
+    loop {
+        // A state's signature is its current block plus the set of
+        // (label, target block) pairs; equal signatures stay together.
+        let mut ids: HashMap<(StateId, Vec<(LabelId, StateId)>), StateId> = HashMap::new();
+        let mut new_block = Vec::with_capacity(n);
+        for s in 0..n {
+            sig.clear();
+            sig.extend(trans[s].iter().map(|&(l, t)| (l, block[t as usize])));
+            sig.sort_unstable();
+            sig.dedup();
+            let next_id = ids.len() as StateId;
+            let id = *ids.entry((block[s], sig.clone())).or_insert(next_id);
+            new_block.push(id);
+        }
+        let count = ids.len();
+        block = new_block;
+        if count == num_blocks {
+            return (block, count);
+        }
+        num_blocks = count;
     }
 }
 
@@ -419,16 +604,17 @@ fn enumerate_walk(
 /// Convert a content model pattern into an NFA over the label alphabet.
 /// Element patterns become single transitions; we do NOT recurse into their bodies.
 ///
-/// Any sub-pattern whose NFA has no labelled transitions (attributes, text, data, and
-/// groups or interleaves of those) is collapsed to a single-state NFA. Without this,
-/// attribute-heavy interleaves produce shuffle products of epsilon-only states that
-/// can reach hundreds of thousands of states.
+/// Every sub-pattern's NFA is passed through `Nfa::reduce()`. Label-free
+/// sub-patterns (attributes, text, data, and groups or interleaves of those)
+/// collapse to a single state, and repetitions of elements lose the epsilon
+/// structure of their construction. Without this, shuffle products of the
+/// unreduced NFAs can reach hundreds of thousands of states.
 fn pattern_to_nfa(
     pattern: &Pattern,
     ptr_to_label: &HashMap<usize, LabelId>,
     seen_refs: &mut HashSet<usize>,
 ) -> Result<Nfa, StateSpaceOverflow> {
-    Ok(pattern_to_nfa_inner(pattern, ptr_to_label, seen_refs)?.collapse_if_label_free())
+    Ok(pattern_to_nfa_inner(pattern, ptr_to_label, seen_refs)?.reduce())
 }
 
 fn pattern_to_nfa_inner(
@@ -482,9 +668,9 @@ fn pattern_to_nfa_inner(
         }
         Pattern::OneOrMore(body, _) => pattern_to_nfa(body, ptr_to_label, seen_refs)?.one_or_more(),
         Pattern::ZeroOrMore(body, _) => {
-            pattern_to_nfa(body, ptr_to_label, seen_refs)?.zero_or_more()
+            pattern_to_nfa(body, ptr_to_label, seen_refs)?.zero_or_more()?
         }
-        Pattern::Optional(body, _) => pattern_to_nfa(body, ptr_to_label, seen_refs)?.optional(),
+        Pattern::Optional(body, _) => pattern_to_nfa(body, ptr_to_label, seen_refs)?.optional()?,
         Pattern::Ref(_, _, pat_ref) => {
             let ptr = pat_ref.0.as_ptr() as usize;
             if !seen_refs.insert(ptr) {
@@ -1136,7 +1322,7 @@ mod tests {
     #[test]
     fn nfa_zero_or_more() {
         let a = Nfa::new_single(LabelId(0));
-        let star = a.zero_or_more();
+        let star = a.zero_or_more().unwrap();
         assert!(star.accepts(&[]));
         assert!(star.accepts(&[LabelId(0)]));
         assert!(star.accepts(&[LabelId(0), LabelId(0)]));
@@ -1146,7 +1332,7 @@ mod tests {
     #[test]
     fn nfa_optional() {
         let a = Nfa::new_single(LabelId(0));
-        let opt = a.optional();
+        let opt = a.optional().unwrap();
         assert!(opt.accepts(&[]));
         assert!(opt.accepts(&[LabelId(0)]));
         assert!(!opt.accepts(&[LabelId(0), LabelId(0)]));
@@ -1477,5 +1663,141 @@ mod tests {
             catalyst_check(&a, &b, &score).unwrap_err(),
             StateSpaceOverflow
         );
+    }
+
+    // -- reduce() tests --
+
+    /// Every word over labels 0..alphabet up to length max_len.
+    fn all_words(alphabet: u32, max_len: usize) -> Vec<Vec<LabelId>> {
+        let mut words = vec![vec![]];
+        let mut frontier = vec![vec![]];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for w in &frontier {
+                for l in 0..alphabet {
+                    let mut w2: Vec<LabelId> = w.clone();
+                    w2.push(LabelId(l));
+                    next.push(w2);
+                }
+            }
+            words.extend(next.iter().cloned());
+            frontier = next;
+        }
+        words
+    }
+
+    fn assert_same_language(original: &Nfa, reduced: &Nfa) {
+        for w in all_words(3, 6) {
+            assert_eq!(
+                original.accepts(&w),
+                reduced.accepts(&w),
+                "reduce() changed acceptance of {w:?}"
+            );
+        }
+    }
+
+    fn sym(l: u32) -> Nfa {
+        Nfa::new_single(LabelId(l))
+    }
+
+    fn sample_nfas() -> Vec<Nfa> {
+        let ab = || sym(0).concatenate(sym(1)).unwrap();
+        vec![
+            Nfa::new_empty(),
+            Nfa::new_dead(),
+            sym(0).zero_or_more().unwrap(),
+            sym(0).one_or_more(),
+            ab().zero_or_more().unwrap(),
+            ab().one_or_more().optional().unwrap(),
+            Nfa::alternate(vec![ab(), sym(0).concatenate(sym(2)).unwrap()]).unwrap(),
+            sym(0)
+                .concatenate(sym(1).concatenate(sym(0)).unwrap().zero_or_more().unwrap())
+                .unwrap(),
+            sym(0)
+                .optional()
+                .unwrap()
+                .shuffle(&sym(1).zero_or_more().unwrap())
+                .unwrap(),
+            ab().shuffle(&sym(2).optional().unwrap()).unwrap(),
+            sym(0).concatenate(Nfa::new_dead()).unwrap(),
+            Nfa::alternate(vec![sym(0).concatenate(Nfa::new_dead()).unwrap(), sym(1)]).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn reduce_preserves_language() {
+        for nfa in sample_nfas() {
+            let reduced = nfa.clone().reduce();
+            assert!(reduced.num_states <= nfa.num_states.max(1));
+            assert_same_language(&nfa, &reduced);
+        }
+    }
+
+    #[test]
+    fn repetition_of_reduced_nfas_preserves_language() {
+        // Applying optional/zero_or_more/one_or_more/concatenate to reduced NFAs,
+        // whose start state may have been merged with a later state, must give
+        // the same language as applying them to the unreduced originals.
+        for nfa in sample_nfas() {
+            let reduced = nfa.clone().reduce();
+            assert_same_language(
+                &nfa.clone().optional().unwrap(),
+                &reduced.clone().optional().unwrap(),
+            );
+            assert_same_language(
+                &nfa.clone().zero_or_more().unwrap(),
+                &reduced.clone().zero_or_more().unwrap(),
+            );
+            assert_same_language(&nfa.clone().one_or_more(), &reduced.clone().one_or_more());
+            assert_same_language(
+                &nfa.clone().concatenate(sym(2)).unwrap(),
+                &reduced.clone().concatenate(sym(2)).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn optional_after_reduce_does_not_accept_through_merged_start() {
+        // a, (b, a)*  reduces by merging the start state with the state reached
+        // after "a b"; making that merged state accepting would accept "a b".
+        let nfa = sym(0)
+            .concatenate(sym(1).concatenate(sym(0)).unwrap().zero_or_more().unwrap())
+            .unwrap()
+            .reduce();
+        assert_eq!(nfa.num_states, 2, "expected the start state to be merged");
+        let opt = nfa.optional().unwrap();
+        assert!(opt.accepts(&[]));
+        assert!(opt.accepts(&[LabelId(0)]));
+        assert!(!opt.accepts(&[LabelId(0), LabelId(1)]));
+        assert!(opt.accepts(&[LabelId(0), LabelId(1), LabelId(0)]));
+    }
+
+    fn named_element(name: &str) -> Pattern {
+        make_element("", name, Pattern::Empty(None))
+    }
+
+    fn content_nfa_states(body: Pattern) -> u32 {
+        let root = make_element("", "root", body);
+        let (elements, ptr_to_label) = enumerate_elements(&root);
+        let nfas = build_content_nfas(&root, &elements, &ptr_to_label).unwrap();
+        nfas[0].num_states
+    }
+
+    #[test]
+    fn interleaved_zero_or_more_arms_reduce_to_one_state() {
+        // interleave { element e0 {empty}* & ... & element e9 {empty}* } is (e0|...|e9)*
+        let arms = (0..10)
+            .map(|i| Pattern::ZeroOrMore(Box::new(named_element(&format!("e{i}"))), None))
+            .collect();
+        assert_eq!(content_nfa_states(Pattern::Interleave(arms, None)), 1);
+    }
+
+    #[test]
+    fn interleaved_optional_arms_need_one_bit_each() {
+        // Each optional arm must remember whether it has been used: 2^k states.
+        let arms = (0..6)
+            .map(|i| Pattern::Optional(Box::new(named_element(&format!("e{i}"))), None))
+            .collect();
+        assert_eq!(content_nfa_states(Pattern::Interleave(arms, None)), 1 << 6);
     }
 }

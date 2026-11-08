@@ -74,12 +74,66 @@ impl<T: Hash + Eq> Interner<T> {
     }
 }
 
+/// Properties of a composite pattern that follow from its operands, computed when it is built so
+/// that reading them costs nothing.  Leaf patterns need no flags, as their variant decides them.
+///
+/// Every flag is a function of the operands, so including the flags in a `Pat`'s equality and
+/// hash does not stop equal patterns from being shared.
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug, Default)]
+pub(crate) struct PatFlags(u8);
+
+impl PatFlags {
+    /// The pattern matches an empty sequence.
+    const NULLABLE: u8 = 1 << 0;
+    /// The pattern may match data (a datatype, value or list), so text matched against it must be
+    /// checked by value, not just as some text.  This is the RELAX NG spec's "simple" content
+    /// type (section 7.2), which outranks the others when combined: the restrictions forbid
+    /// grouping data with elements, so a pattern that may match data anywhere has simple content.
+    /// Jing calls such content "text typed".
+    const TEXT_TYPED: u8 = 1 << 1;
+
+    const fn new(nullable: bool, text_typed: bool) -> PatFlags {
+        PatFlags((nullable as u8 * Self::NULLABLE) | (text_typed as u8 * Self::TEXT_TYPED))
+    }
+
+    fn nullable(self) -> bool {
+        self.0 & Self::NULLABLE != 0
+    }
+
+    fn text_typed(self) -> bool {
+        self.0 & Self::TEXT_TYPED != 0
+    }
+
+    /// The flags of `a | b`.
+    pub(crate) fn choice(a: PatFlags, b: PatFlags) -> PatFlags {
+        PatFlags::new(
+            a.nullable() || b.nullable(),
+            a.text_typed() || b.text_typed(),
+        )
+    }
+
+    /// The flags of `a, b` and of `a & b`.
+    pub(crate) fn group(a: PatFlags, b: PatFlags) -> PatFlags {
+        PatFlags::new(
+            a.nullable() && b.nullable(),
+            a.text_typed() || b.text_typed(),
+        )
+    }
+
+    /// The flags of `After(a, _)`, which is never nullable since the end tag is still to come,
+    /// and whose content is `a`.
+    pub(crate) fn after(a: PatFlags) -> PatFlags {
+        PatFlags::new(false, a.text_typed())
+    }
+}
+
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub(crate) enum Pat {
-    Choice(PatId, PatId, bool),
-    Interleave(PatId, PatId, bool),
-    Group(PatId, PatId, bool),
-    OneOrMore(PatId, bool),
+    Choice(PatId, PatId, PatFlags),
+    Interleave(PatId, PatId, PatFlags),
+    Group(PatId, PatId, PatFlags),
+    /// Has the same flags as its operand.
+    OneOrMore(PatId, PatFlags),
     Empty,
     Text,
     NotAllowed,
@@ -89,27 +143,40 @@ pub(crate) enum Pat {
     DatatypeValue(DatatypeValueId),
     DatatypeExcept(DatatypeId, PatId),
     List(PatId),
-    After(PatId, PatId),
+    After(PatId, PatId, PatFlags),
 }
 
+// The pattern table and the hash-consing memo hold a lot of these, so keep the flags from
+// growing them.
+const _: () = assert!(std::mem::size_of::<Pat>() == 6);
+
 impl Pat {
-    pub(crate) fn is_nullable(&self) -> bool {
+    pub(crate) fn flags(&self) -> PatFlags {
         match self {
-            Pat::Choice(_, _, nullable) => *nullable,
-            Pat::Interleave(_, _, nullable) => *nullable,
-            Pat::Group(_, _, nullable) => *nullable,
-            Pat::OneOrMore(_, nullable) => *nullable,
-            Pat::Empty => true,
-            Pat::Text => true,
-            Pat::NotAllowed => false,
-            Pat::Attribute(_, _) => false,
-            Pat::Element(_, _) => false,
-            Pat::Datatype(_) => false,
-            Pat::DatatypeValue(_) => false,
-            Pat::DatatypeExcept(_, _) => false,
-            Pat::List(_) => false,
-            Pat::After(_, _) => false,
+            Pat::Choice(_, _, flags)
+            | Pat::Interleave(_, _, flags)
+            | Pat::Group(_, _, flags)
+            | Pat::OneOrMore(_, flags)
+            | Pat::After(_, _, flags) => *flags,
+            Pat::Empty | Pat::Text => PatFlags::new(true, false),
+            // An attribute's value is not part of the element's content, so it is not text typed
+            Pat::NotAllowed | Pat::Attribute(_, _) | Pat::Element(_, _) => {
+                PatFlags::new(false, false)
+            }
+            Pat::Datatype(_) | Pat::DatatypeValue(_) | Pat::DatatypeExcept(_, _) | Pat::List(_) => {
+                PatFlags::new(false, true)
+            }
         }
+    }
+
+    pub(crate) fn is_nullable(&self) -> bool {
+        self.flags().nullable()
+    }
+
+    /// Whether text content matched against this pattern must be checked by its value; see
+    /// [`PatFlags::TEXT_TYPED`].
+    pub(crate) fn is_text_typed(&self) -> bool {
+        self.flags().text_typed()
     }
 }
 
@@ -260,10 +327,14 @@ impl Schema {
             (_, Pat::NotAllowed) => return Ok(left),
             _ if left == right => return Ok(left),
             (Pat::Choice(..), _) | (_, Pat::Choice(..)) => {}
-            (Pat::After(p, _), Pat::After(q, _)) if p == q => {}
+            (Pat::After(p, _, _), Pat::After(q, _, _)) if p == q => {}
             // Two distinct leaves, so there is nothing to normalise.
             (l, r) => {
-                return self.push(Pat::Choice(left, right, l.is_nullable() || r.is_nullable()));
+                return self.push(Pat::Choice(
+                    left,
+                    right,
+                    PatFlags::choice(l.flags(), r.flags()),
+                ));
             }
         }
         let mut leaves = Vec::new();
@@ -280,9 +351,9 @@ impl Schema {
             if !seen.insert(leaf) {
                 continue;
             }
-            if let Pat::After(p, k) = self.patt(leaf) {
+            if let Pat::After(p, k, _) = self.patt(leaf) {
                 if let Some(&i) = by_head.get(&p) {
-                    let Pat::After(_, k0) = self.patt(merged[i]) else {
+                    let Pat::After(_, k0, _) = self.patt(merged[i]) else {
                         unreachable!("by_head only indexes After leaves")
                     };
                     let k = self.choice(k0, k)?;
@@ -296,8 +367,8 @@ impl Schema {
         let mut merged = merged.into_iter();
         let first = merged.next().expect("a choice has at least one leaf");
         merged.try_fold(first, |acc, r| {
-            let nullable = self.patt(acc).is_nullable() || self.patt(r).is_nullable();
-            self.push(Pat::Choice(acc, r, nullable))
+            let flags = PatFlags::choice(self.patt(acc).flags(), self.patt(r).flags());
+            self.push(Pat::Choice(acc, r, flags))
         })
     }
 
@@ -321,7 +392,7 @@ impl Schema {
             (l, r) => self.push(Pat::Interleave(
                 left,
                 right,
-                l.is_nullable() && r.is_nullable(),
+                PatFlags::group(l.flags(), r.flags()),
             )),
         }
     }
@@ -332,14 +403,18 @@ impl Schema {
             (_, Pat::NotAllowed) => Ok(self.not_allowed()),
             (Pat::Empty, _) => Ok(right),
             (_, Pat::Empty) => Ok(left),
-            (l, r) => self.push(Pat::Group(left, right, l.is_nullable() && r.is_nullable())),
+            (l, r) => self.push(Pat::Group(
+                left,
+                right,
+                PatFlags::group(l.flags(), r.flags()),
+            )),
         }
     }
 
     pub(crate) fn after(&self, p1: PatId, p2: PatId) -> Result<PatId, Overflow> {
         match (self.patt(p1), self.patt(p2)) {
             (Pat::NotAllowed, _) | (_, Pat::NotAllowed) => Ok(self.not_allowed()),
-            (_, _) => self.push(Pat::After(p1, p2)),
+            (a, _) => self.push(Pat::After(p1, p2, PatFlags::after(a.flags()))),
         }
     }
 
@@ -354,10 +429,7 @@ impl Schema {
     }
     pub(crate) fn one_or_more(&self, pattern: PatId) -> Result<PatId, Overflow> {
         let p = self.patt(pattern);
-        self.push(Pat::OneOrMore(pattern, p.is_nullable()))
-    }
-    pub(crate) fn list(&self, p: PatId) -> Result<PatId, Overflow> {
-        self.push(Pat::List(p))
+        self.push(Pat::OneOrMore(pattern, p.flags()))
     }
     pub(crate) fn patt(&self, id: PatId) -> Pat {
         self.inner.borrow().patterns[id.0 as usize]
@@ -464,7 +536,7 @@ impl Schema {
                     }
                     writeln!(w, ")")
                 }
-                Pat::After(p1, p2) => {
+                Pat::After(p1, p2, _) => {
                     writeln!(w, "After{}(", pat.0)?;
                     self.dumpy_dump(depth + 1, p1, w, seen)?;
                     self.dumpy_dump(depth + 1, p2, w, seen)?;
@@ -515,7 +587,7 @@ impl Schema {
                 Pat::List(_p) => {
                     writeln!(w, "List{}!", pat.0)
                 }
-                Pat::After(_p1, _p2) => {
+                Pat::After(_p1, _p2, _) => {
                     writeln!(w, "After{}!", pat.0)
                 }
             }
@@ -615,8 +687,13 @@ impl SchemaBuilder {
         self.patterns[id.0 as usize].as_ref()
     }
 
-    fn is_nullable_id(&self, id: PatId) -> bool {
-        self.try_patt(id).is_some_and(|p| p.is_nullable())
+    /// The flags of the pattern at `id`, or none if it is a `Ref` slot not yet resolved.
+    ///
+    /// A composite built over an unresolved slot can therefore get the wrong flags.  Nothing
+    /// reads them before `start_tag_close_deriv` has rebuilt an element's content through
+    /// [`Schema`]'s constructors, which see the resolved operands.
+    fn flags_id(&self, id: PatId) -> PatFlags {
+        self.try_patt(id).map(Pat::flags).unwrap_or_default()
     }
 
     fn record_source_span(&mut self, id: PatId, span: codemap::Span) {
@@ -628,10 +705,9 @@ impl SchemaBuilder {
             (Some(Pat::NotAllowed), _) => right,
             (_, Some(Pat::NotAllowed)) => left,
             (Some(_), Some(_)) if left == right => left,
-            (l, r) => {
-                let nullable =
-                    l.is_some_and(|p| p.is_nullable()) || r.is_some_and(|p| p.is_nullable());
-                self.push(Pat::Choice(left, right, nullable))
+            _ => {
+                let flags = PatFlags::choice(self.flags_id(left), self.flags_id(right));
+                self.push(Pat::Choice(left, right, flags))
             }
         }
     }
@@ -641,10 +717,9 @@ impl SchemaBuilder {
             (Some(Pat::NotAllowed), _) | (_, Some(Pat::NotAllowed)) => self.not_allowed(),
             (Some(Pat::Empty), _) => right,
             (_, Some(Pat::Empty)) => left,
-            (l, r) => {
-                let nullable =
-                    l.is_some_and(|p| p.is_nullable()) && r.is_some_and(|p| p.is_nullable());
-                self.push(Pat::Interleave(left, right, nullable))
+            _ => {
+                let flags = PatFlags::group(self.flags_id(left), self.flags_id(right));
+                self.push(Pat::Interleave(left, right, flags))
             }
         }
     }
@@ -654,17 +729,16 @@ impl SchemaBuilder {
             (Some(Pat::NotAllowed), _) | (_, Some(Pat::NotAllowed)) => self.not_allowed(),
             (Some(Pat::Empty), _) => right,
             (_, Some(Pat::Empty)) => left,
-            (l, r) => {
-                let nullable =
-                    l.is_some_and(|p| p.is_nullable()) && r.is_some_and(|p| p.is_nullable());
-                self.push(Pat::Group(left, right, nullable))
+            _ => {
+                let flags = PatFlags::group(self.flags_id(left), self.flags_id(right));
+                self.push(Pat::Group(left, right, flags))
             }
         }
     }
 
     fn one_or_more(&mut self, pattern: PatId) -> PatId {
-        let nullable = self.is_nullable_id(pattern);
-        self.push(Pat::OneOrMore(pattern, nullable))
+        let flags = self.flags_id(pattern);
+        self.push(Pat::OneOrMore(pattern, flags))
     }
 
     fn mixed(&mut self, pattern: PatId) -> PatId {

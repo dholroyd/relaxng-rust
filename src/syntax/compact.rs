@@ -662,7 +662,7 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
 // in `pattern` to avoid O(n) recursion depth on long chains like `a | b | c | ...`.
 fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
     let (input, annotations) = maybe_annotations(input)?;
-    let (input, _) = ws0(input)?;
+    let (input, _) = space_comment0(input)?;
     let (input, mut result) = alt((
         map(element_pattern, Pattern::Element),
         map(attribute_pattern, Pattern::Attribute),
@@ -940,7 +940,7 @@ fn param(input: Span) -> IResult<Span, Param> {
     let parse = (
         position,
         maybe_annotations,
-        ws0,
+        space_comment0,
         identifier_or_keyword,
         space_comment0,
         tag("="),
@@ -987,7 +987,7 @@ fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
 // Does NOT handle the binary `|` operator — that is handled iteratively in `name_class`.
 fn name_class_primary(input: Span) -> IResult<Span, NameClass> {
     let (input, annotations) = maybe_annotations(input)?;
-    let (input, _) = ws0(input)?;
+    let (input, _) = space_comment0(input)?;
     let (input, left) = alt((
         map(ns_name_nc, NameClass::NsName),
         map(name, NameClass::Name),
@@ -1103,7 +1103,7 @@ fn cname(input: Span) -> IResult<Span, QName> {
 fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
     let (input, _guard) = RecursionGuard::enter(input)?;
     let (input, annotations) = maybe_annotations(input)?;
-    let (input, _) = ws0(input)?;
+    let (input, _) = space_comment0(input)?;
     let (input, mut item) = alt((
         map(start, GrammarContent::Define),
         map(define, GrammarContent::Define),
@@ -1268,7 +1268,7 @@ fn inherit(input: Span) -> IResult<Span, Inherit> {
 fn include_content(input: Span) -> IResult<Span, IncludeContent> {
     let (input, _guard) = RecursionGuard::enter(input)?;
     let (input, annotations) = maybe_annotations(input)?;
-    let (input, _) = ws0(input)?;
+    let (input, _) = space_comment0(input)?;
     let (input, mut item) = alt((
         map(annotation_element, IncludeContent::Annotation),
         map(define, IncludeContent::Define),
@@ -1301,9 +1301,12 @@ fn div_include_content(input: Span) -> IResult<Span, Vec<IncludeContent>> {
     parser.parse(input)
 }
 
+/// Whitespace and comments, per the spec's `separator`.  A line starting `##` is not a comment
+/// but documentation, so it is left for the annotation parsers; a `##` line anywhere else is a
+/// syntax error, as in Jing.
 fn space_comment0(input: Span) -> IResult<Span, Span> {
     recognize(fold_many0(
-        alt((separator_chars, any_comment)),
+        alt((separator_chars, comment)),
         || (),
         |_, _| (),
     ))
@@ -1311,25 +1314,7 @@ fn space_comment0(input: Span) -> IResult<Span, Span> {
 }
 fn space_comment1(input: Span) -> IResult<Span, Span> {
     recognize(fold_many1(
-        alt((separator_chars, any_comment)),
-        || (),
-        |_, _| (),
-    ))
-    .parse(input)
-}
-
-/// Consume whitespace and single-# comments only (not ## documentation comments)
-fn ws0(input: Span) -> IResult<Span, Span> {
-    recognize(fold_many0(
-        alt((separator_chars, single_comment)),
-        || (),
-        |_, _| (),
-    ))
-    .parse(input)
-}
-fn ws1(input: Span) -> IResult<Span, Span> {
-    recognize(fold_many1(
-        alt((separator_chars, single_comment)),
+        alt((separator_chars, comment)),
         || (),
         |_, _| (),
     ))
@@ -1348,23 +1333,17 @@ fn rest_of_line(input: Span) -> IResult<Span, Span> {
     take_till(|c| c == '\n' || c == ESCAPED_LF).parse(input)
 }
 
-/// Matches any comment line (both # and ##)
-fn any_comment(input: Span) -> IResult<Span, Span> {
-    recognize((tag("#"), rest_of_line)).parse(input)
-}
-
 /// Matches a single-# comment but NOT ## documentation comments
-fn single_comment(input: Span) -> IResult<Span, Span> {
+fn comment(input: Span) -> IResult<Span, Span> {
     recognize((tag("#"), not(peek(tag("#"))), rest_of_line)).parse(input)
 }
 
-/// Parse a single ## documentation line. Returns the content after ##,
-/// with one leading space stripped if present.
+/// Parse a single ## documentation line. Returns the content after the run of #s, with one
+/// leading space stripped if present.
 fn documentation(input: Span) -> IResult<Span, Documentation> {
     let (input, start) = position(input)?;
-    let (input, _) = tag("##")(input)?;
-    // Must NOT start with another # (that would be ###, not documentation)
-    let (input, _) = not(peek(tag("#"))).parse(input)?;
+    // documentationLineContent skips any further #s, so `### x` documents "x"
+    let (input, _) = (tag("##"), take_while(|c| c == '#')).parse(input)?;
     let (input, content) = rest_of_line(input)?;
     let (input, end) = position(input)?;
     let content_str = content.fragment().to_string();
@@ -1384,17 +1363,17 @@ fn documentation(input: Span) -> IResult<Span, Documentation> {
 
 /// Parse zero or more ## documentation lines (separated by whitespace/single-# comments)
 fn documentations(input: Span) -> IResult<Span, Vec<Documentation>> {
-    separated_list0(ws1, documentation).parse(input)
+    separated_list0(space_comment1, documentation).parse(input)
 }
 
 fn maybe_initial_annotation(input: Span) -> IResult<Span, Option<InitialAnnotation>> {
-    opt(map((initial_annotation, ws0), |(anno, _)| anno)).parse(input)
+    opt(map((initial_annotation, space_comment0), |(anno, _)| anno)).parse(input)
 }
 
 /// Parse optional annotations: zero or more ## doc lines, then optionally [...]
 fn maybe_annotations(input: Span) -> IResult<Span, Option<Annotations>> {
     let (input, docs) = documentations(input)?;
-    let (input, _) = ws0(input)?;
+    let (input, _) = space_comment0(input)?;
     let (input, initial) = maybe_initial_annotation(input)?;
     if docs.is_empty() && initial.is_none() {
         Ok((input, None))
@@ -2358,14 +2337,7 @@ mod test {
 
     #[test]
     fn escaped_newline_ends_documentation_line() {
-        // calls grammar_content() directly, because schema() currently discards leading
-        // documentation comments as ordinary comments
-        let (text, map) = preprocess(r"## doc\x{A}start = element foo { empty }").unwrap();
-        let (rest, content) = grammar_content(Span::new_extra(&text, SourceMap(&map))).unwrap();
-        assert_eq!(*rest.fragment(), "");
-        let GrammarContent::Define(define) = content else {
-            panic!("expected Define, got {content:?}");
-        };
+        let define = only_define(parse(r"## doc\x{A}start = element foo { empty }").unwrap());
         let docs = define.annotations.unwrap().documentation;
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].content, "doc");
@@ -2473,5 +2445,90 @@ mod test {
             err.to_string(),
             "invalid character 'z' in escape sequence; expected a hex digit or '}'"
         );
+    }
+
+    fn start_pattern(src: &str) -> Pattern {
+        parse(src)
+            .map(only_define)
+            .unwrap_or_else(|e| panic!("failed to parse {src:?}: {e:?}"))
+            .pattern
+    }
+
+    fn grammar_items(src: &str) -> Vec<GrammarContent> {
+        match parse(src) {
+            Ok(Schema {
+                pattern_or_grammar: PatternOrGrammar::Grammar(g),
+                ..
+            }) => g.content,
+            other => panic!("expected grammar for {src:?}, got {other:?}"),
+        }
+    }
+
+    fn define_docs(item: &GrammarContent) -> Vec<&str> {
+        match item {
+            GrammarContent::Define(Define {
+                annotations: Some(a),
+                ..
+            }) => a.documentation.iter().map(|d| d.content.as_str()).collect(),
+            other => panic!("expected annotated define, got {other:?}"),
+        }
+    }
+
+    fn pattern_docs(p: &Pattern) -> Vec<&str> {
+        match p {
+            Pattern::Annotated(a, _) => {
+                a.documentation.iter().map(|d| d.content.as_str()).collect()
+            }
+            other => panic!("expected annotated pattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doc_comments_reach_definitions() {
+        let items = grammar_items("## first\nstart = a\n\n## second\na = empty");
+        assert_eq!(define_docs(&items[0]), ["first"]);
+        assert_eq!(define_docs(&items[1]), ["second"]);
+
+        let items = grammar_items("namespace x = \"urn:x\"\n## doc\nstart = empty");
+        assert_eq!(define_docs(&items[0]), ["doc"]);
+    }
+
+    #[test]
+    fn doc_comments_reach_patterns() {
+        let Pattern::Element(el) = start_pattern("start = element a {\n  ## inner\n  empty\n}")
+        else {
+            panic!("expected element");
+        };
+        assert_eq!(pattern_docs(&el.pattern), ["inner"]);
+
+        let Pattern::ChoicePair(_, b) = start_pattern("start = a |\n  ## second\n  b") else {
+            panic!("expected choice");
+        };
+        assert_eq!(pattern_docs(&b), ["second"]);
+    }
+
+    #[test]
+    fn extra_hashes_start_documentation() {
+        // as translated by trang: further #s are skipped, then one space
+        let items = grammar_items("### triple\nstart = a\n##########\na = empty");
+        assert_eq!(define_docs(&items[0]), ["triple"]);
+        assert_eq!(define_docs(&items[1]), [""]);
+    }
+
+    #[test]
+    fn misplaced_doc_comments_rejected() {
+        // `##` lines are documentation, which can only precede a pattern, name class, grammar
+        // content or include content.  Jing rejects all of these.
+        for src in [
+            "start = element a { empty }\n## at end of file",
+            "start = element a { empty }\n##########",
+            "start = element a {\n  empty\n  ## before brace\n}",
+            "## before a declaration\nnamespace x = \"urn:x\"\nstart = empty",
+        ] {
+            assert!(
+                matches!(parse(src), Err(CompactError::Syntax { .. })),
+                "expected syntax error for {src:?}"
+            );
+        }
     }
 }

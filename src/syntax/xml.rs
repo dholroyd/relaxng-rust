@@ -779,7 +779,10 @@ fn div_grammar_content(node: Node) -> Result<GrammarContent> {
         next = next_rng_sibling(child);
     }
 
-    Ok(GrammarContent::Div(content))
+    Ok(GrammarContent::Div(Div {
+        annotations: None,
+        content,
+    }))
 }
 
 fn attr_ncname(attr: &Attribute) -> Result<Identifier> {
@@ -879,7 +882,10 @@ fn div_include_content(node: Node) -> Result<IncludeContent> {
         next = next_rng_sibling(child);
     }
 
-    Ok(IncludeContent::Div(content))
+    Ok(IncludeContent::Div(Div {
+        annotations: None,
+        content,
+    }))
 }
 
 /// Resolve a QName from a `name` attribute on an `<element>` or `<attribute>` element.

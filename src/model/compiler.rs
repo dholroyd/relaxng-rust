@@ -1481,7 +1481,7 @@ impl<FS: Files> Compiler<FS> {
                             .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?
                     }
                     types::IncludeContent::Div(d) => self
-                        .compile_include_div(&mut override_ctx, &d[..])
+                        .compile_include_div(&mut override_ctx, &d.content)
                         .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?,
                     types::IncludeContent::Annotation(_) => (),
                 }
@@ -1889,7 +1889,7 @@ impl<FS: Files> Compiler<FS> {
     ) -> Result<(), RelaxError> {
         match g {
             types::GrammarContent::Define(d) => self.compile_define(child_ctx, d),
-            types::GrammarContent::Div(d) => self.compile_grammar_div(child_ctx, d),
+            types::GrammarContent::Div(d) => self.compile_grammar_div(child_ctx, &d.content),
             types::GrammarContent::Include(i) => self.compile_include(child_ctx, i),
             types::GrammarContent::Annotation(_) => Ok(()),
         }

@@ -1,0 +1,42 @@
+name: Benchmark
+on:
+  push:
+    branches: main
+jobs:
+  benchmark_with_bencher:
+    name: Benchmark with Bencher
+    runs-on: ubuntu-24.04
+    env:
+      BENCHER_PROJECT: relaxng-rust
+      BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1.15.4
+
+      - uses: bencherdev/bencher@main
+      - uses: cargo-bins/cargo-binstall@main
+
+      - run: sudo apt update && sudo apt install valgrind
+
+      - name: Install gungraun-runner
+        run: |
+          version=$(cargo metadata --format-version=1 |\
+            jq '.packages[] | select(.name == "gungraun").version' |\
+            tr -d '"'
+          )
+          cargo binstall --no-confirm gungraun-runner --version $version --root $PWD/gungraun/
+
+      - run: |
+          GUNGRAUN_COLOR=never GUNGRAUN_RUNNER=$PWD/gungraun/bin/gungraun-runner cargo bench --bench ci_bench > perf.txt
+      - run: |
+          bencher run \
+          --branch "$GITHUB_REF_NAME" \
+          --threshold-measure instructions \
+          --threshold-test t_test \
+          --threshold-upper-boundary 0.95 \
+          --err \
+          --adapter rust_gungraun \
+          --hash "$GITHUB_SHA" \
+          --file "perf.txt"

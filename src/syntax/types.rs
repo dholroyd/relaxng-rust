@@ -182,10 +182,28 @@ pub enum AssignMethod {
     Interleave,
 }
 
+/// What a [`Define`] defines.  The grammar's start pattern is kept apart from named patterns,
+/// because a pattern may itself be named `start` (`\start` in the compact syntax,
+/// `<define name="start">` in the XML syntax).
+#[derive(Debug, PartialEq)]
+pub enum DefineName {
+    /// The start pattern; the span is that of the `start` keyword or element
+    Start(Span),
+    Named(Identifier),
+}
+
+impl DefineName {
+    pub fn span(&self) -> &Span {
+        match self {
+            DefineName::Start(span) | DefineName::Named(Identifier(span, _)) => span,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Define {
     pub span: Span,
-    pub identifier: Identifier,
+    pub name: DefineName,
     pub assign_method: AssignMethod,
     pub pattern: Pattern,
     pub annotations: Option<Annotations>,

@@ -11,6 +11,7 @@ use crate::syntax::{compact, types};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::File;
 use std::io;
 use std::io::Read;
@@ -19,6 +20,38 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// Information about a named definition in a compiled schema.
+/// Key for a definition within a grammar.  The start pattern has its own key, so that it can't
+/// collide with a pattern named `start`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RefKey {
+    Start,
+    Named(String),
+}
+
+impl RefKey {
+    fn named(id: &types::Identifier) -> RefKey {
+        RefKey::Named(id.1.clone())
+    }
+}
+
+impl From<&types::DefineName> for RefKey {
+    fn from(name: &types::DefineName) -> RefKey {
+        match name {
+            types::DefineName::Start(_) => RefKey::Start,
+            types::DefineName::Named(id) => RefKey::named(id),
+        }
+    }
+}
+
+impl fmt::Display for RefKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RefKey::Start => f.write_str("start"),
+            RefKey::Named(name) => f.write_str(name),
+        }
+    }
+}
+
 pub struct DefinitionInfo {
     pub name: String,
     pub span: codemap::Span,
@@ -38,7 +71,8 @@ impl CompileResult {
         self.definitions
             .iter()
             .filter(|d| {
-                d.name != "start" && !self.reachable.contains(&(d.pat_ref.as_ptr() as usize))
+                !Rc::ptr_eq(&d.pat_ref, &self.start)
+                    && !self.reachable.contains(&(d.pat_ref.as_ptr() as usize))
             })
             .collect()
     }
@@ -207,7 +241,7 @@ pub enum RelaxError {
 pub(crate) enum Context<'a> {
     Root {
         file: Arc<codemap::File>,
-        refs: RefCell<HashMap<String, Rc<RefCell<Option<model::DefineRule>>>>>,
+        refs: RefCell<HashMap<RefKey, Rc<RefCell<Option<model::DefineRule>>>>>,
         namespaces: HashMap<String, String>,
         default_namespace: String,
         datatypes: HashMap<String, String>,
@@ -219,7 +253,7 @@ pub(crate) enum Context<'a> {
         // we track what names are overiden for the included grammar, and also weather that
         // grammar actually had such a definition (it is an error to provide an override for
         // a name that's not defined in the include)
-        overrides: RefCell<HashMap<String, (codemap::Span, bool)>>,
+        overrides: RefCell<HashMap<RefKey, (codemap::Span, bool)>>,
         namespaces: HashMap<String, String>,
         default_namespace: String,
         datatypes: HashMap<String, String>,
@@ -229,13 +263,13 @@ pub(crate) enum Context<'a> {
     },
     Grammar {
         parent: &'a Context<'a>,
-        refs: RefCell<HashMap<String, Rc<RefCell<Option<model::DefineRule>>>>>,
+        refs: RefCell<HashMap<RefKey, Rc<RefCell<Option<model::DefineRule>>>>>,
     },
     // We track the context of a definition since the body of that definition must not reference
     // the identifier being defined, unless the reference is in the body of an element definition
     Define {
         parent: &'a Context<'a>,
-        id: types::Identifier,
+        id: RefKey,
     },
     // We track context of an Element because when an Element appears within the body of a Define,
     // the Elements body my recursively refer to the ancestor definition, while other parts of
@@ -319,11 +353,8 @@ impl<'a> Context<'a> {
     }
 
     /// Creates a new context for the body of a definition
-    fn new_define(&self, id: &types::Identifier) -> Context<'_> {
-        Context::Define {
-            parent: self,
-            id: id.clone(),
-        }
+    fn new_define(&self, id: RefKey) -> Context<'_> {
+        Context::Define { parent: self, id }
     }
 
     /// Creates a new context for the body of an element
@@ -504,16 +535,17 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn define(&self, id: &str, rule: model::DefineRule) -> Result<(), RelaxError> {
+    fn define(&self, id: &RefKey, rule: model::DefineRule) -> Result<(), RelaxError> {
         match self {
             Context::Root { refs, .. } | Context::Grammar { refs, .. } => {
                 let mut refs = refs.borrow_mut();
                 if refs.contains_key(id) {
                     let a = refs.get(id);
                     let mut rule_ref = a.unwrap().borrow_mut();
-                    *rule_ref = Compiler::<FsFiles>::merge(id, rule_ref.take(), Some(rule))?
+                    *rule_ref =
+                        Compiler::<FsFiles>::merge(&id.to_string(), rule_ref.take(), Some(rule))?
                 } else {
-                    refs.insert(id.to_string(), Rc::new(RefCell::new(Some(rule))));
+                    refs.insert(id.clone(), Rc::new(RefCell::new(Some(rule))));
                 }
                 Ok(())
             }
@@ -543,7 +575,7 @@ impl<'a> Context<'a> {
                             original: overrides[id].0,
                         });
                     } else {
-                        overrides.insert(id.to_string(), (*rule.span(), false));
+                        overrides.insert(id.clone(), (*rule.span(), false));
                         parant_of_include.define(id, rule)?;
                     };
                     Ok(())
@@ -567,7 +599,7 @@ impl<'a> Context<'a> {
 
     fn get_ref(
         &self,
-        ref_id: &str,
+        ref_id: &RefKey,
     ) -> std::option::Option<std::rc::Rc<std::cell::RefCell<std::option::Option<model::DefineRule>>>>
     {
         match self {
@@ -579,11 +611,8 @@ impl<'a> Context<'a> {
             | Context::Element { parent }
             | Context::Attribute { parent, .. } => parent.get_ref(ref_id),
             Context::Define { parent, id } => {
-                if id.1 == ref_id {
-                    panic!(
-                        "unexpected ref lookup of {:?} within its own definition",
-                        id.1
-                    );
+                if id == ref_id {
+                    panic!("unexpected ref lookup of {id:?} within its own definition");
                 }
                 parent.get_ref(ref_id)
             }
@@ -594,7 +623,7 @@ impl<'a> Context<'a> {
         &self,
     ) -> impl Iterator<
         Item = (
-            std::string::String,
+            RefKey,
             std::rc::Rc<std::cell::RefCell<std::option::Option<model::DefineRule>>>,
         ),
     > + '_ {
@@ -613,11 +642,12 @@ impl<'a> Context<'a> {
         match self {
             Context::Root { refs, .. } | Context::Grammar { refs, .. } => {
                 let mut refs = refs.borrow_mut();
-                if let Some(r) = refs.get(&ref_id.1) {
+                let key = RefKey::named(ref_id);
+                if let Some(r) = refs.get(&key) {
                     Ok(model::PatRef(r.clone()))
                 } else {
                     let r = Rc::new(RefCell::new(None));
-                    refs.insert(ref_id.1.to_string(), r.clone());
+                    refs.insert(key, r.clone());
                     Ok(model::PatRef(r))
                 }
             }
@@ -740,18 +770,18 @@ impl<FS: Files> Compiler<FS> {
             if r.borrow().is_none() {
                 return Err(RelaxError::UndefinedReference {
                     span: file.span.subspan(0, 0),
-                    identifier: def_name,
+                    identifier: def_name.to_string(),
                 });
             }
             let def_span = r.borrow().as_ref().unwrap().span().to_owned();
             definitions.push(DefinitionInfo {
-                name: def_name,
+                name: def_name.to_string(),
                 span: def_span,
                 pat_ref: r,
             });
         }
 
-        if let Some(start) = ctx.get_ref("start") {
+        if let Some(start) = ctx.get_ref(&RefKey::Start) {
             let mut seen = HashSet::new();
             let mut expanding = HashMap::new();
             // Check for undefined references and recursive references without element
@@ -1389,7 +1419,10 @@ impl<FS: Files> Compiler<FS> {
                 } else {
                     let rule = self.compile_pattern(ctx, p)?;
                     let span = ctx.convert_span(&(0..0)); // FIXME: synthesize a more useful span
-                    ctx.define("start", model::DefineRule::AssignCombine(span, None, rule))?;
+                    ctx.define(
+                        &RefKey::Start,
+                        model::DefineRule::AssignCombine(span, None, rule),
+                    )?;
                 }
             }
             types::PatternOrGrammar::Grammar(types::GrammarPattern {
@@ -1428,10 +1461,10 @@ impl<FS: Files> Compiler<FS> {
         ctx: &mut Context,
         define: &types::Define,
     ) -> Result<(), RelaxError> {
-        let mut def_ctx = ctx.new_define(&define.identifier);
-        let id = define.identifier.1.clone();
+        let id = RefKey::from(&define.name);
+        let mut def_ctx = ctx.new_define(id.clone());
         let rule = self.compile_pattern(&mut def_ctx, &define.pattern)?;
-        let span = ctx.convert_span(&define.identifier.0);
+        let span = ctx.convert_span(define.name.span());
         let new_rule = match define.assign_method {
             types::AssignMethod::Assign => model::DefineRule::AssignCombine(span, None, rule),
             types::AssignMethod::Choice => {
@@ -1517,7 +1550,7 @@ impl<FS: Files> Compiler<FS> {
             for (name, (override_span, defined)) in overrides.borrow().iter() {
                 if !defined {
                     return Err(RelaxError::OverrideMissingFromInclude {
-                        name: name.clone(),
+                        name: name.to_string(),
                         override_span: *override_span,
                         include_span,
                     });
@@ -1848,11 +1881,11 @@ impl<FS: Files> Compiler<FS> {
                         // TODO: retain span information for references so that we don't report bogus data
                         return Err(RelaxError::UndefinedReference {
                             span: child_ctx.convert_span(&(0..0)),
-                            identifier: name,
+                            identifier: name.to_string(),
                         });
                     }
                 }
-                if let Some(r) = child_ctx.get_ref("start") {
+                if let Some(r) = child_ctx.get_ref(&RefKey::Start) {
                     r.borrow_mut()
                         .take()
                         .map(|d| match d {
@@ -1876,7 +1909,7 @@ impl<FS: Files> Compiler<FS> {
 
         let content = &grammar.content[..];
         self.compile_grammar_contents(&mut child_ctx, content)?;
-        if let Some(r) = child_ctx.get_ref("start") {
+        if let Some(r) = child_ctx.get_ref(&RefKey::Start) {
             r.borrow_mut()
                 .take()
                 .map(|d| match d {
@@ -2480,6 +2513,32 @@ mod tests {
             if let Err(e) = c.compile(Path::new("main.rnc")) {
                 panic!("including {inc:?} failed: {e:?}");
             }
+        }
+    }
+
+    #[test]
+    fn pattern_named_start_is_not_the_start_pattern() {
+        // as in TEI ODD schemas
+        for (name, syntax, text) in [(
+            "test.rng",
+            Syntax::Xml,
+            r#"<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+                     <start><element name="a"><ref name="start"/></element></start>
+                     <define name="start"><element name="b"><empty/></element></define>
+                   </grammar>"#,
+        )] {
+            let mut c = Compiler::new(MemFiles(vec![(name, text)]), syntax);
+            let result = c
+                .compile(Path::new(name))
+                .unwrap_or_else(|e| panic!("{name} failed to compile: {e:?}"));
+            assert!(result.unreachable_definitions().is_empty(), "{name}");
+            let start = result.start.borrow();
+            let Some(model::Pattern::Element(_, content, _, _)) =
+                start.as_ref().map(|d| d.pattern())
+            else {
+                panic!("{name}: expected element as start pattern");
+            };
+            assert_matches!(**content, model::Pattern::Ref(_, ref n, _) if n == "start");
         }
     }
 }

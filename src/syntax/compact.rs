@@ -1288,6 +1288,7 @@ fn start(input: Span) -> IResult<Span, Define> {
     let parser = (
         position,
         tag("start"),
+        position,
         space_comment0,
         assign_method,
         space_comment0,
@@ -1295,14 +1296,11 @@ fn start(input: Span) -> IResult<Span, Define> {
         position,
     );
 
-    // we just produce another 'Define' named "start", rather than using a dedicated 'Start' type,
-    // so as to avoid duplication of code handling 'start' definitions and other definitions
-
     let mut parser = map(
         parser,
-        |(start, start_tag, _, assign_method, _, pattern, end)| Define {
+        |(start, _, keyword_end, _, assign_method, _, pattern, end)| Define {
             span: span(start, end),
-            identifier: Identifier(span(start_tag, start_tag), "start".to_string()),
+            name: DefineName::Start(span(start, keyword_end)),
             assign_method,
             pattern,
             annotations: None,
@@ -1328,7 +1326,7 @@ fn define(input: Span) -> IResult<Span, Define> {
         parse,
         |(start, identifier, _, assign_method, _, pattern, end)| Define {
             span: span(start, end),
-            identifier,
+            name: DefineName::Named(identifier),
             assign_method,
             pattern,
             annotations: None,
@@ -1726,7 +1724,7 @@ mod test {
             "start = pattern",
             Define {
                 span: 0..15,
-                identifier: Identifier(0..0, "start".to_string()),
+                name: DefineName::Start(0..5),
                 assign_method: AssignMethod::Assign,
                 pattern: Pattern::Identifier(Identifier(8..15, "pattern".to_string())),
                 annotations: None,
@@ -1951,14 +1949,14 @@ mod test {
                 content: Some(vec![
                     IncludeContent::Define(Define {
                         span: 20..25,
-                        identifier: Identifier(20..21, "a".to_string()),
+                        name: DefineName::Named(Identifier(20..21, "a".to_string())),
                         assign_method: AssignMethod::Assign,
                         pattern: Pattern::Identifier(Identifier(24..25, "b".to_string())),
                         annotations: None,
                     }),
                     IncludeContent::Define(Define {
                         span: 27..30,
-                        identifier: Identifier(27..28, "c".to_string()),
+                        name: DefineName::Named(Identifier(27..28, "c".to_string())),
                         assign_method: AssignMethod::Assign,
                         pattern: Pattern::Identifier(Identifier(29..30, "d".to_string())),
                         annotations: None,
@@ -2017,7 +2015,7 @@ mod test {
                     span: 0..30,
                     content: vec![GrammarContent::Define(Define {
                         span: 0..30,
-                        identifier: Identifier(0..16, "integer.datatype".to_string()),
+                        name: DefineName::Named(Identifier(0..16, "integer.datatype".to_string())),
                         assign_method: AssignMethod::Assign,
                         pattern: Pattern::DatatypeName(DatatypeNamePattern(
                             19..30,
@@ -2048,7 +2046,7 @@ mod test {
                     span: 0..30,
                     content: vec![GrammarContent::Define(Define {
                         span: 0..30,
-                        identifier: Identifier(0..16, "integer.datatype".to_string()),
+                        name: DefineName::Named(Identifier(0..16, "integer.datatype".to_string())),
                         assign_method: AssignMethod::Assign,
                         pattern: Pattern::DatatypeName(DatatypeNamePattern(
                             19..30,
@@ -2522,7 +2520,7 @@ mod test {
     fn escaped_backslash_quotes_identifier() {
         // \x{5C} is '\', so this is the quoted identifier \element
         let define = only_define(parse(r"\x{5C}element = empty").unwrap());
-        assert_eq!(define.identifier.0, 0..13);
+        assert_eq!(*define.name.span(), 0..13);
     }
 
     #[test]
@@ -2600,7 +2598,7 @@ mod test {
     #[test]
     fn spans_refer_to_original_source() {
         let define = only_define(parse("\\x{66}oo = a |\r\n \\x{62}").unwrap());
-        assert_eq!(define.identifier.0, 0..8);
+        assert_eq!(*define.name.span(), 0..8);
         assert_eq!(define.span, 0..23);
         match define.pattern {
             Pattern::ChoicePair(a, b) => {

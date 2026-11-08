@@ -716,12 +716,7 @@ fn start(node: Node) -> Result<Define> {
     {
         return Err(Error::Unexpected(a.range(), "Unexpected attribute"));
     }
-    // we just produce another 'Define' named "start", rather than using a dedicated 'Start' type,
-    // so as to avoid duplication of code handling 'start' definitions and other definitions
-    // TODO: revisit this design later
-
     let start_span = node.range().start + 1..node.range().start + 6;
-    let name = Identifier(start_span, "start".to_string());
 
     let child =
         first_rng_child(node).ok_or(Error::Expected(node.range(), "Child pattern element"))?;
@@ -731,7 +726,7 @@ fn start(node: Node) -> Result<Define> {
     }
     Ok(Define {
         span: node.range(),
-        identifier: name,
+        name: DefineName::Start(start_span),
         assign_method: combine,
         pattern: patt,
         annotations: None,
@@ -764,7 +759,7 @@ fn define(node: Node) -> Result<Define> {
     )?;
     Ok(Define {
         span: node.range(),
-        identifier: name,
+        name: DefineName::Named(name),
         assign_method: combine,
         pattern: patt,
         annotations: None,

@@ -1075,9 +1075,11 @@ fn param(input: Span) -> IResult<Span, Param> {
 //                   | "string"
 //                   | "token"
 fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
+    // `string` and `token` are keywords only when not followed by more NCName characters;
+    // otherwise they are the start of an identifier such as `token.content` or `string-foo`
     alt((
-        map(tag("string"), |_| DatatypeName::String),
-        map(tag("token"), |_| DatatypeName::Token),
+        map((tag("string"), not(nc_name_char)), |_| DatatypeName::String),
+        map((tag("token"), not(nc_name_char)), |_| DatatypeName::Token),
         map(cname, DatatypeName::CName),
     ))
     .parse(input)
@@ -2966,5 +2968,27 @@ mod test {
             let src = format!("namespace x = \"urn:x\"\n{top}");
             assert!(parse(&src).is_ok(), "{top:?}");
         }
+    }
+
+    #[test]
+    fn identifier_starting_with_datatype_keyword() {
+        for name in ["token.content", "tokens", "string-foo", "strings"] {
+            match start_pattern(&format!("start = {name}")) {
+                Pattern::Identifier(Identifier(_, id)) => assert_eq!(id, name),
+                other => panic!("expected identifier {name:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn datatype_keywords_still_recognised() {
+        assert!(matches!(
+            start_pattern("start = string"),
+            Pattern::DatatypeName(DatatypeNamePattern(_, DatatypeName::String, None, None))
+        ));
+        assert!(matches!(
+            start_pattern("start = token\"x\""),
+            Pattern::DatatypeValue(DatatypeValuePattern(_, Some(DatatypeName::Token), ..))
+        ));
     }
 }

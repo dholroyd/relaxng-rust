@@ -1,0 +1,20 @@
+name: Archive Closed PR Benchmarks
+
+# pull_request_target, rather than pull_request, so that the secret is available for PRs from
+# forks too.  This must never check out or run code from the PR.
+on:
+  pull_request_target:
+    types: [closed]
+
+jobs:
+  archive_pr_branch:
+    name: Archive closed PR branch with Bencher
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: bencherdev/bencher@main
+      - name: Archive closed PR branch
+        run: |
+          bencher archive \
+          --project relaxng-rust \
+          --key "${{ secrets.BENCHER_API_KEY }}" \
+          --branch "$GITHUB_HEAD_REF"

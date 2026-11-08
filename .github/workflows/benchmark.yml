@@ -6,14 +6,16 @@ jobs:
   benchmark_with_bencher:
     name: Benchmark with Bencher
     runs-on: ubuntu-24.04
+    permissions:
+      checks: write
     env:
       BENCHER_PROJECT: relaxng-rust
-      BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+      BENCHER_API_KEY: ${{ secrets.BENCHER_API_KEY }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1.15.4
+        uses: actions-rust-lang/setup-rust-toolchain@v2
 
       - uses: bencherdev/bencher@main
       - uses: cargo-bins/cargo-binstall@main
@@ -33,10 +35,14 @@ jobs:
       - run: |
           bencher run \
           --branch "$GITHUB_REF_NAME" \
+          --testbed ubuntu-24.04 \
           --threshold-measure instructions \
-          --threshold-test t_test \
-          --threshold-upper-boundary 0.95 \
-          --err \
+          --threshold-test percentage \
+          --threshold-max-sample-size 64 \
+          --threshold-upper-boundary 0.02 \
+          --thresholds-reset \
+          --error-on-alert \
+          --github-actions "${{ secrets.GITHUB_TOKEN }}" \
           --adapter rust_gungraun \
           --hash "$GITHUB_SHA" \
           --file "perf.txt"

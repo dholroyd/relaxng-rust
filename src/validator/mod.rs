@@ -95,6 +95,13 @@ pub enum ValidatorError {
         span: Range<u64>,
         kind: &'static str,
     },
+    /// The document is in an encoding other than UTF-8, the only one supported. `span` is that
+    /// of the byte order mark or first character from which a UTF-16 or UTF-32 encoding was
+    /// detected, or of the `<?xml` starting the XML declaration that names the encoding.
+    UnsupportedEncoding {
+        encoding: String,
+        span: Range<u64>,
+    },
     TextBufferOverflow,
     /// Validating the document needed more patterns, derived from the schema's own, than the
     /// pattern table can hold.  The document's validity is unknown.
@@ -226,6 +233,12 @@ impl std::fmt::Display for ValidatorError {
             ValidatorError::InvalidUtf8 { kind, .. } => {
                 write!(f, "{kind} contains invalid UTF-8")
             }
+            ValidatorError::UnsupportedEncoding { encoding, .. } => {
+                write!(
+                    f,
+                    "unsupported encoding {encoding:?}; only UTF-8 is supported"
+                )
+            }
             ValidatorError::TextBufferOverflow => {
                 write!(f, "Text content exceeds maximum buffer size")
             }
@@ -279,6 +292,9 @@ impl From<infoset::Error> for ValidatorError {
             infoset::Error::ElementTooDeep { span } => ValidatorError::ElementTooDeep { span },
             infoset::Error::InvalidUtf8 { span, kind } => {
                 ValidatorError::InvalidUtf8 { span, kind }
+            }
+            infoset::Error::UnsupportedEncoding { encoding, span } => {
+                ValidatorError::UnsupportedEncoding { encoding, span }
             }
         }
     }
@@ -1015,8 +1031,7 @@ impl Explainer<'_> {
         err: &ValidatorError,
     ) -> (codemap::CodeMap, Vec<codemap_diagnostic::Diagnostic>) {
         let mut map = codemap::CodeMap::new();
-        let source_str = String::from_utf8_lossy(source).into_owned();
-        let file = map.add_file(name, source_str);
+        let file = map.add_file(name, offset_preserving_lossy(source));
         let mut diagnostics = vec![];
         match err {
             ValidatorError::Xml(err) => {
@@ -1257,6 +1272,19 @@ impl Explainer<'_> {
                     spans: vec![label],
                 });
             }
+            ValidatorError::UnsupportedEncoding { span, .. } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: file.span.subspan(span.start as _, span.end as _),
+                    label: None,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                };
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: err.to_string(),
+                    code: None,
+                    spans: vec![label],
+                });
+            }
             ValidatorError::TextBufferOverflow => {
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
@@ -1284,6 +1312,19 @@ impl Explainer<'_> {
         }
         (map, diagnostics)
     }
+}
+
+/// Converts `source` to a string for display, replacing each byte that is not part of valid UTF-8
+/// with `?`. Unlike [`String::from_utf8_lossy`], whose replacement character is longer than the
+/// byte it replaces, this keeps every byte offset the same, so that error spans still fall on
+/// the text they were found in.
+fn offset_preserving_lossy(source: &[u8]) -> String {
+    let mut text = String::with_capacity(source.len());
+    for chunk in source.utf8_chunks() {
+        text.push_str(chunk.valid());
+        text.extend(std::iter::repeat_n('?', chunk.invalid().len()));
+    }
+    text
 }
 
 fn set_expected(err: &mut ValidatorError, pid: PatId) {
@@ -1888,6 +1929,12 @@ mod tests {
             // the first piece of the text when it is split across chunks
             b"<root/>t",
             b"",
+            b"\xEF\xBB\xBF<?xml version='1.0' encoding='utf-8'?><root>t</root>",
+            b"\xEF\xBB\xBF<root><y/></root>",
+            // Not a declaration naming an unsupported encoding: that is only found when the first
+            // buffer holds the whole declaration (see `infoset::check_initial_encoding`)
+            b"\xFF\xFE<\0r\0/\0>\0",
+            b"\xFF\xFE\0\0<\0\0\0",
         ];
         let f = Fixture::correct(schema);
         for doc in docs {
@@ -2807,6 +2854,59 @@ mod tests {
                 ..
             }
         );
+    }
+
+    fn unsupported_encoding(err: &super::ValidatorError) -> (&str, std::ops::Range<u64>) {
+        match err {
+            super::ValidatorError::UnsupportedEncoding { encoding, span } => {
+                (encoding.as_str(), span.clone())
+            }
+            other => panic!("expected UnsupportedEncoding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn utf8_byte_order_mark_skipped() {
+        let f = Fixture::correct("start = element a { text }");
+        f.valid("\u{FEFF}<a>x</a>");
+        f.valid("\u{FEFF}<?xml version='1.0' encoding='UTF-8'?><a>x</a>");
+    }
+
+    #[test]
+    fn spans_after_byte_order_mark_are_offsets_in_the_document() {
+        let f = Fixture::correct("start = element a { empty }");
+        let mut v = Case::new(f.schema.clone());
+        let err = v.validate_all(b"\xEF\xBB\xBF<b/>").unwrap_err().remove(0);
+        let span = match err {
+            super::ValidatorError::NotAllowed { span, .. } => span,
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(span, 4..5);
+    }
+
+    #[test]
+    fn utf8_compatible_declared_encodings_accepted() {
+        let f = Fixture::correct("start = element a { text }");
+        for enc in ["UTF-8", "utf-8", "US-ASCII", "ascii"] {
+            f.valid(&format!("<?xml version='1.0' encoding='{enc}'?><a>x</a>"));
+        }
+        f.valid("<?xml version='1.0'?><a>x</a>");
+    }
+
+    #[test]
+    fn other_declared_encodings_rejected() {
+        let f = Fixture::correct("start = element a { text }");
+        let mut v = Case::new(f.schema.clone());
+        // Rejected even though this content reads the same as UTF-8
+        let doc = b"<?xml version='1.0' encoding='ISO-8859-1'?><a>x</a>";
+        let errors = v.validate_all(doc).unwrap_err();
+        assert_eq!(errors.len(), 1, "got {errors:?}");
+        assert_eq!(unsupported_encoding(&errors[0]), ("ISO-8859-1", 0..5));
+
+        // A UTF-8 byte order mark does not excuse a declaration naming another encoding
+        let doc = b"\xEF\xBB\xBF<?xml version='1.0' encoding='windows-1252'?><a/>";
+        let errors = v.validate_all(doc).unwrap_err();
+        assert_eq!(unsupported_encoding(&errors[0]), ("windows-1252", 3..8));
     }
 
     #[test]

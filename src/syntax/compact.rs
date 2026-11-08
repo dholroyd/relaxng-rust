@@ -661,9 +661,38 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
 // This does NOT handle binary operators (|, &, ,) — those are handled iteratively
 // in `pattern` to avoid O(n) recursion depth on long chains like `a | b | c | ...`.
 fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
+    // annotatedPrimary: follow annotations here belong to the primary, inside any repetition
+    let (input, primary) = lead_annotated_primary(input)?;
+    let (input, follow) = follow_annotation_list(input)?;
+    let mut result = with_follow_annotations(primary, follow);
+    let mut input = input;
+
+    // repeatedPrimary: a postfix operator, which binds tighter than binary operators, and then
+    // follow annotations for the repetition as a whole
+    loop {
+        let (i, _) = space_comment0(input)?;
+        let Ok((i, op)) = satisfy::<_, _, Error<Span>>(|c| matches!(c, '?' | '*' | '+')).parse(i)
+        else {
+            return Ok((input, result));
+        };
+        let repeated = Box::new(result);
+        let repeated = match op {
+            '?' => Pattern::Optional(None, repeated),
+            '*' => Pattern::ZeroOrMore(None, repeated),
+            _ => Pattern::OneOrMore(None, repeated),
+        };
+        let (i, follow) = follow_annotation_list(i)?;
+        result = with_follow_annotations(repeated, follow);
+        input = i;
+    }
+}
+
+/// leadAnnotatedPrimary: a primary pattern, with any leading annotations (`##` documentation,
+/// and `[...]`)
+fn lead_annotated_primary(input: Span) -> IResult<Span, Pattern> {
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = space_comment0(input)?;
-    let (input, mut result) = alt((
+    let (input, primary) = alt((
         map(element_pattern, Pattern::Element),
         map(attribute_pattern, Pattern::Attribute),
         map(list_pattern, Pattern::List),
@@ -688,41 +717,33 @@ fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
         map(group_pattern, |p| Pattern::Group(Box::new(p))),
     ))
     .parse(input)?;
+    let result = match annotations {
+        Some(annos) => Pattern::Annotated(annos, Box::new(primary)),
+        None => primary,
+    };
+    Ok((input, result))
+}
 
-    let (mut input, follow_annotations) = follow_annotation_list(input)?;
-
-    // Wrap in Annotated if there are any annotations
-    if annotations.is_some() || !follow_annotations.is_empty() {
-        let mut annos = annotations.unwrap_or(Annotations {
-            documentation: vec![],
-            initial: None,
-            follow_elements: vec![],
-        });
-        annos.follow_elements = follow_annotations;
-        result = Pattern::Annotated(annos, Box::new(result));
+/// Attach `>>` follow annotations to `pattern`, sharing its `Annotated` wrapper if it has leading
+/// annotations but no follow annotations yet.
+fn with_follow_annotations(pattern: Pattern, follow: Vec<AnnotationElement>) -> Pattern {
+    if follow.is_empty() {
+        return pattern;
     }
-
-    // Postfix operators bind tighter than binary operators
-    loop {
-        let (i, _) = space_comment0(input)?;
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("?")(i) {
-            result = Pattern::Optional(None, Box::new(result));
-            input = i;
-            continue;
+    match pattern {
+        Pattern::Annotated(mut annos, inner) if annos.follow_elements.is_empty() => {
+            annos.follow_elements = follow;
+            Pattern::Annotated(annos, inner)
         }
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("*")(i) {
-            result = Pattern::ZeroOrMore(None, Box::new(result));
-            input = i;
-            continue;
-        }
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("+")(i) {
-            result = Pattern::OneOrMore(None, Box::new(result));
-            input = i;
-            continue;
-        }
-        break;
+        other => Pattern::Annotated(
+            Annotations {
+                documentation: vec![],
+                initial: None,
+                follow_elements: follow,
+            },
+            Box::new(other),
+        ),
     }
-    IResult::Ok((input, result))
 }
 
 fn pattern(input: Span) -> IResult<Span, Pattern> {
@@ -2580,6 +2601,27 @@ mod test {
         ] {
             let result = parse(src);
             assert!(result.is_ok(), "{src:?}: {result:?}");
+        }
+    }
+
+    /// The pattern within `element a { … }`, for `body`
+    fn element_body(body: &str) -> Pattern {
+        let src = format!("namespace x = \"urn:x\"\nstart = element a {{ {body} }}");
+        match parse(&src).map(only_define) {
+            Ok(Define {
+                pattern: Pattern::Element(el),
+                ..
+            }) => *el.pattern,
+            other => panic!("expected element for {body:?}, got {other:?}"),
+        }
+    }
+
+    /// Summarise the leading and follow annotations on an `Annotated` pattern, as
+    /// (has leading [...], number of follow annotations, inner pattern)
+    fn annos(p: Pattern) -> (bool, usize, Pattern) {
+        match p {
+            Pattern::Annotated(a, inner) => (a.initial.is_some(), a.follow_elements.len(), *inner),
+            other => panic!("expected annotated pattern, got {other:?}"),
         }
     }
 }

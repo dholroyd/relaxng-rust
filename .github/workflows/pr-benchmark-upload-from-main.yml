@@ -10,6 +10,9 @@ jobs:
   track_with_bencher:
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
+    permissions:
+      checks: write
+      pull-requests: write
     env:
       BENCHER_PROJECT: relaxng-rust
       BENCHER_ADAPTER: rust_gungraun
@@ -17,22 +20,23 @@ jobs:
       PR_EVENT: event.json
     steps:
       - name: Download Benchmark Results
-        uses: dawidd6/action-download-artifact@v20
+        uses: dawidd6/action-download-artifact@v28
         with:
           name: ${{ env.BENCHMARK_RESULTS }}
           run_id: ${{ github.event.workflow_run.id }}
       - name: Download PR Event
-        uses: dawidd6/action-download-artifact@v20
+        uses: dawidd6/action-download-artifact@v28
         with:
           name: ${{ env.PR_EVENT }}
           run_id: ${{ github.event.workflow_run.id }}
       - name: Export PR Event Data
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             let fs = require('fs');
             let prEvent = JSON.parse(fs.readFileSync(process.env.PR_EVENT, {encoding: 'utf8'}));
             core.exportVariable("PR_HEAD", prEvent.pull_request.head.ref);
+            core.exportVariable("PR_HEAD_SHA", prEvent.pull_request.head.sha);
             core.exportVariable("PR_BASE", prEvent.pull_request.base.ref);
             core.exportVariable("PR_BASE_SHA", prEvent.pull_request.base.sha);
             core.exportVariable("PR_DEFAULT", prEvent.pull_request.base.repo.default_branch);
@@ -42,12 +46,14 @@ jobs:
         run: |
           bencher run \
           --branch "$PR_HEAD" \
+          --hash "$PR_HEAD_SHA" \
           --start-point "$PR_BASE" \
           --start-point-hash "$PR_BASE_SHA" \
           --start-point-clone-thresholds \
           --start-point-reset \
+          --testbed ubuntu-24.04 \
           --ci-number "$PR_NUMBER" \
           --github-actions "${{ secrets.GITHUB_TOKEN }}" \
-          --token "${{ secrets.BENCHER_API_TOKEN }}" \
-          --err \
+          --key "${{ secrets.BENCHER_API_KEY }}" \
+          --error-on-alert \
           --file "$BENCHMARK_RESULTS"

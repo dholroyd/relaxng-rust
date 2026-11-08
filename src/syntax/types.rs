@@ -163,9 +163,16 @@ pub enum PatternOrGrammar {
 #[derive(Debug, PartialEq)]
 pub enum GrammarContent {
     Define(Define),
-    Div(Vec<GrammarContent>),
+    Div(Div<GrammarContent>),
     Include(Include),
     Annotation(AnnotationElement),
+}
+
+/// A `div`, grouping grammar content or include content.
+#[derive(Debug, PartialEq)]
+pub struct Div<C> {
+    pub annotations: Option<Annotations>,
+    pub content: Vec<C>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -199,7 +206,7 @@ pub struct Inherit(pub IdentifierOrKeyword);
 #[derive(Debug, PartialEq)]
 pub enum IncludeContent {
     Define(Define),
-    Div(Vec<IncludeContent>),
+    Div(Div<IncludeContent>),
     Annotation(AnnotationElement),
 }
 

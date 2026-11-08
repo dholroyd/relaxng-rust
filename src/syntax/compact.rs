@@ -7,7 +7,7 @@ use nom::sequence::preceded;
 use nom::{
     branch::alt,
     bytes::complete::{is_not, tag, take_till, take_until, take_while, take_while1},
-    combinator::{all_consuming, map, not, opt, peek, recognize},
+    combinator::{all_consuming, map, not, opt, peek, recognize, verify},
     error::ErrorKind,
     multi::{fold_many0, fold_many1, many0, separated_list0},
     sequence::delimited,
@@ -1198,8 +1198,19 @@ fn cname(input: Span) -> IResult<Span, QName> {
 //                        | define
 //                        | "div" "{" grammarContent* "}"
 //                        | "include" anyURILiteral [inherit] ["{" includeContent* "}"]
+//
+// An annotation element may appear in place of grammarContent, but without annotations of its
+// own (the spec's `member ::= annotatedComponent | annotationElementNotKeyword`).
 fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
     let (input, _guard) = RecursionGuard::enter(input)?;
+    alt((
+        map(annotation_element_not_keyword, GrammarContent::Annotation),
+        annotated_grammar_component,
+    ))
+    .parse(input)
+}
+
+fn annotated_grammar_component(input: Span) -> IResult<Span, GrammarContent> {
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = space_comment0(input)?;
     let (input, mut item) = alt((
@@ -1207,25 +1218,24 @@ fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
         map(define, GrammarContent::Define),
         map(div_grammar_content, GrammarContent::Div),
         map(include, GrammarContent::Include),
-        map(annotation_element, GrammarContent::Annotation),
     ))
     .parse(input)?;
-
-    // Attach annotations to the parsed item
-    if let Some(annotations) = annotations {
-        match &mut item {
-            GrammarContent::Define(d) => {
-                d.annotations = Some(annotations);
-            }
-            GrammarContent::Include(i) => {
-                i.annotations = Some(annotations);
-            }
-            // For Div and Annotation, annotations are not currently stored
-            _ => {}
-        }
+    match &mut item {
+        GrammarContent::Define(Define { annotations: a, .. })
+        | GrammarContent::Include(Include { annotations: a, .. })
+        | GrammarContent::Div(Div { annotations: a, .. }) => *a = annotations,
+        GrammarContent::Annotation(_) => unreachable!("not parsed here"),
     }
-
     Ok((input, item))
+}
+
+/// An annotation element in place of grammar or include content, which can't have an unprefixed
+/// keyword as its name, e.g. `div [ ]`
+fn annotation_element_not_keyword(input: Span) -> IResult<Span, AnnotationElement> {
+    verify(annotation_element, |e| {
+        !matches!(e.name, Name::Identifier(IdentifierOrKeyword::Keyword(_)))
+    })
+    .parse(input)
 }
 
 // start	  ::=  	"start" assignMethod pattern
@@ -1293,7 +1303,7 @@ fn assign_method(input: Span) -> IResult<Span, AssignMethod> {
 }
 
 // "div" "{" grammarContent* "}"
-fn div_grammar_content(input: Span) -> IResult<Span, Vec<GrammarContent>> {
+fn div_grammar_content(input: Span) -> IResult<Span, Div<GrammarContent>> {
     let parse = (
         tag("div"),
         space_comment0,
@@ -1304,7 +1314,10 @@ fn div_grammar_content(input: Span) -> IResult<Span, Vec<GrammarContent>> {
         cut(tag("}")),
     );
 
-    let mut parser = map(parse, |(_, _, _, _, content, _, _)| content);
+    let mut parser = map(parse, |(_, _, _, _, content, _, _)| Div {
+        annotations: None,
+        content,
+    });
 
     parser.parse(input)
 }
@@ -1363,27 +1376,36 @@ fn inherit(input: Span) -> IResult<Span, Inherit> {
 // includeContent  ::=  define
 //                    | start
 //                    | "div" "{" includeContent* "}"
+//
+// As for grammarContent, an annotation element may appear here, without annotations of its own
 fn include_content(input: Span) -> IResult<Span, IncludeContent> {
     let (input, _guard) = RecursionGuard::enter(input)?;
+    alt((
+        map(annotation_element_not_keyword, IncludeContent::Annotation),
+        annotated_include_component,
+    ))
+    .parse(input)
+}
+
+fn annotated_include_component(input: Span) -> IResult<Span, IncludeContent> {
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = space_comment0(input)?;
     let (input, mut item) = alt((
-        map(annotation_element, IncludeContent::Annotation),
-        map(define, IncludeContent::Define),
         map(start, IncludeContent::Define),
+        map(define, IncludeContent::Define),
         map(div_include_content, IncludeContent::Div),
     ))
     .parse(input)?;
-
-    if let (Some(annotations), IncludeContent::Define(d)) = (annotations, &mut item) {
-        d.annotations = Some(annotations);
+    match &mut item {
+        IncludeContent::Define(Define { annotations: a, .. })
+        | IncludeContent::Div(Div { annotations: a, .. }) => *a = annotations,
+        IncludeContent::Annotation(_) => unreachable!("not parsed here"),
     }
-
     Ok((input, item))
 }
 
 // "div" "{" includeContent* "}"
-fn div_include_content(input: Span) -> IResult<Span, Vec<IncludeContent>> {
+fn div_include_content(input: Span) -> IResult<Span, Div<IncludeContent>> {
     let parse = (
         tag("div"),
         space_comment0,
@@ -1394,7 +1416,10 @@ fn div_include_content(input: Span) -> IResult<Span, Vec<IncludeContent>> {
         cut(tag("}")),
     );
 
-    let mut parser = map(parse, |(_, _, _, _, content, _, _)| content);
+    let mut parser = map(parse, |(_, _, _, _, content, _, _)| Div {
+        annotations: None,
+        content,
+    });
 
     parser.parse(input)
 }
@@ -2804,6 +2829,52 @@ mod test {
                 element_name_class(nc),
                 NameClass::Alt(_) | NameClass::AnyName(_)
             ));
+        }
+    }
+
+    #[test]
+    fn div_annotations_kept() {
+        let src = "namespace x = \"urn:x\"\n## grammar div\n[x:a=\"1\"] div { start = empty }\n\
+                   include \"inc.rnc\" {\n  ## include div\n  div { b = text }\n}";
+        let items = grammar_items(src);
+        let GrammarContent::Div(Div {
+            annotations: Some(a),
+            content,
+        }) = &items[0]
+        else {
+            panic!("expected annotated div, got {:?}", items[0]);
+        };
+        assert_eq!(a.documentation[0].content, "grammar div");
+        assert!(a.initial.is_some());
+        assert_eq!(content.len(), 1);
+
+        let GrammarContent::Include(Include {
+            content: Some(inc), ..
+        }) = &items[1]
+        else {
+            panic!("expected include, got {:?}", items[1]);
+        };
+        let IncludeContent::Div(Div {
+            annotations: Some(a),
+            ..
+        }) = &inc[0]
+        else {
+            panic!("expected annotated div, got {:?}", inc[0]);
+        };
+        assert_eq!(a.documentation[0].content, "include div");
+    }
+
+    #[test]
+    fn grammar_level_annotation_elements() {
+        let p = "namespace x = \"urn:x\"\nstart = empty\n";
+        let items = grammar_items(&format!("{p}x:foo [ ]\nfoo [ ]"));
+        assert!(matches!(items[1], GrammarContent::Annotation(_)));
+        assert!(matches!(items[2], GrammarContent::Annotation(_)));
+        // Jing rejects annotations on an annotation element, and an unprefixed keyword as its
+        // name
+        for rest in ["## doc\nx:foo [ ]", "[x:a=\"1\"] x:foo [ ]", "div [ ]"] {
+            let src = format!("{p}{rest}");
+            assert!(parse(&src).is_err(), "expected error for {rest:?}");
         }
     }
 }

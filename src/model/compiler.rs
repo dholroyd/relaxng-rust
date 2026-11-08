@@ -1487,12 +1487,20 @@ impl<FS: Files> Compiler<FS> {
         }
         Ok(())
     }
-    fn compile_include_div(
+    /// Compile the overriding definitions in an include body, or in a `div` within one
+    fn compile_include_overrides(
         &mut self,
-        _ctx: &mut Context,
-        _div: &[types::IncludeContent],
+        ctx: &mut Context,
+        content: &[types::IncludeContent],
     ) -> Result<(), RelaxError> {
-        unimplemented!()
+        for item in content {
+            match item {
+                types::IncludeContent::Define(d) => self.compile_define(ctx, d)?,
+                types::IncludeContent::Div(d) => self.compile_include_overrides(ctx, &d.content)?,
+                types::IncludeContent::Annotation(_) => (),
+            }
+        }
+        Ok(())
     }
     fn compile_include(
         &mut self,
@@ -1529,18 +1537,8 @@ impl<FS: Files> Compiler<FS> {
         // replace any definitions for which the including file provides an override
         if let Some(ref overrides) = inc.content {
             let mut override_ctx = inc_ctx.new_inc_overrides();
-            for o in overrides.iter() {
-                match o {
-                    types::IncludeContent::Define(d) => {
-                        self.compile_define(&mut override_ctx, d)
-                            .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?
-                    }
-                    types::IncludeContent::Div(d) => self
-                        .compile_include_div(&mut override_ctx, &d.content)
-                        .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?,
-                    types::IncludeContent::Annotation(_) => (),
-                }
-            }
+            self.compile_include_overrides(&mut override_ctx, overrides)
+                .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?;
         }
 
         self.compile_schema(&mut inc_ctx, s)

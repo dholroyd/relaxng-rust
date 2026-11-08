@@ -1,0 +1,229 @@
+# The schema of the validator benchmarks and the shootout, exercising most features, shaped
+# like real document schemas such as DocBook and TEI:
+# - Namespaces (default + prefixed), including the predeclared `xml` prefix
+# - Grammar with named definitions and recursion (`section`, inline elements, `tree-node`,
+#   `foreign`)
+# - All occurrence operators: optional(?), zeroOrMore(*), oneOrMore(+)
+# - All composition: group(,), choice(|), interleave(&)
+# - Interleave of elements (`metadata`) and of attributes (`common-attrs`, as in DocBook's
+#   common attributes or TEI's `att.global`)
+# - Text content mostly written as `(text | a | b)*` as TEI and DocBook do, with a wide choice
+#   of inline elements (`inline1` … `inline40`); `heading` alone uses `mixed { … }`, so
+#   that its faster path is covered too
+# - A content model whose first part is optional (`p`'s leading `title`)
+# - Overlapping content models, which leave the validator tracking several alternatives at once:
+#   two `figure` definitions that both match the same element, and two `p` definitions, where a
+#   `p` after the content blocks may be either the last block or the section's closing
+#   paragraph (as HTML5's schema defines `a` once per content category)
+# - XSD datatypes with facets (integer ranges, string lengths, patterns, decimals, dates,
+#   booleans)
+# - Datatype values (enumerated string values), and a choice of a datatype and a value
+#   (`width`)
+# - List pattern (whitespace-separated tokens)
+# - NameClass: named, nsName (`app:*`), anyName (`*`), except, and choices of name classes
+#
+# The documents that `make_document()` in mod.rs generates are valid against it.  xmllint reads
+# only the XML syntax, so after editing this, regenerate schema.rng with
+# `trang schema.rnc schema.rng`.
+
+namespace app = "http://example.com/app"
+default namespace bench = "http://example.com/ns"
+
+start = element document {
+    attribute version { "1.0" | "2.0" },
+    attribute app:generator { text }?,
+    metadata,
+    body
+}
+
+# Attributes most elements accept, interleaved as in DocBook and TEI
+common-attrs =
+    attribute xml:id { xsd:ID }?
+  & attribute xml:lang { xsd:language }?
+  & attribute role { xsd:token }?
+
+# Children in any order
+metadata = element metadata {
+    element title { xsd:token { minLength = "1" maxLength = "200" } }
+  & element created { xsd:date }
+  & element modified { xsd:dateTime }?
+  & element revision { xsd:positiveInteger }?
+  & element score { xsd:decimal { fractionDigits = "2" } }?
+  & element tags { list { xsd:token+ } }?
+  & element author {
+        attribute email { xsd:string { pattern = ".+@.+\..+" } },
+        attribute active { xsd:boolean },
+        text
+    }+
+}
+
+body = element body {
+    section+
+}
+
+# A `p` after the content blocks may be either the last block or the closing paragraph
+section = element section {
+    attribute id { xsd:ID },
+    attribute priority { xsd:integer { minInclusive = "1" maxInclusive = "10" } }?,
+    element heading { mixed { element em { text }* } },
+    content-block*,
+    closing-paragraph?,
+    section*
+}
+
+content-block =
+    paragraph | table | code-block | figure | data-list | extension-point | tree-node
+
+paragraph = element p {
+    common-attrs,
+    element title { (text | inline-element)* }?,
+    (text | inline-element | element br { empty })*
+}
+
+# A second definition of `p`, overlapping `paragraph`
+closing-paragraph = element p {
+    attribute kind { "summary" }?,
+    (text | inline-element)*
+}
+
+# Real document schemas offer a wide choice of inline elements in text content (DocBook around
+# a hundred, TEI a few hundred), and the cost of deriving a text node against such content grows
+# with the width of that choice, so `inline1` … `inline40` widen it.  `EXTRA_INLINE_ELEMENTS` in
+# mod.rs must match their number.
+inline-element =
+    element strong { common-attrs, (text | inline-element)* }
+  | element em { common-attrs, (text | inline-element)* }
+  | element code { text }
+  | element a {
+        attribute href { xsd:anyURI },
+        attribute title { text }?,
+        (text | inline-element)*
+    }
+  | element span {
+        attribute class { xsd:token },
+        common-attrs,
+        (text | inline-element)*
+    }
+  | element inline1 { common-attrs, (text | inline-element)* }
+  | element inline2 { common-attrs, (text | inline-element)* }
+  | element inline3 { common-attrs, (text | inline-element)* }
+  | element inline4 { common-attrs, (text | inline-element)* }
+  | element inline5 { common-attrs, (text | inline-element)* }
+  | element inline6 { common-attrs, (text | inline-element)* }
+  | element inline7 { common-attrs, (text | inline-element)* }
+  | element inline8 { common-attrs, (text | inline-element)* }
+  | element inline9 { common-attrs, (text | inline-element)* }
+  | element inline10 { common-attrs, (text | inline-element)* }
+  | element inline11 { common-attrs, (text | inline-element)* }
+  | element inline12 { common-attrs, (text | inline-element)* }
+  | element inline13 { common-attrs, (text | inline-element)* }
+  | element inline14 { common-attrs, (text | inline-element)* }
+  | element inline15 { common-attrs, (text | inline-element)* }
+  | element inline16 { common-attrs, (text | inline-element)* }
+  | element inline17 { common-attrs, (text | inline-element)* }
+  | element inline18 { common-attrs, (text | inline-element)* }
+  | element inline19 { common-attrs, (text | inline-element)* }
+  | element inline20 { common-attrs, (text | inline-element)* }
+  | element inline21 { common-attrs, (text | inline-element)* }
+  | element inline22 { common-attrs, (text | inline-element)* }
+  | element inline23 { common-attrs, (text | inline-element)* }
+  | element inline24 { common-attrs, (text | inline-element)* }
+  | element inline25 { common-attrs, (text | inline-element)* }
+  | element inline26 { common-attrs, (text | inline-element)* }
+  | element inline27 { common-attrs, (text | inline-element)* }
+  | element inline28 { common-attrs, (text | inline-element)* }
+  | element inline29 { common-attrs, (text | inline-element)* }
+  | element inline30 { common-attrs, (text | inline-element)* }
+  | element inline31 { common-attrs, (text | inline-element)* }
+  | element inline32 { common-attrs, (text | inline-element)* }
+  | element inline33 { common-attrs, (text | inline-element)* }
+  | element inline34 { common-attrs, (text | inline-element)* }
+  | element inline35 { common-attrs, (text | inline-element)* }
+  | element inline36 { common-attrs, (text | inline-element)* }
+  | element inline37 { common-attrs, (text | inline-element)* }
+  | element inline38 { common-attrs, (text | inline-element)* }
+  | element inline39 { common-attrs, (text | inline-element)* }
+  | element inline40 { common-attrs, (text | inline-element)* }
+
+table = element table {
+    common-attrs,
+    attribute border { xsd:nonNegativeInteger }?,
+    element caption { text }?,
+    element thead {
+        table-row+
+    },
+    element tbody {
+        table-row+
+    }
+}
+
+table-row = element tr {
+    (element th {
+        attribute colspan { xsd:positiveInteger }?,
+        attribute rowspan { xsd:positiveInteger }?,
+        (text | inline-element)*
+    } | element td {
+        attribute colspan { xsd:positiveInteger }?,
+        attribute rowspan { xsd:positiveInteger }?,
+        (text | inline-element)*
+    })+
+}
+
+code-block = element pre {
+    common-attrs,
+    attribute language { "rust" | "python" | "javascript" | "xml" | "json" | "sql" },
+    attribute line-numbers { xsd:boolean }?,
+    text
+}
+
+# Two overlapping definitions: a figure with one image and a caption matches both, up to its
+# end tag
+figure =
+    element figure {
+        common-attrs,
+        attribute float { "left" | "right" | "none" }?,
+        image,
+        figcaption?
+    }
+  | element figure {
+        common-attrs,
+        attribute float { "none" }?,
+        image+,
+        figcaption,
+        element credit { text }?
+    }
+
+image = element img {
+    attribute src { xsd:anyURI },
+    attribute alt { text },
+    attribute width { xsd:nonNegativeInteger | "auto" }?,
+    attribute height { xsd:nonNegativeInteger | "auto" }?,
+    empty
+}
+
+figcaption = element figcaption { (text | inline-element)* }
+
+data-list = element dl {
+    common-attrs,
+    (element dt { (text | inline-element)* },
+     element dd { (text | inline-element)* })+
+}
+
+# Recursive tree structure exercising Ref patterns
+tree-node = element node {
+    attribute name { xsd:NCName },
+    attribute value { text }?,
+    tree-node*
+}
+
+# Wildcard / nsName patterns
+extension-point = element app:extensions {
+    attribute app:* { text }*,
+    (element app:* - app:extensions { text } | foreign)*
+}
+
+# Elements from any other namespace, with any attributes
+foreign = element * - (bench:* | app:*) {
+    attribute * { text }*,
+    (text | foreign)*
+}

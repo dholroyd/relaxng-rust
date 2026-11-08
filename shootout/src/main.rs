@@ -25,110 +25,22 @@ struct Args {
 }
 
 // ---------------------------------------------------------------------------
-// Document generation (mirrors bench.rs, with XML declaration prepended)
+// Schema and documents, shared with the validator benchmarks
 // ---------------------------------------------------------------------------
 
+#[path = "../../benches/document/mod.rs"]
+mod document;
+
+/// The benchmarks' schema, and the same in XML syntax for xmllint, which reads nothing else.
+const SCHEMA_RNC: &str = document::SCHEMA;
+const SCHEMA_RNG: &str = include_str!("../../benches/document/schema.rng");
+
+/// The benchmarks' document, as a file with an XML declaration.
 fn make_document(sections: usize) -> String {
-    let mut doc = String::from("<?xml version=\"1.0\"?>\n");
-    doc.push_str(r#"<document xmlns="http://example.com/ns" xmlns:app="http://example.com/app" version="1.0" app:generator="shootout">"#);
-
-    // metadata block
-    doc.push_str(r#"<metadata>"#);
-    doc.push_str(r#"<title>Benchmark Document With Many Features</title>"#);
-    doc.push_str(r#"<created>2025-06-15</created>"#);
-    doc.push_str(r#"<modified>2025-06-15T10:30:00</modified>"#);
-    doc.push_str(r#"<revision>42</revision>"#);
-    doc.push_str(r#"<score>98.75</score>"#);
-    doc.push_str(r#"<tags>benchmark performance testing validation</tags>"#);
-    doc.push_str(r#"<author email="alice@example.com" active="true">Alice Smith</author>"#);
-    doc.push_str(r#"<author email="bob@test.org" active="false">Bob Jones</author>"#);
-    doc.push_str(r#"</metadata>"#);
-
-    doc.push_str(r#"<body>"#);
-    for s in 0..sections {
-        write_section(&mut doc, s, 0);
-    }
-    doc.push_str(r#"</body>"#);
-    doc.push_str(r#"</document>"#);
-    doc
-}
-
-fn write_section(doc: &mut String, idx: usize, depth: usize) {
-    let priority = (idx % 10) + 1;
-    doc.push_str(&format!(
-        r#"<section id="s{depth}_{idx}" priority="{priority}">"#
-    ));
-    doc.push_str(&format!(
-        r#"<heading>Section {idx} with <em>emphasis</em> text</heading>"#
-    ));
-
-    let block_type = idx % 7;
-
-    // paragraph with mixed content + inline elements
-    doc.push_str(r#"<p>This is a paragraph with "#);
-    doc.push_str(r#"<strong>bold <em>and italic</em></strong> "#);
-    doc.push_str(r#"and <code>inline_code</code> "#);
-    doc.push_str(r#"and <a href="http://example.com" title="Example">a link</a> "#);
-    doc.push_str(r#"and <span class="highlight">highlighted <em>text</em></span>"#);
-    doc.push_str(r#"<br/>"#);
-    doc.push_str(r#"with a line break.</p>"#);
-
-    if block_type <= 1 || block_type == 6 {
-        // table
-        doc.push_str(r#"<table border="1"><caption>Data Table</caption><thead><tr>"#);
-        doc.push_str(r#"<th colspan="2">Header A</th><th>Header B</th>"#);
-        doc.push_str(r#"</tr></thead><tbody>"#);
-        for r in 0..3 {
-            doc.push_str(&format!(
-                r#"<tr><td rowspan="1">Cell {r}.1 <em>styled</em></td><td>Cell {r}.2</td><td>Cell {r}.3</td></tr>"#
-            ));
-        }
-        doc.push_str(r#"</tbody></table>"#);
-    }
-
-    if block_type == 2 || block_type == 6 {
-        // code block with enumerated language
-        let languages = ["rust", "python", "javascript", "xml", "json", "sql"];
-        let lang = languages[idx % languages.len()];
-        doc.push_str(&format!(
-            r#"<pre language="{lang}" line-numbers="true">fn main() {{ println!("hello"); }}</pre>"#
-        ));
-    }
-
-    if block_type == 3 || block_type == 6 {
-        // figure with empty img element
-        doc.push_str(r#"<figure>"#);
-        doc.push_str(r#"<img src="http://example.com/img.png" alt="Benchmark figure" width="800" height="600"/>"#);
-        doc.push_str(r#"<figcaption>Figure with <strong>rich</strong> caption</figcaption>"#);
-        doc.push_str(r#"</figure>"#);
-    }
-
-    if block_type == 4 || block_type == 6 {
-        // definition list
-        doc.push_str(r#"<dl>"#);
-        for d in 0..3 {
-            doc.push_str(&format!(
-                r#"<dt>Term {d} <em>important</em></dt><dd>Definition {d} with <code>code</code></dd>"#
-            ));
-        }
-        doc.push_str(r#"</dl>"#);
-    }
-
-    // extra paragraphs
-    for p in 0..2 {
-        doc.push_str(&format!(
-            r#"<p>Additional paragraph {p} with <strong>formatting</strong> and <a href="http://example.com/{p}">links</a>.</p>"#
-        ));
-    }
-
-    // nested sections (recursion up to depth 2)
-    if depth < 2 {
-        for sub in 0..2 {
-            write_section(doc, idx * 10 + sub, depth + 1);
-        }
-    }
-
-    doc.push_str(r#"</section>"#);
+    format!(
+        "<?xml version=\"1.0\"?>\n{}",
+        document::make_document(sections)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -613,8 +525,8 @@ fn main() {
     let rnc_path = tmp.join("document.rnc");
     let rng_path = tmp.join("document.rng");
 
-    std::fs::write(&rnc_path, include_str!("../schemas/catalog.rnc")).expect("write schema.rnc");
-    std::fs::write(&rng_path, include_str!("../schemas/catalog.rng")).expect("write schema.rng");
+    std::fs::write(&rnc_path, SCHEMA_RNC).expect("write schema.rnc");
+    std::fs::write(&rng_path, SCHEMA_RNG).expect("write schema.rng");
 
     // Write all document files up front
     let mut doc_paths: Vec<(usize, PathBuf)> = Vec::new();

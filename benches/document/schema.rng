@@ -1,0 +1,879 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The schema of the validator benchmarks and the shootout, exercising most features, shaped
+  like real document schemas such as DocBook and TEI:
+  - Namespaces (default + prefixed), including the predeclared `xml` prefix
+  - Grammar with named definitions and recursion (`section`, inline elements, `tree-node`,
+    `foreign`)
+  - All occurrence operators: optional(?), zeroOrMore(*), oneOrMore(+)
+  - All composition: group(,), choice(|), interleave(&)
+  - Interleave of elements (`metadata`) and of attributes (`common-attrs`, as in DocBook's
+    common attributes or TEI's `att.global`)
+  - Text content mostly written as `(text | a | b)*` as TEI and DocBook do, with a wide choice
+    of inline elements (`inline1` … `inline40`); `heading` alone uses `mixed { … }`, so
+    that its faster path is covered too
+  - A content model whose first part is optional (`p`'s leading `title`)
+  - Overlapping content models, which leave the validator tracking several alternatives at once:
+    two `figure` definitions that both match the same element, and two `p` definitions, where a
+    `p` after the content blocks may be either the last block or the section's closing
+    paragraph (as HTML5's schema defines `a` once per content category)
+  - XSD datatypes with facets (integer ranges, string lengths, patterns, decimals, dates,
+    booleans)
+  - Datatype values (enumerated string values), and a choice of a datatype and a value
+    (`width`)
+  - List pattern (whitespace-separated tokens)
+  - NameClass: named, nsName (`app:*`), anyName (`*`), except, and choices of name classes
+
+  The documents that `make_document()` in mod.rs generates are valid against it.  xmllint reads
+  only the XML syntax, so after editing this, regenerate schema.rng with
+  `trang schema.rnc schema.rng`.
+-->
+<grammar ns="http://example.com/ns" xmlns:app="http://example.com/app" xmlns="http://relaxng.org/ns/structure/1.0" datatypeLibrary="http://www.w3.org/2001/XMLSchema-datatypes">
+  <start>
+    <element name="document">
+      <attribute name="version">
+        <choice>
+          <value>1.0</value>
+          <value>2.0</value>
+        </choice>
+      </attribute>
+      <optional>
+        <attribute name="app:generator"/>
+      </optional>
+      <ref name="metadata"/>
+      <ref name="body"/>
+    </element>
+  </start>
+  <!-- Attributes most elements accept, interleaved as in DocBook and TEI -->
+  <define name="common-attrs">
+    <interleave>
+      <optional>
+        <attribute name="xml:id">
+          <data type="ID"/>
+        </attribute>
+      </optional>
+      <optional>
+        <attribute name="xml:lang">
+          <data type="language"/>
+        </attribute>
+      </optional>
+      <optional>
+        <attribute name="role">
+          <data type="token"/>
+        </attribute>
+      </optional>
+    </interleave>
+  </define>
+  <!-- Children in any order -->
+  <define name="metadata">
+    <element name="metadata">
+      <interleave>
+        <element name="title">
+          <data type="token">
+            <param name="minLength">1</param>
+            <param name="maxLength">200</param>
+          </data>
+        </element>
+        <element name="created">
+          <data type="date"/>
+        </element>
+        <optional>
+          <element name="modified">
+            <data type="dateTime"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="revision">
+            <data type="positiveInteger"/>
+          </element>
+        </optional>
+        <optional>
+          <element name="score">
+            <data type="decimal">
+              <param name="fractionDigits">2</param>
+            </data>
+          </element>
+        </optional>
+        <optional>
+          <element name="tags">
+            <list>
+              <oneOrMore>
+                <data type="token"/>
+              </oneOrMore>
+            </list>
+          </element>
+        </optional>
+        <oneOrMore>
+          <element name="author">
+            <attribute name="email">
+              <data type="string">
+                <param name="pattern">.+@.+\..+</param>
+              </data>
+            </attribute>
+            <attribute name="active">
+              <data type="boolean"/>
+            </attribute>
+            <text/>
+          </element>
+        </oneOrMore>
+      </interleave>
+    </element>
+  </define>
+  <define name="body">
+    <element name="body">
+      <oneOrMore>
+        <ref name="section"/>
+      </oneOrMore>
+    </element>
+  </define>
+  <!-- A `p` after the content blocks may be either the last block or the closing paragraph -->
+  <define name="section">
+    <element name="section">
+      <attribute name="id">
+        <data type="ID"/>
+      </attribute>
+      <optional>
+        <attribute name="priority">
+          <data type="integer">
+            <param name="minInclusive">1</param>
+            <param name="maxInclusive">10</param>
+          </data>
+        </attribute>
+      </optional>
+      <element name="heading">
+        <mixed>
+          <zeroOrMore>
+            <element name="em">
+              <text/>
+            </element>
+          </zeroOrMore>
+        </mixed>
+      </element>
+      <zeroOrMore>
+        <ref name="content-block"/>
+      </zeroOrMore>
+      <optional>
+        <ref name="closing-paragraph"/>
+      </optional>
+      <zeroOrMore>
+        <ref name="section"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="content-block">
+    <choice>
+      <ref name="paragraph"/>
+      <ref name="table"/>
+      <ref name="code-block"/>
+      <ref name="figure"/>
+      <ref name="data-list"/>
+      <ref name="extension-point"/>
+      <ref name="tree-node"/>
+    </choice>
+  </define>
+  <define name="paragraph">
+    <element name="p">
+      <ref name="common-attrs"/>
+      <optional>
+        <element name="title">
+          <zeroOrMore>
+            <choice>
+              <text/>
+              <ref name="inline-element"/>
+            </choice>
+          </zeroOrMore>
+        </element>
+      </optional>
+      <zeroOrMore>
+        <choice>
+          <text/>
+          <ref name="inline-element"/>
+          <element name="br">
+            <empty/>
+          </element>
+        </choice>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!-- A second definition of `p`, overlapping `paragraph` -->
+  <define name="closing-paragraph">
+    <element name="p">
+      <optional>
+        <attribute name="kind">
+          <value>summary</value>
+        </attribute>
+      </optional>
+      <zeroOrMore>
+        <choice>
+          <text/>
+          <ref name="inline-element"/>
+        </choice>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!--
+    Real document schemas offer a wide choice of inline elements in text content (DocBook around
+    a hundred, TEI a few hundred), and the cost of deriving a text node against such content grows
+    with the width of that choice, so `inline1` … `inline40` widen it.  `EXTRA_INLINE_ELEMENTS` in
+    mod.rs must match their number.
+  -->
+  <define name="inline-element">
+    <choice>
+      <element name="strong">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="em">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="code">
+        <text/>
+      </element>
+      <element name="a">
+        <attribute name="href">
+          <data type="anyURI"/>
+        </attribute>
+        <optional>
+          <attribute name="title"/>
+        </optional>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="span">
+        <attribute name="class">
+          <data type="token"/>
+        </attribute>
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline1">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline2">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline3">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline4">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline5">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline6">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline7">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline8">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline9">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline10">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline11">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline12">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline13">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline14">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline15">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline16">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline17">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline18">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline19">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline20">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline21">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline22">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline23">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline24">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline25">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline26">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline27">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline28">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline29">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline30">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline31">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline32">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline33">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline34">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline35">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline36">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline37">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline38">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline39">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+      <element name="inline40">
+        <ref name="common-attrs"/>
+        <zeroOrMore>
+          <choice>
+            <text/>
+            <ref name="inline-element"/>
+          </choice>
+        </zeroOrMore>
+      </element>
+    </choice>
+  </define>
+  <define name="table">
+    <element name="table">
+      <ref name="common-attrs"/>
+      <optional>
+        <attribute name="border">
+          <data type="nonNegativeInteger"/>
+        </attribute>
+      </optional>
+      <optional>
+        <element name="caption">
+          <text/>
+        </element>
+      </optional>
+      <element name="thead">
+        <oneOrMore>
+          <ref name="table-row"/>
+        </oneOrMore>
+      </element>
+      <element name="tbody">
+        <oneOrMore>
+          <ref name="table-row"/>
+        </oneOrMore>
+      </element>
+    </element>
+  </define>
+  <define name="table-row">
+    <element name="tr">
+      <oneOrMore>
+        <choice>
+          <element name="th">
+            <optional>
+              <attribute name="colspan">
+                <data type="positiveInteger"/>
+              </attribute>
+            </optional>
+            <optional>
+              <attribute name="rowspan">
+                <data type="positiveInteger"/>
+              </attribute>
+            </optional>
+            <zeroOrMore>
+              <choice>
+                <text/>
+                <ref name="inline-element"/>
+              </choice>
+            </zeroOrMore>
+          </element>
+          <element name="td">
+            <optional>
+              <attribute name="colspan">
+                <data type="positiveInteger"/>
+              </attribute>
+            </optional>
+            <optional>
+              <attribute name="rowspan">
+                <data type="positiveInteger"/>
+              </attribute>
+            </optional>
+            <zeroOrMore>
+              <choice>
+                <text/>
+                <ref name="inline-element"/>
+              </choice>
+            </zeroOrMore>
+          </element>
+        </choice>
+      </oneOrMore>
+    </element>
+  </define>
+  <define name="code-block">
+    <element name="pre">
+      <ref name="common-attrs"/>
+      <attribute name="language">
+        <choice>
+          <value>rust</value>
+          <value>python</value>
+          <value>javascript</value>
+          <value>xml</value>
+          <value>json</value>
+          <value>sql</value>
+        </choice>
+      </attribute>
+      <optional>
+        <attribute name="line-numbers">
+          <data type="boolean"/>
+        </attribute>
+      </optional>
+      <text/>
+    </element>
+  </define>
+  <!--
+    Two overlapping definitions: a figure with one image and a caption matches both, up to its
+    end tag
+  -->
+  <define name="figure">
+    <choice>
+      <element name="figure">
+        <ref name="common-attrs"/>
+        <optional>
+          <attribute name="float">
+            <choice>
+              <value>left</value>
+              <value>right</value>
+              <value>none</value>
+            </choice>
+          </attribute>
+        </optional>
+        <ref name="image"/>
+        <optional>
+          <ref name="figcaption"/>
+        </optional>
+      </element>
+      <element name="figure">
+        <ref name="common-attrs"/>
+        <optional>
+          <attribute name="float">
+            <value>none</value>
+          </attribute>
+        </optional>
+        <oneOrMore>
+          <ref name="image"/>
+        </oneOrMore>
+        <ref name="figcaption"/>
+        <optional>
+          <element name="credit">
+            <text/>
+          </element>
+        </optional>
+      </element>
+    </choice>
+  </define>
+  <define name="image">
+    <element name="img">
+      <attribute name="src">
+        <data type="anyURI"/>
+      </attribute>
+      <attribute name="alt"/>
+      <optional>
+        <attribute name="width">
+          <choice>
+            <data type="nonNegativeInteger"/>
+            <value>auto</value>
+          </choice>
+        </attribute>
+      </optional>
+      <optional>
+        <attribute name="height">
+          <choice>
+            <data type="nonNegativeInteger"/>
+            <value>auto</value>
+          </choice>
+        </attribute>
+      </optional>
+      <empty/>
+    </element>
+  </define>
+  <define name="figcaption">
+    <element name="figcaption">
+      <zeroOrMore>
+        <choice>
+          <text/>
+          <ref name="inline-element"/>
+        </choice>
+      </zeroOrMore>
+    </element>
+  </define>
+  <define name="data-list">
+    <element name="dl">
+      <ref name="common-attrs"/>
+      <oneOrMore>
+        <element name="dt">
+          <zeroOrMore>
+            <choice>
+              <text/>
+              <ref name="inline-element"/>
+            </choice>
+          </zeroOrMore>
+        </element>
+        <element name="dd">
+          <zeroOrMore>
+            <choice>
+              <text/>
+              <ref name="inline-element"/>
+            </choice>
+          </zeroOrMore>
+        </element>
+      </oneOrMore>
+    </element>
+  </define>
+  <!-- Recursive tree structure exercising Ref patterns -->
+  <define name="tree-node">
+    <element name="node">
+      <attribute name="name">
+        <data type="NCName"/>
+      </attribute>
+      <optional>
+        <attribute name="value"/>
+      </optional>
+      <zeroOrMore>
+        <ref name="tree-node"/>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!-- Wildcard / nsName patterns -->
+  <define name="extension-point">
+    <element name="app:extensions">
+      <zeroOrMore>
+        <attribute>
+          <nsName ns="http://example.com/app"/>
+        </attribute>
+      </zeroOrMore>
+      <zeroOrMore>
+        <choice>
+          <element>
+            <nsName ns="http://example.com/app">
+              <except>
+                <name>app:extensions</name>
+              </except>
+            </nsName>
+            <text/>
+          </element>
+          <ref name="foreign"/>
+        </choice>
+      </zeroOrMore>
+    </element>
+  </define>
+  <!-- Elements from any other namespace, with any attributes -->
+  <define name="foreign">
+    <element>
+      <anyName>
+        <except>
+          <nsName/>
+          <nsName ns="http://example.com/app"/>
+        </except>
+      </anyName>
+      <zeroOrMore>
+        <attribute>
+          <anyName/>
+        </attribute>
+      </zeroOrMore>
+      <zeroOrMore>
+        <choice>
+          <text/>
+          <ref name="foreign"/>
+        </choice>
+      </zeroOrMore>
+    </element>
+  </define>
+</grammar>

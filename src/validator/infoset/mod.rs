@@ -5,6 +5,10 @@
 //!
 //! The DOCTYPE declaration is skipped, so entities declared in a DTD are not supported.
 //!
+//! Only UTF-8 documents are supported (US-ASCII being a subset of it). A document in another
+//! encoding, whether detected from its first bytes or named in its XML declaration, is rejected
+//! with [`Error::UnsupportedEncoding`] rather than misread. A UTF-8 byte order mark is skipped.
+//!
 //! Nothing here knows about RELAX NG.
 
 mod name;
@@ -13,7 +17,7 @@ pub(crate) use name::{Name, NameTable};
 
 use crate::xml_whitespace::is_all_xml_whitespace;
 use std::ops::Range;
-use xml_syntax_reader::{ErrorKind, ParseError, QName, Span, Visitor};
+use xml_syntax_reader::{Encoding, ErrorKind, ParseError, QName, Span, Visitor};
 
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 const MAX_ATTRIBUTES: usize = 256;
@@ -80,6 +84,13 @@ pub(crate) enum Error {
     InvalidUtf8 {
         span: Range<u64>,
         kind: &'static str,
+    },
+    /// The document is in an encoding other than UTF-8. `span` is that of the byte order mark or
+    /// first character from which a UTF-16 or UTF-32 encoding was detected, or of the `<?xml`
+    /// starting the XML declaration that names the encoding.
+    UnsupportedEncoding {
+        encoding: String,
+        span: Range<u64>,
     },
 }
 
@@ -206,7 +217,14 @@ pub(crate) struct PushParser {
     state: State,
     /// The stream offset of the first byte not yet consumed.
     offset: u64,
+    /// Whether the first bytes of the document have been checked for its encoding.
+    encoding_checked: bool,
 }
+
+/// How many bytes [`xml_syntax_reader::probe_encoding`] needs to tell every byte order mark and
+/// UTF-16/UTF-32 pattern apart. Given fewer, it can mistake the start of a UTF-32LE byte order
+/// mark for a UTF-16LE one, or miss a UTF-8 one.
+const ENCODING_PROBE_LEN: usize = 4;
 
 impl PushParser {
     pub(crate) fn new() -> Self {
@@ -214,6 +232,7 @@ impl PushParser {
             reader: xml_syntax_reader::Reader::new(),
             state: State::new(),
             offset: 0,
+            encoding_checked: false,
         }
     }
 
@@ -222,6 +241,7 @@ impl PushParser {
         self.reader.reset();
         self.state.reset();
         self.offset = 0;
+        self.encoding_checked = false;
     }
 
     /// Parses as much of `buf` as possible, returning the number of bytes consumed.
@@ -248,14 +268,69 @@ impl PushParser {
         is_final: bool,
         handler: &mut H,
     ) -> Result<usize, Failure<H::Error>> {
+        let mut skipped = 0;
+        if !self.encoding_checked {
+            if buf.len() < ENCODING_PROBE_LEN && !is_final {
+                return Ok(0);
+            }
+            skipped = check_initial_encoding(buf)?;
+            self.encoding_checked = true;
+        }
         let mut driver = Driver::new(&mut self.state, handler);
         let consumed = self
             .reader
-            .parse(buf, self.offset, is_final, &mut driver)
+            .parse(
+                &buf[skipped..],
+                self.offset + skipped as u64,
+                is_final,
+                &mut driver,
+            )
             .map_err(map_parse_error)?;
-        self.offset += consumed;
-        Ok(consumed as usize)
+        let consumed = skipped + consumed as usize;
+        self.offset += consumed as u64;
+        Ok(consumed)
     }
+}
+
+fn check_initial_encoding<E>(buf: &[u8]) -> Result<usize, Failure<E>> {
+    // TODO: assumes the first buffer holds the whole XML declaration
+    let probe = xml_syntax_reader::probe_encoding(buf);
+    let (encoding, unit_len) = match probe.encoding {
+        Encoding::Utf16Le => ("UTF-16LE", 2),
+        Encoding::Utf16Be => ("UTF-16BE", 2),
+        Encoding::Utf32Le => ("UTF-32LE", 4),
+        Encoding::Utf32Be => ("UTF-32BE", 4),
+        Encoding::Utf8 | Encoding::Declared(_) | Encoding::Unknown => {
+            // A byte order mark ends the probe before it reads the declaration, so look
+            // again past one
+            let bom_length = probe.bom_length;
+            check_declared_encoding(&buf[bom_length..], bom_length as u64)?;
+            return Ok(bom_length);
+        }
+    };
+    Err(Failure::Infoset(Error::UnsupportedEncoding {
+        encoding: encoding.to_string(),
+        span: 0..unit_len,
+    }))
+}
+
+fn check_declared_encoding<E>(buf: &[u8], offset: u64) -> Result<(), Failure<E>> {
+    match xml_syntax_reader::probe_encoding(buf).encoding {
+        Encoding::Declared(name) if !is_supported_encoding(name.as_bytes()) => {
+            Err(Failure::Infoset(Error::UnsupportedEncoding {
+                encoding: String::from_utf8_lossy(name.as_bytes()).into_owned(),
+                // `probe_encoding` does not say where the declaration ends, only that it
+                // starts with `<?xml`
+                span: offset..offset + b"<?xml".len() as u64,
+            }))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn is_supported_encoding(name: &[u8]) -> bool {
+    const SUPPORTED: [&[u8]; 3] = [b"UTF-8", b"US-ASCII", b"ASCII"];
+    SUPPORTED.iter().any(|s| name.eq_ignore_ascii_case(s))
 }
 
 fn map_parse_error<E>(e: ParseError<Failure<E>>) -> Failure<E> {

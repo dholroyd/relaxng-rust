@@ -9,6 +9,7 @@ mod nameclass;
 mod schema;
 
 use crate::model;
+use crate::xml_whitespace::is_all_xml_whitespace;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ops::Range;
@@ -499,6 +500,15 @@ fn feed_from_reader<S: Sink, R: std::io::Read>(
     }
 }
 
+/// Grows the span of a run of text to cover another piece of it.
+fn extend_span(run: &mut Option<Span>, piece: Span) {
+    match run {
+        None => *run = Some(piece),
+        Some(existing) if piece.end > existing.end => existing.end = piece.end,
+        Some(_) => {}
+    }
+}
+
 /// Validates the events of one document at a time against the schema.
 struct Engine<S> {
     schema: Schema,
@@ -506,10 +516,24 @@ struct Engine<S> {
     start: PatId,
     current_step: PatId,
     last_was_start_element: bool,
-    /// Text content buffered for deferred `text_deriv`.
+    /// Whether text in the current element must be checked by value: the element's content may
+    /// match data, and no child element has been seen yet (see `Pat::is_text_typed`).  Such
+    /// text is buffered, and checked by `text_deriv` once the element ends.  Any other text can
+    /// only match `text` patterns, so whitespace is ignored and the rest needs only
+    /// `mixed_text_deriv`, whatever it says, as Jing does.
+    text_typed: bool,
+    /// Whether the current run of untyped text has already been matched, as only whether a run
+    /// holds anything but whitespace matters.
+    untyped_text_matched: bool,
+    /// Whether matching the current run of untyped text failed, to be reported once the run
+    /// ends, so that the error covers the whole run however the input was split into pieces.
+    untyped_text_failed: bool,
+    /// Source span covering the current run of untyped text.
+    untyped_text_span: Option<Span>,
+    /// Typed text content buffered for deferred `text_deriv`.
     text_buffer: String,
     /// Source span covering the buffered text run, used for diagnostics on
-    /// `flush_text` failure. `None` when the buffer is empty.
+    /// `flush_typed_text` failure. `None` when the buffer is empty.
     text_buffer_span: Option<Span>,
     max_text_buffer: usize,
     skip_depth: u32,
@@ -528,6 +552,10 @@ impl<S: Sink> Engine<S> {
             start,
             current_step: start,
             last_was_start_element: false,
+            text_typed: false,
+            untyped_text_matched: false,
+            untyped_text_failed: false,
+            untyped_text_span: None,
             text_buffer: String::new(),
             text_buffer_span: None,
             max_text_buffer: 1024 * 1024,
@@ -553,6 +581,10 @@ impl<S: Sink> Engine<S> {
         }
         self.current_step = self.start;
         self.last_was_start_element = false;
+        self.text_typed = false;
+        self.untyped_text_matched = false;
+        self.untyped_text_failed = false;
+        self.untyped_text_span = None;
         self.text_buffer.clear();
         self.text_buffer_span = None;
         self.skip_depth = 0;
@@ -581,29 +613,60 @@ impl<S: Sink> Engine<S> {
         self.schema.build_coverage_report()
     }
 
-    /// Flush any buffered text by applying `text_deriv`. On `NotAllowed`,
-    /// reports a `text` error tagged with the buffered run's span and carries on
-    /// as though the text were absent.
-    fn flush_text(&mut self, ns: &NamespaceScope<'_>) -> Result<(), ValidatorError> {
+    /// Checks the buffered typed text, just before the end tag of the element it is the whole
+    /// content of, by applying `text_deriv`. On `NotAllowed`, reports a `text` error tagged with
+    /// the buffered run's span and carries on as though the text were absent.
+    fn flush_typed_text(&mut self, ns: &NamespaceScope<'_>) -> Result<(), ValidatorError> {
         if self.text_buffer.is_empty() {
             return Ok(());
         }
         let next_id = self
             .schema
-            .text_deriv(self.current_step, &self.text_buffer, ns)?;
+            .text_node_deriv(self.current_step, &self.text_buffer, ns)?;
         let buf_span = self.text_buffer_span.take();
         self.text_buffer.clear();
         if matches!(self.schema.patt(next_id), Pat::NotAllowed) {
-            let span = buf_span.map(|s| s.start..s.end).unwrap_or(0..0);
-            self.report(ValidatorError::NotAllowed {
-                span,
-                kind: "text",
-                expected: Expected(self.current_step),
-            });
+            self.report_text_not_allowed(buf_span.unwrap_or(Span::new(0, 0)));
             return Ok(());
         }
         self.current_step = next_id;
         Ok(())
+    }
+
+    /// Checks buffered typed text that turns out to be followed by a child element, so can only
+    /// match `text` patterns after all (the restrictions of spec section 7.2 forbid data
+    /// alongside elements).
+    fn flush_text_before_child(&mut self) -> Result<(), ValidatorError> {
+        if self.text_buffer.is_empty() {
+            return Ok(());
+        }
+        let buf_span = self.text_buffer_span.take();
+        let whitespace = is_all_xml_whitespace(self.text_buffer.as_bytes());
+        self.text_buffer.clear();
+        if !whitespace && !self.match_untyped_text()? {
+            self.report_text_not_allowed(buf_span.unwrap_or(Span::new(0, 0)));
+        }
+        Ok(())
+    }
+
+    /// Derives the current pattern by non-whitespace text that can only match `text` patterns,
+    /// returning whether that was allowed.  If not, the current pattern is left as it was, as
+    /// though the text were absent.
+    fn match_untyped_text(&mut self) -> Result<bool, Overflow> {
+        let next_id = self.schema.mixed_text_deriv(self.current_step)?;
+        if matches!(self.schema.patt(next_id), Pat::NotAllowed) {
+            return Ok(false);
+        }
+        self.current_step = next_id;
+        Ok(true)
+    }
+
+    fn report_text_not_allowed(&mut self, span: Span) {
+        self.report(ValidatorError::NotAllowed {
+            span: span.start..span.end,
+            kind: "text",
+            expected: Expected(self.current_step),
+        });
     }
 
     fn append_str(&mut self, s: &str, span: Span) -> Result<(), ValidatorError> {
@@ -613,11 +676,7 @@ impl<S: Sink> Engine<S> {
         if self.text_buffer.len() > self.max_text_buffer {
             return Err(ValidatorError::TextBufferOverflow);
         }
-        match self.text_buffer_span {
-            None => self.text_buffer_span = Some(span),
-            Some(ref mut existing) if span.end > existing.end => existing.end = span.end,
-            Some(_) => {}
-        }
+        extend_span(&mut self.text_buffer_span, span);
         Ok(())
     }
 
@@ -740,6 +799,7 @@ impl<S: Sink> Engine<S> {
             Ok(next_pat) => {
                 self.current_step = next_pat;
                 self.last_was_start_element = true;
+                self.text_typed = self.schema.patt(next_pat).is_text_typed();
                 Ok(())
             }
             Err(CloseStartError {
@@ -748,6 +808,7 @@ impl<S: Sink> Engine<S> {
             }) => {
                 self.current_step = recovered;
                 self.last_was_start_element = true;
+                self.text_typed = self.schema.patt(recovered).is_text_typed();
                 set_expected(&mut error, recovered);
                 self.report(error);
                 Ok(())
@@ -903,7 +964,7 @@ impl Explainer<'_> {
                 result.insert(pat);
             }
             Pat::List(p) => self.head(result, p),
-            Pat::After(p, _) => self.head(result, p),
+            Pat::After(p, _, _) => self.head(result, p),
         }
     }
 
@@ -1246,6 +1307,9 @@ impl<S: Sink> Handler for Engine<S> {
             }
             return Ok(());
         }
+        // The parent has a child element, so none of its text is typed any more
+        self.flush_text_before_child()?;
+        self.text_typed = false;
         if element.empty {
             self.handle_empty_element(ns, element)
         } else {
@@ -1258,30 +1322,49 @@ impl<S: Sink> Handler for Engine<S> {
             self.skip_depth -= 1;
             return Ok(());
         }
+        // `ns` is still the scope of the element that the text is in
+        self.flush_typed_text(ns)?;
+        // Back in the parent, which has now had a child element
+        self.text_typed = false;
         self.handle_end_tag(ns, span)
     }
 
-    /// Buffers text for deferred `text_deriv`, unless the current pattern accepts any text
-    /// unchanged, in which case there is nothing to check.
+    /// Buffers typed text, to check once it is known whether a child element or the end tag
+    /// follows it.  Untyped text is checked straight away, since only whether it holds anything
+    /// but whitespace matters.
     fn text(
         &mut self,
         _ns: &NamespaceScope<'_>,
         s: &str,
         span: Span,
     ) -> Result<(), ValidatorError> {
-        // Any text content (even fixed-point) means this element is not empty,
+        // Any text content (even whitespace) means this element is not empty,
         // so clear the flag that would trigger an empty-text derivative on close.
         self.last_was_start_element = false;
-        if self.skip_depth > 0
-            || self.schema.mixed_text_deriv(self.current_step)? == self.current_step
-        {
+        if self.skip_depth > 0 {
             return Ok(());
         }
-        self.append_str(s, span)
+        if self.text_typed {
+            return self.append_str(s, span);
+        }
+        extend_span(&mut self.untyped_text_span, span);
+        if self.untyped_text_matched || is_all_xml_whitespace(s.as_bytes()) {
+            return Ok(());
+        }
+        self.untyped_text_matched = true;
+        self.untyped_text_failed = !self.match_untyped_text()?;
+        Ok(())
     }
 
-    fn end_text(&mut self, ns: &NamespaceScope<'_>) -> Result<(), ValidatorError> {
-        self.flush_text(ns)
+    /// Typed text stays buffered past the end of its run, until the next element event shows
+    /// how to check it.
+    fn end_text(&mut self, _ns: &NamespaceScope<'_>) -> Result<(), ValidatorError> {
+        self.untyped_text_matched = false;
+        let span = self.untyped_text_span.take();
+        if std::mem::take(&mut self.untyped_text_failed) {
+            self.report_text_not_allowed(span.unwrap_or(Span::new(0, 0)));
+        }
+        Ok(())
     }
 }
 
@@ -2844,5 +2927,208 @@ mod tests {
         }
         doc.push_str("\n</s>");
         Fixture::correct(&schema).valid(&doc);
+    }
+
+    // Text is checked by value only where an element's content may match data, as Jing does
+    // (its "text typed" content, the spec's simple content type).
+    #[test]
+    fn text_typed_flag() {
+        use crate::validator::schema::{PAT_EMPTY, Pat, build_schema};
+        let cases = [
+            ("xsd:int", true),
+            ("\"a\" | \"b\"", true),
+            ("list { xsd:token* }", true),
+            ("xsd:string - \"x\"", true),
+            ("xsd:int?", true),
+            // Data outranks elements in a choice: either may match
+            ("xsd:int | element y { empty }", true),
+            ("attribute a { xsd:int }, xsd:int", true),
+            ("text", false),
+            ("empty", false),
+            ("mixed { element y { empty } }", false),
+            ("(text | element y { empty })*", false),
+            ("element y { xsd:int }+", false),
+            // An attribute's value is not content
+            ("attribute a { xsd:int }, element y { empty }", false),
+        ];
+        for (content, typed) in cases {
+            let f = Fixture::correct(&format!("start = element x {{ {content} }}"));
+            let (schema, start) = build_schema(&f.schema).unwrap();
+            let Pat::Element(_, c) = schema.patt(start) else {
+                panic!("start should be an element, for {content}");
+            };
+            assert_eq!(schema.patt(c).is_text_typed(), typed, "content {content}");
+            // Inside the element, the state is `After(content, …)`, which takes the content's flag
+            let after = schema.after(c, PAT_EMPTY).unwrap();
+            assert_eq!(
+                schema.patt(after).is_text_typed(),
+                typed,
+                "After of {content}"
+            );
+            assert!(!schema.patt(after).is_nullable());
+        }
+    }
+
+    /// The errors from validating `xml` against `schema`, rendered for comparison.
+    fn text_errors(schema: &str, xml: &str) -> Vec<String> {
+        let f = Fixture::correct(schema);
+        let mut v = Case::new(f.schema.clone());
+        match v.validate_all(xml.as_bytes()) {
+            Ok(()) => vec![],
+            Err(errors) => errors.iter().map(|e| format!("{e:?}")).collect(),
+        }
+    }
+
+    // Text followed by a child element can only match `text`, even where the content could
+    // otherwise be data, so it is not checked against the datatype (spec section 7.2)
+    #[test]
+    fn typed_text_before_child_is_untyped() {
+        let f = Fixture::correct("start = element x { xsd:int | element y { empty } }");
+        f.valid("<x>5</x>");
+        f.valid("<x> <!-- c --> <y/></x>");
+        f.invalid("<x>abc</x>");
+        f.invalid("<x>5<y/></x>");
+        // The text is reported, not the element after it
+        let errors = text_errors(
+            "start = element x { xsd:int | element y { empty } }",
+            "<x>5<y/></x>",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("kind: \"text\", "), "{errors:?}");
+        assert!(errors[0].contains("span: 3..4, "), "{errors:?}");
+    }
+
+    // Once an element has had a child, the rest of its text is untyped
+    #[test]
+    fn text_after_child_is_untyped() {
+        let f = Fixture::correct("start = element x { xsd:int | (element y { empty }, text) }");
+        f.valid("<x>5</x>");
+        f.valid("<x><y/>not a number</x>");
+        f.invalid("<x>not a number</x>");
+    }
+
+    // Typed text is checked against the namespaces of the element it is in
+    #[test]
+    fn typed_text_uses_its_elements_namespaces() {
+        let f = Fixture::correct("start = element x { element y { xsd:QName }* }");
+        f.valid("<x><y xmlns:p='urn:p'>p:a</y><y>b</y></x>");
+        f.invalid("<x xmlns:p='urn:p'><y xmlns:q='urn:q'>q:a</y><y>q:b</y></x>");
+    }
+
+    // An untyped run is matched once, and an error in it covers the whole run, including
+    // pieces split up by references, CDATA sections and comments
+    #[test]
+    fn untyped_text_error_covers_the_run() {
+        let schema = "start = element x { element y { empty }* }";
+        let errors = text_errors(schema, "<x> a&amp;<![CDATA[b]]><!-- c -->d <y/></x>");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("kind: \"text\", "), "{errors:?}");
+        assert!(errors[0].contains("span: 3..35, "), "{errors:?}");
+        // Whitespace between elements is ignored
+        Fixture::correct(schema).valid("<x>\n  <y/>\n  <y/>\n</x>");
+    }
+
+    /// Checks each `(content, document, valid)` case, with `content` as the content of the
+    /// root element `r`.  The expected results are Jing's.
+    fn check_jing_cases(cases: &[(&str, &str, bool)]) {
+        let mut wrong = vec![];
+        for &(content, doc, valid) in cases {
+            let f = Fixture::correct(&format!("start = element r {{ {content} }}"));
+            let mut v = Case::new(f.schema.clone());
+            if v.validate_all(doc.as_bytes()).is_ok() != valid {
+                wrong.push(format!("{content}  {doc}  should be valid: {valid}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    // A list sees the whole text of its element at once, joined across comments, CDATA sections
+    // and references, so it is derived as the spec defines, with no allowance for seeing it in
+    // parts
+    #[test]
+    fn list_matches_whole_text() {
+        let pair = "element x { list { xsd:int, xsd:int } }*";
+        let star = "element x { list { xsd:int* } }*";
+        let or_element = "element x { list { xsd:int* } | element y { empty } }";
+        check_jing_cases(&[
+            (pair, "<r><x>1 2</x></r>", true),
+            (pair, "<r><x> 1\n2 </x></r>", true),
+            (pair, "<r><x>1</x></r>", false),
+            (pair, "<r><x>1 2 3</x></r>", false),
+            (pair, "<r><x>1<!--c--> 2</x></r>", true),
+            (pair, "<r><x>1<![CDATA[ 2]]></x></r>", true),
+            (pair, "<r><x>1&#x20;2</x></r>", true),
+            (star, "<r><x/><x></x><x> </x><x>1 2 3</x></r>", true),
+            // Text alongside a child element can't be a list
+            (or_element, "<r><x>1 <y/></x></r>", false),
+            (or_element, "<r><x> <y/> </x></r>", true),
+            ("attribute a { list { xsd:int+ } }", "<r a='1 2'/>", true),
+            ("attribute a { list { xsd:int+ } }", "<r a=' '/>", false),
+            ("attribute a { list { xsd:int* } }", "<r a=' '/>", true),
+        ]);
+    }
+
+    // An element whose only content is whitespace matches if it would match either with the
+    // whitespace or without it (spec section 6.2.9; the "with or without stripping" rule of
+    // "An algorithm for RELAX NG validation")
+    #[test]
+    fn whitespace_only_content_matches_with_or_without_it() {
+        check_jing_cases(&[
+            ("element x { empty }*", "<r><x/><x></x><x> \n</x></r>", true),
+            ("element x { empty }*", "<r><x>a</x></r>", false),
+            // Without stripping, the token is empty; with it, there is no token at all
+            (
+                "element x { xsd:token { minLength = '1' } }",
+                "<r><x> </x></r>",
+                false,
+            ),
+            // Without stripping, the string is long enough
+            (
+                "element x { xsd:string { minLength = '1' } }",
+                "<r><x> </x></r>",
+                true,
+            ),
+            (
+                "element x { xsd:string { minLength = '1' } }",
+                "<r><x/></r>",
+                false,
+            ),
+            // With stripping, `empty` matches
+            (
+                "element x { empty | xsd:token { minLength = '1' } }",
+                "<r><x> </x></r>",
+                true,
+            ),
+            (
+                "element x { empty | xsd:token { minLength = '1' } }",
+                "<r><x>a</x></r>",
+                true,
+            ),
+            (
+                "element x { xsd:string { maxLength = '0' } }",
+                "<r><x> </x></r>",
+                false,
+            ),
+            (
+                "element x { xsd:string { maxLength = '0' } }",
+                "<r><x/></r>",
+                true,
+            ),
+            (
+                "element x { xsd:int | element y { empty } }",
+                "<r><x> </x></r>",
+                false,
+            ),
+            (
+                "element x { xsd:int | element y { empty } }",
+                "<r><x> <y/> </x></r>",
+                true,
+            ),
+            (
+                "element x { element y { empty }* }*",
+                "<r><x> </x><x/></r>",
+                true,
+            ),
+        ]);
     }
 }

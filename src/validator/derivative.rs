@@ -20,13 +20,14 @@ struct TextDerivCx<'t, 'n, 's> {
     ns: &'n NamespaceScope<'s>,
     /// This call's memo: input PatId -> (result PatId, whether the result depends on the text).
     memo: FnvHashMap<PatId, (PatId, bool)>,
-    /// Whether the derivative being computed depends on the text, beyond whether it is
-    /// whitespace-only.  Only datatypes tell whitespace strings apart (e.g. by a length facet),
+    /// Whether the derivative being computed depends on the text.  Only datatypes look at it,
     /// so they set this.
     depends: bool,
 }
 
 impl Schema {
+    /// The derivative of `pid` with respect to the text node `text`, alongside other children of
+    /// an element: for an element's whole content, use [`Self::text_node_deriv`].
     pub(crate) fn text_deriv(
         &mut self,
         pid: PatId,
@@ -41,6 +42,28 @@ impl Schema {
             depends: false,
         };
         self.text_deriv_memo(pid, &mut cx)
+    }
+
+    /// The derivative of `pid` with respect to the whole content of an element, which is the
+    /// single text node `text`, or nothing at all if `text` is empty.  Content that is only
+    /// whitespace matches if it would match with or without that whitespace (the "with or
+    /// without stripping" rule of <https://relaxng.org/jclark/derivative.html>; spec section
+    /// 6.2.9).
+    ///
+    /// The validator only ever needs this case: other text is either alongside child elements,
+    /// so can only match `text` patterns (see `Engine::text_typed`), or is an attribute value.
+    pub(crate) fn text_node_deriv(
+        &mut self,
+        pid: PatId,
+        text: &str,
+        ns: &NamespaceScope<'_>,
+    ) -> Result<PatId, Overflow> {
+        let d = self.text_deriv(pid, text, ns)?;
+        if is_all_xml_whitespace(text.as_bytes()) {
+            self.choice(pid, d)
+        } else {
+            Ok(d)
+        }
     }
 
     // Memoizes the recursion in Self::text_deriv_uncached.  Sub-patterns are shared, so
@@ -127,8 +150,9 @@ impl Schema {
     ) -> Result<PatId, Overflow> {
         let text = cx.text;
         let ns = cx.ns;
-        // Where the text leaves every sub-pattern unchanged (as whitespace usually does), the
-        // composite arms return `pid` itself rather than rebuilding an equivalent pattern.  A
+        // Where the text leaves every sub-pattern unchanged (as it does where only `text`
+        // patterns match it), the composite arms return `pid` itself rather than rebuilding an
+        // equivalent pattern.  A
         // rebuilt pattern would be new to every cache, and the states reached from it multiply
         // with each text node until the pattern table overflows.
         Ok(match pat {
@@ -165,7 +189,7 @@ impl Schema {
                     p
                 }
             }
-            Pat::After(p1, p2) => {
+            Pat::After(p1, p2, _) => {
                 let d = self.text_deriv_memo(p1, cx)?;
                 self.after(d, p2)?
             }
@@ -222,45 +246,18 @@ impl Schema {
                         return Ok(p);
                     }
                 }
-                let last_patt = self.patt(p);
-                if let Pat::Empty = last_patt {
-                    p
-                } else if last_patt.is_nullable() {
-                    // List is not able to be nullable per https://relaxng.org/jclark/derivative.html
-                    // but that definition assumes that we can see all text content up-front
-                    // whereas processing instructions CDATA sections etc may mean we see
-                    // text children piecemeal here.  To accommodate this, we make the list
-                    // optional here (TODO: should we rather adjust List to be nullable?)
-                    let list = self.list(p)?;
-                    self.choice(list, self.empty())?
-                } else {
-                    self.list(p)?
-                }
-            }
-            Pat::Empty => {
-                // from 'An algorithm for RELAX NG validation':
-                //   "In the case where the list of children consists of a single text node and the
-                //    value of the text node consists only of whitespace, the list of children
-                //    matches if the list matches either with or without stripping the text node."
-                //   "Otherwise, there must be one or more elements amongst the children, in which
-                //    case any whitespace-only text nodes are stripped before the derivative is
-                //    computed."
-                // The document assumes however that we can see the list of child nodes, so we need
-                // to handle this case in a streaming manner.  Right now we don't track that
-                // that this pattern is being tested in the context of child nodes - FIXME!
-                if cx.whitespace {
+                // The list sees all of the text at once (a whole attribute value, or an
+                // element's content buffered until its end tag), so it ends here.
+                if self.patt(p).is_nullable() {
                     self.empty()
                 } else {
                     self.not_allowed()
                 }
             }
-            Pat::NotAllowed | Pat::Attribute(_, _) => self.not_allowed(),
-            Pat::Element(_, _) => {
-                if cx.whitespace {
-                    pid
-                } else {
-                    self.not_allowed()
-                }
+            // Whitespace-only content matching `empty` is handled by `text_node_deriv`, which is
+            // the only place the spec allows it
+            Pat::Empty | Pat::NotAllowed | Pat::Attribute(_, _) | Pat::Element(_, _) => {
+                self.not_allowed()
             }
         })
     }
@@ -298,7 +295,7 @@ impl Schema {
                 let c2 = self.interleave(p1, d2)?;
                 self.choice(c1, c2)?
             }
-            Pat::After(p1, p2) => {
+            Pat::After(p1, p2, _) => {
                 let d = self.mixed_text_deriv(p1)?;
                 self.after(d, p2)?
             }
@@ -382,7 +379,7 @@ impl Schema {
                     self.not_allowed()
                 }
             }
-            Pat::After(pid1, pid2) => {
+            Pat::After(pid1, pid2, _) => {
                 let d = self.start_tag_open_deriv(pid1, name)?;
                 self.apply_after(self.patt(d), |pat, s| s.after(pat, pid2))?
             }
@@ -448,7 +445,7 @@ impl Schema {
                     self.not_allowed()
                 }
             }
-            Pat::After(pid1, pid2) => {
+            Pat::After(pid1, pid2, _) => {
                 let d = self.start_att_deriv(pid1, name)?;
                 self.apply_after(self.patt(d), |pat, s| s.after(pat, pid2))?
             }
@@ -470,7 +467,7 @@ impl Schema {
     ) -> Result<PatId, Overflow> {
         let pat = self.patt(pid);
         Ok(match pat {
-            Pat::After(val_pat, cont) => {
+            Pat::After(val_pat, cont, _) => {
                 if self.value_match(val_pat, value, ns)? {
                     cont
                 } else {
@@ -493,7 +490,7 @@ impl Schema {
         F: Fn(PatId, &mut Schema) -> Result<PatId, Overflow> + Clone,
     {
         match pat {
-            Pat::After(p1, p2) => {
+            Pat::After(p1, p2, _) => {
                 let p2 = f(p2, self)?;
                 self.after(p1, p2)
             }
@@ -538,7 +535,7 @@ impl Schema {
         }
         let pat = self.patt(pid);
         let result = match pat {
-            Pat::After(p1, p2) => {
+            Pat::After(p1, p2, _) => {
                 let a1 = self.start_tag_close_deriv(p1)?;
                 self.after(a1, p2)?
             }
@@ -597,7 +594,7 @@ impl Schema {
             return Ok(cached);
         }
         let result = match self.patt(pid) {
-            Pat::After(p1, p2) => {
+            Pat::After(p1, p2, _) => {
                 let a1 = self.force_start_tag_close_deriv_memo(p1, memo)?;
                 self.after(a1, p2)?
             }
@@ -641,7 +638,7 @@ impl Schema {
                 let c2 = self.end_tag_deriv(p2)?;
                 self.choice(c1, c2)?
             }
-            Pat::After(p1, p2) => {
+            Pat::After(p1, p2, _) => {
                 if self.patt(p1).is_nullable() {
                     p2
                 } else {
@@ -670,7 +667,7 @@ impl Schema {
                 let c2 = self.force_end_tag_deriv(p2)?;
                 self.choice(c1, c2)?
             }
-            Pat::After(_, p2) => p2,
+            Pat::After(_, p2, _) => p2,
             _ => self.not_allowed(),
         })
     }
@@ -692,7 +689,7 @@ impl Schema {
         force: bool,
         ns: &NamespaceScope<'_>,
     ) -> Result<PatId, Overflow> {
-        let p = self.text_deriv(pid, "", ns)?;
+        let p = self.text_node_deriv(pid, "", ns)?;
         let closed = self.end_tag_deriv(p)?;
         if force && matches!(self.patt(closed), Pat::NotAllowed) {
             self.force_end_tag_deriv(p)

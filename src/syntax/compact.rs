@@ -605,7 +605,8 @@ fn span(start: Span, end: Span) -> Range<usize> {
 fn identifier(input: Span) -> IResult<Span, Identifier> {
     let (input, start) = position(input)?;
     let (input, text) = alt((
-        map(recognize((tag("\\"), keyword)), |v: Span| v.to_string()),
+        // quotedIdentifier ::= "\" NCName; the backslash is not part of the name
+        map(preceded(tag("\\"), nc_name), |name: NcName| name.1),
         map(preceded(not(peek(keyword)), nc_name), |name: NcName| name.1),
     ))
     .parse(input)?;
@@ -2976,6 +2977,33 @@ mod test {
                 other => panic!("expected identifier {name:?}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn quoted_identifier_excludes_backslash() {
+        // a quoted keyword, and a quoted name that isn't a keyword
+        for (src, expected) in [("start = \\element", "element"), ("start = \\foo", "foo")] {
+            match start_pattern(src) {
+                Pattern::Identifier(Identifier(span, id)) => {
+                    assert_eq!(id, expected);
+                    assert_eq!(span, 8..src.len(), "span should cover the backslash");
+                }
+                other => panic!("expected identifier for {src:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_keyword_as_element_name() {
+        let Pattern::Element(el) = start_pattern("start = element \\text { empty }") else {
+            panic!("expected element");
+        };
+        let NameClass::Name(Name::Identifier(IdentifierOrKeyword::Identifier(Identifier(_, n)))) =
+            el.name_class
+        else {
+            panic!("expected identifier name, got {:?}", el.name_class);
+        };
+        assert_eq!(n, "text");
     }
 
     #[test]

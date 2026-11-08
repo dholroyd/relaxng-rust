@@ -2519,14 +2519,21 @@ mod tests {
     #[test]
     fn pattern_named_start_is_not_the_start_pattern() {
         // as in TEI ODD schemas
-        for (name, syntax, text) in [(
-            "test.rng",
-            Syntax::Xml,
-            r#"<grammar xmlns="http://relaxng.org/ns/structure/1.0">
+        for (name, syntax, text) in [
+            (
+                "test.rnc",
+                Syntax::Compact,
+                "start = element a { \\start }\n\\start = element b { empty }",
+            ),
+            (
+                "test.rng",
+                Syntax::Xml,
+                r#"<grammar xmlns="http://relaxng.org/ns/structure/1.0">
                      <start><element name="a"><ref name="start"/></element></start>
                      <define name="start"><element name="b"><empty/></element></define>
                    </grammar>"#,
-        )] {
+            ),
+        ] {
             let mut c = Compiler::new(MemFiles(vec![(name, text)]), syntax);
             let result = c
                 .compile(Path::new(name))
@@ -2540,5 +2547,20 @@ mod tests {
             };
             assert_matches!(**content, model::Pattern::Ref(_, ref n, _) if n == "start");
         }
+    }
+
+    #[test]
+    fn unreferenced_pattern_named_start_is_unreachable() {
+        let mut c = Compiler::new(
+            MemFiles(vec![(
+                "test.rnc",
+                "start = element a { empty }\n\\start = empty",
+            )]),
+            Syntax::Compact,
+        );
+        let result = c.compile(Path::new("test.rnc")).unwrap();
+        let unreachable = result.unreachable_definitions();
+        assert_eq!(unreachable.len(), 1);
+        assert_eq!(unreachable[0].name, "start");
     }
 }

@@ -112,6 +112,9 @@ impl Syntax {
                     compact::CompactError::ExceptNeedsParentheses { span } => {
                         RelaxError::ExceptNeedsParentheses(subspan(span))
                     }
+                    compact::CompactError::TopLevelFollowAnnotation { span } => {
+                        RelaxError::TopLevelFollowAnnotation(subspan(span))
+                    }
                 })?;
                 Ok(schema)
             }
@@ -129,6 +132,10 @@ pub enum RelaxError {
     /// In the compact syntax, an operator applied to a `-` (except) expression without
     /// parentheses; the span is that of the operator
     ExceptNeedsParentheses(codemap::Span),
+    /// In the compact syntax, an annotation that would translate to a second top-level element: a
+    /// follow annotation (`>>`) on the top-level pattern, or an annotation element on a top-level
+    /// value
+    TopLevelFollowAnnotation(codemap::Span),
     XmlParse(codemap::Span, crate::syntax::xml::Error),
     DuplicateDefinition {
         name: String,
@@ -1255,6 +1262,16 @@ impl<FS: Files> Compiler<FS> {
                 code: None,
                 spans: vec![],
             },
+            RelaxError::TopLevelFollowAnnotation(span) => codemap_diagnostic::Diagnostic {
+                level: codemap_diagnostic::Level::Error,
+                message: "The top-level pattern can't have follow annotations".to_string(),
+                code: None,
+                spans: vec![codemap_diagnostic::SpanLabel {
+                    span: *span,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                    label: Some("Remove this annotation".to_string()),
+                }],
+            },
             RelaxError::ExceptNeedsParentheses(span) => codemap_diagnostic::Diagnostic {
                 level: codemap_diagnostic::Level::Error,
                 message: "Parentheses required around \"-\" expression".to_string(),
@@ -1349,7 +1366,12 @@ impl<FS: Files> Compiler<FS> {
         match schema.pattern_or_grammar {
             types::PatternOrGrammar::Pattern(ref p) => {
                 if let Context::Include { .. } = ctx {
-                    match p {
+                    // look through leading annotations, as in `[ xml:lang = "en" ] grammar { … }`
+                    let mut unannotated = p;
+                    while let types::Pattern::Annotated(_, inner) = unannotated {
+                        unannotated = inner;
+                    }
+                    match unannotated {
                         types::Pattern::Grammar(grammar) => {
                             // when including a file containing a grammar definition, we don't require
                             // that the grammar has a 'start' rule, as compile_grammar_pattern()
@@ -2432,5 +2454,32 @@ mod tests {
         let result = c.compile(Path::new("test.rnc")).unwrap();
         let unreachable = result.unreachable_definitions();
         assert!(unreachable.is_empty());
+    }
+
+    /// Schema files held in memory, as (name, text) pairs
+    struct MemFiles(Vec<(&'static str, &'static str)>);
+    impl Files for MemFiles {
+        fn load(&self, name: &Path) -> Result<String, RelaxError> {
+            let name = name.to_str().unwrap();
+            let (_, text) = self.0.iter().find(|(n, _)| *n == name).expect(name);
+            Ok(text.to_string())
+        }
+    }
+
+    #[test]
+    fn include_annotated_grammar() {
+        // issue #26
+        for inc in [
+            "[ xml:lang = \"en\" ] grammar { start = element a { empty } }",
+            "## doc\ngrammar { start = element a { empty } }",
+        ] {
+            let mut c = Compiler::new(
+                MemFiles(vec![("main.rnc", "include \"inc.rnc\""), ("inc.rnc", inc)]),
+                Syntax::Compact,
+            );
+            if let Err(e) = c.compile(Path::new("main.rnc")) {
+                panic!("including {inc:?} failed: {e:?}");
+            }
+        }
     }
 }

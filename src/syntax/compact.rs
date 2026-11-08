@@ -6,7 +6,7 @@ use nom::sequence::preceded;
 use nom::{
     branch::alt,
     bytes::complete::{is_not, tag, take_till, take_until, take_while, take_while1},
-    combinator::{all_consuming, map, not, opt, peek, recognize, verify},
+    combinator::{all_consuming, eof, map, not, opt, peek, recognize, verify},
     error::ErrorKind,
     multi::{fold_many0, fold_many1, many0, many1, separated_list0, separated_list1},
     sequence::delimited,
@@ -405,6 +405,21 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
     let (input, decls) = spaced_list0(decl).parse(input)?;
     let (input, _) = space_comment0(input)?;
     let (input, start) = position(input)?;
+    // grammarContent* may be empty, so that a file with no content (or only comments, or only
+    // declarations) is an empty grammar.  This is checked first, rather than as another
+    // alternative, so that it doesn't replace the errors reported for malformed content.
+    if peek((space_comment0, eof)).parse(input).is_ok() {
+        return Ok((
+            input,
+            Schema {
+                decls,
+                pattern_or_grammar: PatternOrGrammar::Grammar(GrammarPattern {
+                    span: span(start, input),
+                    content: vec![],
+                }),
+            },
+        ));
+    }
     let (input, pattern_or_grammar) = alt((
         map(spaced_list1(grammar_content), |content| {
             PatternOrGrammar::Grammar(GrammarPattern {
@@ -3060,5 +3075,32 @@ mod test {
             start_pattern("start = token\"x\""),
             Pattern::DatatypeValue(DatatypeValuePattern(_, Some(DatatypeName::Token), ..))
         ));
+    }
+
+    #[test]
+    fn empty_top_level_is_empty_grammar() {
+        // topLevel ::= decl* (pattern | grammarContent*), and grammarContent* may be empty
+        for src in [
+            "",
+            "\n",
+            "# just a comment",
+            "# a comment\n# and another\n",
+            "namespace x = \"urn:x\"\n",
+        ] {
+            match parse(src) {
+                Ok(Schema {
+                    pattern_or_grammar: PatternOrGrammar::Grammar(g),
+                    ..
+                }) => assert!(g.content.is_empty(), "{src:?}"),
+                other => panic!("expected empty grammar for {src:?}, got {other:?}"),
+            }
+        }
+        // a misplaced `##` is still an error, as is malformed content
+        for src in ["## doc", "start ="] {
+            assert!(
+                matches!(parse(src), Err(CompactError::Syntax { .. })),
+                "{src:?}"
+            );
+        }
     }
 }

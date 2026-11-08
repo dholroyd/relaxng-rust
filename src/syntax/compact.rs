@@ -28,6 +28,10 @@ pub enum Error<I> {
     /// An operator applied to a `-` (except) expression without the parentheses the spec
     /// requires, e.g. `xsd:string - "a" | "b"`; the input is at the operator.
     ExceptNeedsParentheses(I),
+    /// An annotation that would translate to a second top-level element: a follow annotation on
+    /// the top-level pattern, or an annotation element on a top-level value; the span is that of
+    /// the annotation, in original source offsets.
+    TopLevelFollowAnnotation(Range<usize>),
 }
 
 impl<I> nom::error::ParseError<I> for Error<I> {
@@ -222,6 +226,10 @@ pub enum CompactError {
     /// An operator applied to a `-` (except) expression without parentheses; the span is that of
     /// the operator.
     ExceptNeedsParentheses { span: Range<usize> },
+    /// An annotation that would translate to a second top-level element: a follow annotation
+    /// (`>>`) on the top-level pattern, or an annotation element on a top-level value; the span is
+    /// that of the annotation.
+    TopLevelFollowAnnotation { span: Range<usize> },
 }
 
 /// Resolve a single `\x{N}` escape sequence, returning the character and the byte length consumed
@@ -362,6 +370,10 @@ pub fn parse(source: &str) -> Result<Schema, CompactError> {
     let (text, map) = preprocess(source).map_err(CompactError::Input)?;
     let input = Span::new_extra(&text, SourceMap(&map));
     schema(input).map_err(|e| match e {
+        nom::Err::Error(Error::TopLevelFollowAnnotation(span))
+        | nom::Err::Failure(Error::TopLevelFollowAnnotation(span)) => {
+            CompactError::TopLevelFollowAnnotation { span }
+        }
         nom::Err::Error(Error::ExceptNeedsParentheses(input))
         | nom::Err::Failure(Error::ExceptNeedsParentheses(input)) => {
             let start = original_offset(&input);
@@ -411,6 +423,13 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
         map(pattern, PatternOrGrammar::Pattern),
     ))
     .parse(input)?;
+    if let PatternOrGrammar::Pattern(p) = &pattern_or_grammar {
+        if let Some(follow) = top_level_follow_annotation(p) {
+            return Err(nom::Err::Failure(Error::TopLevelFollowAnnotation(
+                follow.span.clone(),
+            )));
+        }
+    }
     let pattern_or_grammar = match pattern_or_grammar {
         PatternOrGrammar::Grammar(mut g) => {
             g.span = span(start, input);
@@ -425,6 +444,30 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
             pattern_or_grammar,
         },
     ))
+}
+
+/// Find an annotation that would translate to an element following the top-level pattern's
+/// element, which the spec forbids, as "a top-level pattern [mustn't translate] to a sequence of
+/// more than one element".  That is a follow annotation on the pattern as a whole, or an
+/// annotation element on a value, which can't have element children.  Annotations within the
+/// top-level pattern, e.g. on one alternative of a choice, stay within its element.
+fn top_level_follow_annotation(top: &Pattern) -> Option<&AnnotationElement> {
+    let mut p = top;
+    while let Pattern::Annotated(annos, inner) = p {
+        if let Some(follow) = annos.follow_elements.first() {
+            return Some(follow);
+        }
+        if let Pattern::DatatypeValue(_) = **inner
+            && let Some(element) = annos
+                .initial
+                .as_ref()
+                .and_then(|i| i.element_annotations.first())
+        {
+            return Some(element);
+        }
+        p = inner;
+    }
+    None
 }
 
 // decl      ::=  	"namespace" identifierOrKeyword "=" namespaceURILiteral
@@ -2875,6 +2918,53 @@ mod test {
         for rest in ["## doc\nx:foo [ ]", "[x:a=\"1\"] x:foo [ ]", "div [ ]"] {
             let src = format!("{p}{rest}");
             assert!(parse(&src).is_err(), "expected error for {rest:?}");
+        }
+    }
+
+    #[test]
+    fn top_level_follow_annotation_rejected() {
+        // the spec: "It is an error if a top-level pattern translates to a sequence of more than
+        // one element"
+        let src = "namespace x = \"urn:x\"\nelement a { empty } >> x:y [ ]";
+        match parse(src) {
+            Err(CompactError::TopLevelFollowAnnotation { span }) => {
+                assert_eq!(&src[span], "x:y [ ]")
+            }
+            other => panic!("expected TopLevelFollowAnnotation, got {other:?}"),
+        }
+        for top in [
+            "(element a { empty } | empty) >> x:y [ ]",
+            "element a { empty }* >> x:y [ ]",
+            "[ x:a = \"1\" ] element a { empty } >> x:y [ ]",
+            "## doc\nelement a { empty } >> x:y [ ]",
+            "xsd:string - \"a\" >> x:y [ ]",
+            // a <value> can't have element children, so the annotation would follow it
+            "[ x:e [ ] ] \"a\"",
+        ] {
+            let src = format!("namespace x = \"urn:x\"\n{top}");
+            assert!(
+                matches!(
+                    parse(&src),
+                    Err(CompactError::TopLevelFollowAnnotation { .. })
+                ),
+                "{top:?}"
+            );
+        }
+        // annotations that stay within the top-level element.  Jing rejects the first four,
+        // although they translate to a single element.
+        for top in [
+            "element a { empty } | empty >> x:y [ ]",
+            "element a { empty } >> x:y [ ] | empty",
+            "(element a { empty } | empty >> x:y [ ])",
+            "element a { empty } >> x:y [ ] *",
+            "[ x:a = \"1\" ] \"a\"",
+            "[ x:e [ ] ] element a { empty }",
+            "element a { empty >> x:y [ ] }",
+            "element a >> x:y [ ] { empty }",
+            "grammar { start = element a { empty } >> x:y [ ] }",
+        ] {
+            let src = format!("namespace x = \"urn:x\"\n{top}");
+            assert!(parse(&src).is_ok(), "{top:?}");
         }
     }
 }

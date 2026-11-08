@@ -716,31 +716,26 @@ fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
     let (input, primary) = lead_annotated_primary(input)?;
     let (input, primary) = data_except(input, primary)?;
     let (input, follow) = follow_annotation_list(input)?;
-    let mut result = with_follow_annotations(primary, follow);
-    let mut input = input;
+    let result = with_follow_annotations(primary, follow);
 
-    // repeatedPrimary: a postfix operator, which binds tighter than binary operators, and then
-    // follow annotations for the repetition as a whole
-    loop {
-        let (op_at, _) = space_comment0(input)?;
-        let Ok((i, op)) =
-            satisfy::<_, _, Error<Span>>(|c| matches!(c, '?' | '*' | '+')).parse(op_at)
-        else {
-            return Ok((input, result));
-        };
-        if is_data_except(&result) {
-            return Err(nom::Err::Failure(Error::ExceptNeedsParentheses(op_at)));
-        }
-        let repeated = Box::new(result);
-        let repeated = match op {
-            '?' => Pattern::Optional(None, repeated),
-            '*' => Pattern::ZeroOrMore(None, repeated),
-            _ => Pattern::OneOrMore(None, repeated),
-        };
-        let (i, follow) = follow_annotation_list(i)?;
-        result = with_follow_annotations(repeated, follow);
-        input = i;
+    // repeatedPrimary: at most one postfix operator, which binds tighter than binary operators,
+    // and then follow annotations for the repetition as a whole
+    let (op_at, _) = space_comment0(input)?;
+    let Ok((i, op)) = satisfy::<_, _, Error<Span>>(|c| matches!(c, '?' | '*' | '+')).parse(op_at)
+    else {
+        return Ok((input, result));
+    };
+    if is_data_except(&result) {
+        return Err(nom::Err::Failure(Error::ExceptNeedsParentheses(op_at)));
     }
+    let result = Box::new(result);
+    let repeated = match op {
+        '?' => Pattern::Optional(None, result),
+        '*' => Pattern::ZeroOrMore(None, result),
+        _ => Pattern::OneOrMore(None, result),
+    };
+    let (i, follow) = follow_annotation_list(i)?;
+    Ok((i, with_follow_annotations(repeated, follow)))
 }
 
 /// leadAnnotatedPrimary: a primary pattern, with any leading annotations (`##` documentation,
@@ -2780,6 +2775,14 @@ mod test {
         match p {
             Pattern::Annotated(a, inner) => (a.initial.is_some(), a.follow_elements.len(), *inner),
             other => panic!("expected annotated pattern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_one_postfix_operator() {
+        for body in ["text?*", "text*+", "text* >> x:y[] ?"] {
+            let src = format!("namespace x = \"urn:x\"\nstart = element a {{ {body} }}");
+            assert!(parse(&src).is_err(), "expected error for {body:?}");
         }
     }
 

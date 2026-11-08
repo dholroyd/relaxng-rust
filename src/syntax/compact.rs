@@ -423,12 +423,12 @@ fn top_level(input: Span) -> IResult<Span, Schema> {
         map(pattern, PatternOrGrammar::Pattern),
     ))
     .parse(input)?;
-    if let PatternOrGrammar::Pattern(p) = &pattern_or_grammar {
-        if let Some(follow) = top_level_follow_annotation(p) {
-            return Err(nom::Err::Failure(Error::TopLevelFollowAnnotation(
-                follow.span.clone(),
-            )));
-        }
+    if let PatternOrGrammar::Pattern(p) = &pattern_or_grammar
+        && let Some(follow) = top_level_follow_annotation(p)
+    {
+        return Err(nom::Err::Failure(Error::TopLevelFollowAnnotation(
+            follow.span.clone(),
+        )));
     }
     let pattern_or_grammar = match pattern_or_grammar {
         PatternOrGrammar::Grammar(mut g) => {
@@ -847,11 +847,11 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
     loop {
         let (op_at, _) = space_comment0(input)?;
         let Ok((i, op)) =
-            satisfy::<_, _, Error<Span>>(|c| matches!(c, ',' | '&' | '|')).parse(op_at.clone())
+            satisfy::<_, _, Error<Span>>(|c| matches!(c, ',' | '&' | '|')).parse(op_at)
         else {
             break;
         };
-        let parens_needed = || nom::Err::Failure(Error::ExceptNeedsParentheses(op_at.clone()));
+        let parens_needed = || nom::Err::Failure(Error::ExceptNeedsParentheses(op_at));
         if is_data_except(&result) {
             return Err(parens_needed());
         }
@@ -1166,10 +1166,10 @@ fn name_class(input: Span) -> IResult<Span, NameClass> {
 
     loop {
         let (op_at, _) = space_comment0(input)?;
-        let Ok((i, _)) = tag::<_, _, Error<Span>>("|")(op_at.clone()) else {
+        let Ok((i, _)) = tag::<_, _, Error<Span>>("|")(op_at) else {
             break;
         };
-        let parens_needed = || nom::Err::Failure(Error::ExceptNeedsParentheses(op_at.clone()));
+        let parens_needed = || nom::Err::Failure(Error::ExceptNeedsParentheses(op_at));
         if is_name_class_except(&result) {
             return Err(parens_needed());
         }

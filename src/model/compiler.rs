@@ -109,6 +109,9 @@ impl Syntax {
                     compact::CompactError::Syntax { span, kind } => {
                         RelaxError::Parse(subspan(span), kind)
                     }
+                    compact::CompactError::ExceptNeedsParentheses { span } => {
+                        RelaxError::ExceptNeedsParentheses(subspan(span))
+                    }
                 })?;
                 Ok(schema)
             }
@@ -123,6 +126,9 @@ pub enum RelaxError {
     IncludeError(codemap::Span, Box<RelaxError>),
     // TODO: remove nom type from public API
     Parse(codemap::Span, nom::error::ErrorKind),
+    /// In the compact syntax, an operator applied to a `-` (except) expression without
+    /// parentheses; the span is that of the operator
+    ExceptNeedsParentheses(codemap::Span),
     XmlParse(codemap::Span, crate::syntax::xml::Error),
     DuplicateDefinition {
         name: String,
@@ -1248,6 +1254,16 @@ impl<FS: Files> Compiler<FS> {
                 message: format!("Schema restriction violated: {kind}"),
                 code: None,
                 spans: vec![],
+            },
+            RelaxError::ExceptNeedsParentheses(span) => codemap_diagnostic::Diagnostic {
+                level: codemap_diagnostic::Level::Error,
+                message: "Parentheses required around \"-\" expression".to_string(),
+                code: None,
+                spans: vec![codemap_diagnostic::SpanLabel {
+                    span: *span,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                    label: Some("Applies to a \"-\" expression".to_string()),
+                }],
             },
             RelaxError::Parse(span, kind) => {
                 let message = match kind {

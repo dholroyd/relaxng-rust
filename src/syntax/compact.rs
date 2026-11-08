@@ -25,6 +25,9 @@ const MAX_RECURSION_DEPTH: usize = 30;
 pub enum Error<I> {
     /// The input doesn't match the grammar; the [`ErrorKind`] names the nom parser that gave up.
     Nom(I, ErrorKind),
+    /// An operator applied to a `-` (except) expression without the parentheses the spec
+    /// requires, e.g. `xsd:string - "a" | "b"`; the input is at the operator.
+    ExceptNeedsParentheses(I),
 }
 
 impl<I> nom::error::ParseError<I> for Error<I> {
@@ -216,6 +219,9 @@ pub enum CompactError {
     Input(InputError),
     /// The text could not be parsed.  The span is in original source offsets.
     Syntax { span: Range<usize>, kind: ErrorKind },
+    /// An operator applied to a `-` (except) expression without parentheses; the span is that of
+    /// the operator.
+    ExceptNeedsParentheses { span: Range<usize> },
 }
 
 /// Resolve a single `\x{N}` escape sequence, returning the character and the byte length consumed
@@ -356,6 +362,13 @@ pub fn parse(source: &str) -> Result<Schema, CompactError> {
     let (text, map) = preprocess(source).map_err(CompactError::Input)?;
     let input = Span::new_extra(&text, SourceMap(&map));
     schema(input).map_err(|e| match e {
+        nom::Err::Error(Error::ExceptNeedsParentheses(input))
+        | nom::Err::Failure(Error::ExceptNeedsParentheses(input)) => {
+            let start = original_offset(&input);
+            CompactError::ExceptNeedsParentheses {
+                span: start..start + 1,
+            }
+        }
         nom::Err::Error(Error::Nom(input, kind)) | nom::Err::Failure(Error::Nom(input, kind)) => {
             let end = input.location_offset() + input.fragment().len();
             CompactError::Syntax {
@@ -663,6 +676,7 @@ fn keyword(input: Span) -> IResult<Span, Keyword> {
 fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
     // annotatedPrimary: follow annotations here belong to the primary, inside any repetition
     let (input, primary) = lead_annotated_primary(input)?;
+    let (input, primary) = data_except(input, primary)?;
     let (input, follow) = follow_annotation_list(input)?;
     let mut result = with_follow_annotations(primary, follow);
     let mut input = input;
@@ -670,11 +684,15 @@ fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
     // repeatedPrimary: a postfix operator, which binds tighter than binary operators, and then
     // follow annotations for the repetition as a whole
     loop {
-        let (i, _) = space_comment0(input)?;
-        let Ok((i, op)) = satisfy::<_, _, Error<Span>>(|c| matches!(c, '?' | '*' | '+')).parse(i)
+        let (op_at, _) = space_comment0(input)?;
+        let Ok((i, op)) =
+            satisfy::<_, _, Error<Span>>(|c| matches!(c, '?' | '*' | '+')).parse(op_at)
         else {
             return Ok((input, result));
         };
+        if is_data_except(&result) {
+            return Err(nom::Err::Failure(Error::ExceptNeedsParentheses(op_at)));
+        }
         let repeated = Box::new(result);
         let repeated = match op {
             '?' => Pattern::Optional(None, repeated),
@@ -724,6 +742,39 @@ fn lead_annotated_primary(input: Span) -> IResult<Span, Pattern> {
     Ok((input, result))
 }
 
+/// dataExcept: if `primary` is a datatype name, with any parameters, followed by `-`, add the
+/// except pattern, a lead-annotated primary.  Leading annotations on `primary` then apply to the
+/// whole, as do any follow annotations after the except pattern.
+fn data_except(input: Span, mut primary: Pattern) -> IResult<Span, Pattern> {
+    let target = match &mut primary {
+        Pattern::Annotated(_, inner) => &mut **inner,
+        other => other,
+    };
+    if let Pattern::DatatypeName(DatatypeNamePattern(span, _, _, except @ None)) = target {
+        let (input, operand) = opt(preceded(
+            (space_comment0, tag("-"), space_comment0),
+            cut(lead_annotated_primary),
+        ))
+        .parse(input)?;
+        if let Some(operand) = operand {
+            *except = Some(Box::new(operand));
+            span.end = original_offset(&input);
+        }
+        return Ok((input, primary));
+    }
+    Ok((input, primary))
+}
+
+/// Is `p` a datatype with an except pattern, which may not be the operand of another operator
+/// without parentheses?
+fn is_data_except(p: &Pattern) -> bool {
+    match p {
+        Pattern::Annotated(_, inner) => is_data_except(inner),
+        Pattern::DatatypeName(DatatypeNamePattern(_, _, _, except)) => except.is_some(),
+        _ => false,
+    }
+}
+
 /// Attach `>>` follow annotations to `pattern`, sharing its `Annotated` wrapper if it has leading
 /// annotations but no follow annotations yet.
 fn with_follow_annotations(pattern: Pattern, follow: Vec<AnnotationElement>) -> Pattern {
@@ -751,29 +802,28 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
     let (mut input, mut result) = pattern_primary(input)?;
 
     loop {
-        let (i, _) = space_comment0(input)?;
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>(",")(i) {
-            let (i, _) = space_comment0(i)?;
-            let (i, right) = pattern_primary(i)?;
-            result = Pattern::ListPair(Box::new(result), Box::new(right));
-            input = i;
-            continue;
+        let (op_at, _) = space_comment0(input)?;
+        let Ok((i, op)) =
+            satisfy::<_, _, Error<Span>>(|c| matches!(c, ',' | '&' | '|')).parse(op_at.clone())
+        else {
+            break;
+        };
+        let parens_needed = || nom::Err::Failure(Error::ExceptNeedsParentheses(op_at.clone()));
+        if is_data_except(&result) {
+            return Err(parens_needed());
         }
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("&")(i) {
-            let (i, _) = space_comment0(i)?;
-            let (i, right) = pattern_primary(i)?;
-            result = Pattern::InterleavePair(Box::new(result), Box::new(right));
-            input = i;
-            continue;
+        let (i, _) = space_comment0(i)?;
+        let (i, right) = pattern_primary(i)?;
+        if is_data_except(&right) {
+            return Err(parens_needed());
         }
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("|")(i) {
-            let (i, _) = space_comment0(i)?;
-            let (i, right) = pattern_primary(i)?;
-            result = Pattern::ChoicePair(Box::new(result), Box::new(right));
-            input = i;
-            continue;
-        }
-        break;
+        let (left, right) = (Box::new(result), Box::new(right));
+        result = match op {
+            ',' => Pattern::ListPair(left, right),
+            '&' => Pattern::InterleavePair(left, right),
+            _ => Pattern::ChoicePair(left, right),
+        };
+        input = i;
     }
     IResult::Ok((input, result))
 }
@@ -937,15 +987,10 @@ fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
     );
     let params = map(params, |(_, _, _, p, _, _)| p);
 
-    let parse = (
-        position,
-        datatype_name,
-        opt(params),
-        opt(map((space_comment0, except_pattern), |(_, e)| e)),
-        position,
-    );
-    let mut parser = map(parse, |(start, name, params, except, end)| {
-        DatatypeNamePattern(span(start, end), name, params, except.map(Box::new))
+    let parse = (position, datatype_name, opt(params), position);
+    // any except pattern is added by pattern_primary()
+    let mut parser = map(parse, |(start, name, params, end)| {
+        DatatypeNamePattern(span(start, end), name, params, None)
     });
 
     parser.parse(input)
@@ -983,15 +1028,6 @@ fn param(input: Span) -> IResult<Span, Param> {
     parser.parse(input)
 }
 
-// exceptPattern     ::=   "-" pattern
-fn except_pattern(input: Span) -> IResult<Span, Pattern> {
-    let parse = (tag("-"), space_comment0, pattern);
-
-    let mut parser = map(parse, |(_, _, pat)| pat);
-
-    parser.parse(input)
-}
-
 // datatypeName  ::=   CName
 //                   | "string"
 //                   | "token"
@@ -1007,32 +1043,78 @@ fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
 // Parse a single atomic name class with annotations.
 // Does NOT handle the binary `|` operator — that is handled iteratively in `name_class`.
 fn name_class_primary(input: Span) -> IResult<Span, NameClass> {
+    let (input, primary) = lead_annotated_primary_name_class(input)?;
+    let (input, primary) = name_class_except(input, primary)?;
+    let (input, follow) = follow_annotation_list(input)?;
+    if follow.is_empty() {
+        return Ok((input, primary));
+    }
+    // follow annotations share the wrapper of any leading annotations
+    let result = match primary {
+        NameClass::Annotated(mut annos, inner) => {
+            annos.follow_elements = follow;
+            NameClass::Annotated(annos, inner)
+        }
+        other => NameClass::Annotated(
+            Annotations {
+                documentation: vec![],
+                initial: None,
+                follow_elements: follow,
+            },
+            Box::new(other),
+        ),
+    };
+    Ok((input, result))
+}
+
+/// A primary name class, with any leading annotations: a name, `ns:*`, `*` or a parenthesised
+/// name class, but not an except
+fn lead_annotated_primary_name_class(input: Span) -> IResult<Span, NameClass> {
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = space_comment0(input)?;
-    let (input, left) = alt((
+    let (input, primary) = alt((
         map(ns_name_nc, NameClass::NsName),
         map(name, NameClass::Name),
         map(any_name_nc, NameClass::AnyName),
         map(paren_nc, NameClass::Paren),
     ))
     .parse(input)?;
-
-    let (input, follow_annotations) = follow_annotation_list(input)?;
-
-    // Wrap in Annotated if there are any annotations
-    let left = if annotations.is_some() || !follow_annotations.is_empty() {
-        let mut annos = annotations.unwrap_or(Annotations {
-            documentation: vec![],
-            initial: None,
-            follow_elements: vec![],
-        });
-        annos.follow_elements = follow_annotations;
-        NameClass::Annotated(annos, Box::new(left))
-    } else {
-        left
+    let result = match annotations {
+        Some(annos) => NameClass::Annotated(annos, Box::new(primary)),
+        None => primary,
     };
+    Ok((input, result))
+}
 
-    Ok((input, left))
+/// If `primary` is `ns:*` or `*` followed by `-`, add the except name class, a lead-annotated
+/// primary.  Leading annotations on `primary` then apply to the whole.
+fn name_class_except(input: Span, mut primary: NameClass) -> IResult<Span, NameClass> {
+    let target = match &mut primary {
+        NameClass::Annotated(_, inner) => &mut **inner,
+        other => other,
+    };
+    let except = match target {
+        NameClass::NsName(NsName { except, .. }) | NameClass::AnyName(AnyName(except)) => except,
+        _ => return Ok((input, primary)),
+    };
+    let (input, operand) = opt(preceded(
+        (space_comment0, tag("-"), space_comment0),
+        cut(lead_annotated_primary_name_class),
+    ))
+    .parse(input)?;
+    *except = operand.map(Box::new);
+    Ok((input, primary))
+}
+
+/// Is `nc` an except name class, which may not be the operand of `|` without parentheses?
+fn is_name_class_except(nc: &NameClass) -> bool {
+    match nc {
+        NameClass::Annotated(_, inner) => is_name_class_except(inner),
+        NameClass::NsName(NsName { except, .. }) | NameClass::AnyName(AnyName(except)) => {
+            except.is_some()
+        }
+        _ => false,
+    }
 }
 
 fn name_class(input: Span) -> IResult<Span, NameClass> {
@@ -1040,15 +1122,21 @@ fn name_class(input: Span) -> IResult<Span, NameClass> {
     let (mut input, mut result) = name_class_primary(input)?;
 
     loop {
-        let (i, _) = space_comment0(input)?;
-        if let Ok((i, _)) = tag::<_, _, (Span, ErrorKind)>("|")(i) {
-            let (i, _) = space_comment0(i)?;
-            let (i, right) = name_class_primary(i)?;
-            result = NameClass::Alt(AltName(Box::new(result), Box::new(right)));
-            input = i;
-            continue;
+        let (op_at, _) = space_comment0(input)?;
+        let Ok((i, _)) = tag::<_, _, Error<Span>>("|")(op_at.clone()) else {
+            break;
+        };
+        let parens_needed = || nom::Err::Failure(Error::ExceptNeedsParentheses(op_at.clone()));
+        if is_name_class_except(&result) {
+            return Err(parens_needed());
         }
-        break;
+        let (i, _) = space_comment0(i)?;
+        let (i, right) = name_class_primary(i)?;
+        if is_name_class_except(&right) {
+            return Err(parens_needed());
+        }
+        result = NameClass::Alt(AltName(Box::new(result), Box::new(right)));
+        input = i;
     }
 
     Ok((input, result))
@@ -1065,29 +1153,18 @@ fn name(input: Span) -> IResult<Span, Name> {
 }
 
 fn ns_name_nc(input: Span) -> IResult<Span, NsName> {
-    let parse = (
-        nc_name,
-        tag(":*"),
-        opt((space_comment0, tag("-"), space_comment0, name_class)),
-    );
-
-    let mut parser = map(parse, |(name, _, except)| NsName {
+    // any except is added by name_class_primary()
+    let mut parser = map((nc_name, tag(":*")), |(name, _)| NsName {
         name: NamespaceOrPrefix::Prefix(name),
-        except: except.map(|(_, _, _, name_class)| Box::new(name_class)),
+        except: None,
     });
 
     parser.parse(input)
 }
 
 fn any_name_nc(input: Span) -> IResult<Span, AnyName> {
-    let parse = (
-        tag("*"),
-        opt((space_comment0, tag("-"), space_comment0, name_class)),
-    );
-
-    let mut parser = map(parse, |(_, except)| {
-        AnyName(except.map(|(_, _, _, name_class)| Box::new(name_class)))
-    });
+    // any except is added by name_class_primary()
+    let mut parser = map(tag("*"), |_| AnyName(None));
 
     parser.parse(input)
 }
@@ -2622,6 +2699,111 @@ mod test {
         match p {
             Pattern::Annotated(a, inner) => (a.initial.is_some(), a.follow_elements.len(), *inner),
             other => panic!("expected annotated pattern, got {other:?}"),
+        }
+    }
+
+    fn except_of(p: &Pattern) -> &Pattern {
+        match p {
+            Pattern::DatatypeName(DatatypeNamePattern(_, _, _, Some(except))) => except,
+            other => panic!("expected datatype with except, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_except_annotations() {
+        // as translated by trang: the follow annotation follows <data>, not the <value>
+        let (lead, follow, inner) = annos(element_body("xsd:string - \"a\" >> x:y[]"));
+        assert_eq!((lead, follow), (false, 1));
+        assert!(matches!(except_of(&inner), Pattern::DatatypeValue(_)));
+
+        // leading annotations apply to <data>
+        let (lead, follow, inner) = annos(element_body("[x:a=\"1\"] xsd:string - \"a\""));
+        assert_eq!((lead, follow), (true, 0));
+        assert!(matches!(except_of(&inner), Pattern::DatatypeValue(_)));
+
+        // and on the except pattern, to <value>
+        let p = element_body("xsd:string - [x:a=\"1\"] \"a\"");
+        assert!(matches!(except_of(&p), Pattern::Annotated(a, _) if a.initial.is_some()));
+
+        let p = element_body("xsd:string - (\"a\" | \"b\")");
+        assert!(matches!(except_of(&p), Pattern::Group(_)));
+    }
+
+    #[test]
+    fn data_except_needs_parentheses() {
+        // Jing reports `parentheses required around "-" expression` for each
+        for body in [
+            "xsd:string - \"a\" | \"b\"",
+            "xsd:string - \"a\" >> x:y[] | \"b\"",
+            "xsd:string - \"a\", text",
+            "text & xsd:string - \"a\"",
+            "xsd:string - \"a\"*",
+        ] {
+            let src = format!("namespace x = \"urn:x\"\nstart = element a {{ {body} }}");
+            match parse(&src) {
+                Err(CompactError::ExceptNeedsParentheses { span }) => {
+                    assert!(matches!(&src[span], "|" | "," | "&" | "*"), "{body:?}")
+                }
+                other => panic!("expected ExceptNeedsParentheses for {body:?}, got {other:?}"),
+            }
+        }
+        assert!(parse("start = element a { (xsd:string - \"a\") | \"b\" }").is_ok());
+    }
+
+    /// The name class of `element <nc> { empty }`
+    fn element_name_class(nc: &str) -> NameClass {
+        let src = format!("namespace x = \"urn:x\"\nstart = element {nc} {{ empty }}");
+        match parse(&src).map(only_define) {
+            Ok(Define {
+                pattern: Pattern::Element(el),
+                ..
+            }) => el.name_class,
+            other => panic!("expected element for {nc:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn name_class_except_annotations() {
+        // as translated by trang: the follow annotation follows <anyName>
+        let NameClass::Annotated(a, inner) = element_name_class("* - a >> x:y[]") else {
+            panic!("expected annotated name class");
+        };
+        assert_eq!(a.follow_elements.len(), 1);
+        assert!(matches!(*inner, NameClass::AnyName(AnyName(Some(_)))));
+
+        // leading annotations apply to <nsName>
+        let NameClass::Annotated(a, inner) = element_name_class("[x:z=\"1\"] x:* - x:a") else {
+            panic!("expected annotated name class");
+        };
+        assert!(a.initial.is_some());
+        assert!(matches!(
+            *inner,
+            NameClass::NsName(NsName {
+                except: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn name_class_except_needs_parentheses() {
+        for nc in ["* - a | b", "x:* - x:a | b", "a | * - b"] {
+            let src = format!("namespace x = \"urn:x\"\nstart = element {nc} {{ empty }}");
+            match parse(&src) {
+                Err(CompactError::ExceptNeedsParentheses { span }) => assert_eq!(&src[span], "|"),
+                other => panic!("expected ExceptNeedsParentheses for {nc:?}, got {other:?}"),
+            }
+        }
+        // an except within an except, rejected by Jing as a syntax error
+        assert!(matches!(
+            parse("namespace x = \"urn:x\"\nstart = element * - x:* - x:a { empty }"),
+            Err(CompactError::Syntax { .. })
+        ));
+        for nc in ["(* - a) | b", "* - (a | b)"] {
+            assert!(matches!(
+                element_name_class(nc),
+                NameClass::Alt(_) | NameClass::AnyName(_)
+            ));
         }
     }
 }

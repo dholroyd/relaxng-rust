@@ -2,14 +2,13 @@ use crate::syntax::types::*;
 use nom::Parser;
 use nom::character::complete::satisfy;
 use nom::combinator::cut;
-use nom::multi::separated_list1;
 use nom::sequence::preceded;
 use nom::{
     branch::alt,
     bytes::complete::{is_not, tag, take_till, take_until, take_while, take_while1},
     combinator::{all_consuming, map, not, opt, peek, recognize, verify},
     error::ErrorKind,
-    multi::{fold_many0, fold_many1, many0, separated_list0},
+    multi::{fold_many0, fold_many1, many0, many1, separated_list0, separated_list1},
     sequence::delimited,
 };
 use nom_locate::{LocatedSpan, position};
@@ -403,23 +402,16 @@ fn schema(input: Span) -> Result<Schema, nom::Err<Error<Span>>> {
 
 // topLevel	  ::=  	decl* (pattern | grammarContent*)
 fn top_level(input: Span) -> IResult<Span, Schema> {
-    let (input, decls) = separated_list0(space_comment1, decl).parse(input)?;
-    let (input, _) = if decls.is_empty() {
-        space_comment0(input)?
-    } else {
-        space_comment1(input)?
-    };
+    let (input, decls) = spaced_list0(decl).parse(input)?;
+    let (input, _) = space_comment0(input)?;
     let (input, start) = position(input)?;
     let (input, pattern_or_grammar) = alt((
-        map(
-            separated_list1(space_comment1, grammar_content),
-            |content| {
-                PatternOrGrammar::Grammar(GrammarPattern {
-                    span: 0..0, // patched below
-                    content,
-                })
-            },
-        ),
+        map(spaced_list1(grammar_content), |content| {
+            PatternOrGrammar::Grammar(GrammarPattern {
+                span: 0..0, // patched below
+                content,
+            })
+        }),
         map(pattern, PatternOrGrammar::Pattern),
     ))
     .parse(input)?;
@@ -484,7 +476,7 @@ fn decl(input: Span) -> IResult<Span, Decl> {
 fn decl_namespace(input: Span) -> IResult<Span, NamespaceDeclaration> {
     let (input, (_keyword, _, prefix, _, _, _, uri)) = (
         tag("namespace"),
-        space_comment1,
+        after_keyword,
         identifier_or_keyword,
         space_comment0,
         tag("="),
@@ -503,9 +495,9 @@ fn decl_namespace(input: Span) -> IResult<Span, NamespaceDeclaration> {
 fn decl_default_namespace(input: Span) -> IResult<Span, DefaultNamespaceDeclaration> {
     let (input, (_keyword, _, _, _, prefix, _, _, _, uri)) = (
         tag("default"),
-        space_comment1,
+        after_keyword,
         tag("namespace"),
-        space_comment1,
+        after_keyword,
         opt(identifier_or_keyword),
         space_comment0,
         tag("="),
@@ -524,7 +516,7 @@ fn decl_default_namespace(input: Span) -> IResult<Span, DefaultNamespaceDeclarat
 fn decl_datatypes(input: Span) -> IResult<Span, DatatypesDeclaration> {
     let (input, (_keyword, _, prefix, _, _, _, uri)) = (
         tag("datatypes"),
-        space_comment1,
+        after_keyword,
         identifier_or_keyword,
         space_comment0,
         tag("="),
@@ -555,7 +547,9 @@ fn identifier_or_keyword(input: Span) -> IResult<Span, IdentifierOrKeyword> {
 //                             | "inherit"
 fn namespace_uri_literal(input: Span) -> IResult<Span, NamespaceUriLiteral> {
     alt((
-        map(tag("inherit"), |_| NamespaceUriLiteral::Inherit),
+        map((tag("inherit"), not(nc_name_char)), |_| {
+            NamespaceUriLiteral::Inherit
+        }),
         map(literal, NamespaceUriLiteral::Uri),
     ))
     .parse(input)
@@ -762,7 +756,7 @@ fn lead_annotated_primary(input: Span) -> IResult<Span, Pattern> {
         map(datatype_value_pattern, Pattern::DatatypeValue),
         map(datatype_param_pattern, Pattern::DatatypeName),
         map(identifier, Pattern::Identifier),
-        map((tag("parent"), space_comment1, identifier), |(_, _, p)| {
+        map((tag("parent"), after_keyword, identifier), |(_, _, p)| {
             Pattern::Parent(p)
         }),
         map((position, tag("empty"), position), |(s, _, e)| {
@@ -875,7 +869,7 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
 fn element_pattern(input: Span) -> IResult<Span, ElementPattern> {
     let parse = (
         tag("element"),
-        space_comment1,
+        after_keyword,
         name_class,
         space_comment0,
         tag("{"),
@@ -901,7 +895,7 @@ fn element_pattern(input: Span) -> IResult<Span, ElementPattern> {
 fn attribute_pattern(input: Span) -> IResult<Span, AttributePattern> {
     let parse = (
         tag("attribute"),
-        space_comment1,
+        after_keyword,
         name_class,
         space_comment0,
         tag("{"),
@@ -959,9 +953,9 @@ fn mixed_pattern(input: Span) -> IResult<Span, MixedPattern> {
 fn external_pattern(input: Span) -> IResult<Span, ExternalPattern> {
     let parse = (
         tag("external"),
-        space_comment1,
+        after_keyword,
         any_uri_literal,
-        opt(map((space_comment1, inherit), |(_, inherit)| inherit)),
+        opt(map((space_comment0, inherit), |(_, inherit)| inherit)),
     );
 
     let mut parser = map(parse, |(_, _, uri, inherit)| {
@@ -978,7 +972,7 @@ fn grammar_pattern(input: Span) -> IResult<Span, GrammarPattern> {
         space_comment0,
         tag("{"),
         space_comment0,
-        separated_list0(space_comment1, grammar_content),
+        spaced_list0(grammar_content),
         space_comment0,
         cut(tag("}")),
         position,
@@ -1025,7 +1019,7 @@ fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
         space_comment0,
         tag("{"),
         space_comment0,
-        separated_list0(space_comment1, param),
+        spaced_list0(param),
         space_comment0,
         cut(tag("}")),
     );
@@ -1353,7 +1347,7 @@ fn div_grammar_content(input: Span) -> IResult<Span, Div<GrammarContent>> {
         space_comment0,
         tag("{"),
         space_comment0,
-        separated_list0(space_comment1, grammar_content),
+        spaced_list0(grammar_content),
         space_comment0,
         cut(tag("}")),
     );
@@ -1370,15 +1364,15 @@ fn div_grammar_content(input: Span) -> IResult<Span, Div<GrammarContent>> {
 fn include(input: Span) -> IResult<Span, Include> {
     let parse = (
         tag("include"),
-        space_comment1,
+        after_keyword,
         any_uri_literal,
-        opt(map((space_comment1, inherit), |(_, v)| v)),
+        opt(map((space_comment0, inherit), |(_, v)| v)),
         opt(map(
             (
                 space_comment0,
                 tag("{"),
                 space_comment0,
-                separated_list0(space_comment1, include_content),
+                spaced_list0(include_content),
                 space_comment0,
                 cut(tag("}")),
             ),
@@ -1406,13 +1400,14 @@ fn any_uri_literal(input: Span) -> IResult<Span, Literal> {
 fn inherit(input: Span) -> IResult<Span, Inherit> {
     let parse = (
         tag("inherit"),
+        not(nc_name_char),
         space_comment0,
         tag("="),
         space_comment0,
         identifier_or_keyword,
     );
 
-    let mut parser = map(parse, |(_, _, _, _, id)| Inherit(id));
+    let mut parser = map(parse, |(_, _, _, _, _, id)| Inherit(id));
 
     parser.parse(input)
 }
@@ -1455,7 +1450,7 @@ fn div_include_content(input: Span) -> IResult<Span, Div<IncludeContent>> {
         space_comment0,
         tag("{"),
         space_comment0,
-        separated_list0(space_comment1, include_content),
+        spaced_list0(include_content),
         space_comment0,
         cut(tag("}")),
     );
@@ -1498,6 +1493,23 @@ where
     P: Parser<Span<'a>, Output = O, Error = Error<Span<'a>>>,
 {
     many0(preceded(space_comment0, item))
+}
+
+/// As [`spaced_list0`], but one or more `item`s.
+fn spaced_list1<'a, O, P>(
+    item: P,
+) -> impl Parser<Span<'a>, Output = Vec<O>, Error = Error<Span<'a>>>
+where
+    P: Parser<Span<'a>, Output = O, Error = Error<Span<'a>>>,
+{
+    many1(preceded(space_comment0, item))
+}
+
+/// What separates a keyword from the following token.  Whitespace is only needed when the next
+/// character would otherwise continue the keyword as an NCName; `element*`, `element\text` and
+/// `include"a.rnc"` need none.
+fn after_keyword(input: Span) -> IResult<Span, Span> {
+    alt((space_comment1, recognize(not(nc_name_char)))).parse(input)
 }
 
 /// Matches one or more whitespace characters.  Following escape interpretation, an escaped
@@ -3004,6 +3016,35 @@ mod test {
             panic!("expected identifier name, got {:?}", el.name_class);
         };
         assert_eq!(n, "text");
+    }
+
+    #[test]
+    fn whitespace_between_tokens_is_optional() {
+        for src in [
+            "namespace x = \"urn:x\"\nstart = element a { empty }\nx:e[]x:f[]",
+            "start = element a { xsd:string { minLength=\"1\"maxLength=\"2\" } }",
+            "namespace x=\"urn:x\"namespace y=\"urn:y\"start = element a { empty }",
+            "default namespace=\"urn:x\"\nstart = element a { empty }",
+            "start = a\na = \"x\"b = \"y\"",
+            "start = element*{ empty }",
+            "start = element\\text{ empty }",
+            "start = attribute(a|b){ text }",
+            "start = element a { external\"ext.rnc\" }",
+            "namespace x = \"urn:x\"\ninclude\"a.rnc\"inherit=x",
+        ] {
+            let result = parse(src);
+            assert!(result.is_ok(), "{src:?}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn keyword_followed_by_ncname_chars_is_not_a_keyword() {
+        let items = grammar_items("start = elementx\nelementx = empty");
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            parse("namespace x = inheritstart = empty"),
+            Err(CompactError::Syntax { .. })
+        ));
     }
 
     #[test]

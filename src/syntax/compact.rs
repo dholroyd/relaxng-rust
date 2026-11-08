@@ -9,7 +9,7 @@ use nom::{
     bytes::complete::{is_not, tag, take_till, take_until, take_while, take_while1},
     combinator::{all_consuming, map, not, opt, peek, recognize},
     error::ErrorKind,
-    multi::{fold_many0, fold_many1, separated_list0},
+    multi::{fold_many0, fold_many1, many0, separated_list0},
     sequence::delimited,
 };
 use nom_locate::{LocatedSpan, position};
@@ -1321,6 +1321,18 @@ fn space_comment1(input: Span) -> IResult<Span, Span> {
     .parse(input)
 }
 
+/// Zero or more `item`s, with optional whitespace and comments between them.  Whitespace is
+/// allowed, not required, between tokens; where two tokens would otherwise run together, e.g.
+/// two NCNames, the item parsers' longest match keeps them apart.
+fn spaced_list0<'a, O, P>(
+    item: P,
+) -> impl Parser<Span<'a>, Output = Vec<O>, Error = Error<Span<'a>>>
+where
+    P: Parser<Span<'a>, Output = O, Error = Error<Span<'a>>>,
+{
+    many0(preceded(space_comment0, item))
+}
+
 /// Matches one or more whitespace characters.  Following escape interpretation, an escaped
 /// line feed counts as whitespace, but an escaped carriage return does not.
 fn separator_chars(input: Span) -> IResult<Span, Span> {
@@ -1413,9 +1425,9 @@ fn initial_annotation(input: Span) -> IResult<Span, InitialAnnotation> {
     let parse = (
         tag("["),
         space_comment0,
-        separated_list0(space_comment1, annotation_attribute),
+        spaced_list0(annotation_attribute),
         space_comment0,
-        separated_list0(space_comment1, annotation_element),
+        spaced_list0(annotation_element),
         space_comment0,
         tag("]"),
     );
@@ -1489,9 +1501,9 @@ fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
         space_comment0,
         tag("["),
         space_comment0,
-        separated_list0(space_comment1, nested_annotation_attribute),
+        spaced_list0(nested_annotation_attribute),
         space_comment0,
-        separated_list0(space_comment1, annotation_element_or_literal),
+        spaced_list0(annotation_element_or_literal),
         space_comment0,
         tag("]"),
         position,
@@ -2554,6 +2566,20 @@ mod test {
                 matches!(parse(src), Err(CompactError::Syntax { .. })),
                 "expected syntax error for {src:?}"
             );
+        }
+    }
+
+    #[test]
+    fn whitespace_between_annotation_items_is_optional() {
+        // all accepted by Jing
+        for src in [
+            "namespace x = \"urn:x\"\nstart = [x:a=\"1\"x:b=\"2\"] element a { empty }",
+            "namespace x = \"urn:x\"\nstart = [x:e[]x:f[x:g=\"1\"x:h=\"2\"]] element a { empty }",
+            "namespace x = \"urn:x\"\nstart = [x:f[\"t\"x:g[]\"u\"]] element a { empty }",
+            "namespace x = \"urn:x\"\nstart = [x:a=\"1\"x:e[]] element a { empty }",
+        ] {
+            let result = parse(src);
+            assert!(result.is_ok(), "{src:?}: {result:?}");
         }
     }
 }

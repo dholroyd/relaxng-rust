@@ -1338,30 +1338,50 @@ fn comment(input: Span) -> IResult<Span, Span> {
     recognize((tag("#"), not(peek(tag("#"))), rest_of_line)).parse(input)
 }
 
-/// Parse a single ## documentation line. Returns the content after the run of #s, with one
-/// leading space stripped if present.
-fn documentation(input: Span) -> IResult<Span, Documentation> {
-    let (input, start) = position(input)?;
+/// The content of one `##` line: the text after the run of #s, with one leading space stripped
+/// if present.
+fn documentation_line<'a>(input: Span<'a>) -> IResult<Span<'a>, &'a str> {
     // documentationLineContent skips any further #s, so `### x` documents "x"
     let (input, _) = (tag("##"), take_while(|c| c == '#')).parse(input)?;
     let (input, content) = rest_of_line(input)?;
+    let content = *content.fragment();
+    Ok((input, content.strip_prefix(' ').unwrap_or(content)))
+}
+
+/// One documentation comment: a `##` line, and any `##` lines which directly follow it, with
+/// only indentation between.  The lines' content is joined with newlines.  A blank line or `#`
+/// comment ends the documentation, so that what follows is separate documentation.
+fn documentation(input: Span) -> IResult<Span, Documentation> {
+    let (input, start) = position(input)?;
+    let (input, first) = documentation_line(input)?;
+    let continuation = preceded(
+        (
+            satisfy(|c| c == '\n' || c == ESCAPED_LF),
+            take_while(|c| c == ' ' || c == '\t'),
+        ),
+        documentation_line,
+    );
+    let (input, content) = fold_many0(
+        continuation,
+        move || first.to_string(),
+        |mut content, line| {
+            content.push('\n');
+            content.push_str(line);
+            content
+        },
+    )
+    .parse(input)?;
     let (input, end) = position(input)?;
-    let content_str = content.fragment().to_string();
-    // Strip one leading space after ## if present
-    let content_str = content_str
-        .strip_prefix(' ')
-        .unwrap_or(&content_str)
-        .to_string();
     Ok((
         input,
         Documentation {
             span: span(start, end),
-            content: content_str,
+            content,
         },
     ))
 }
 
-/// Parse zero or more ## documentation lines (separated by whitespace/single-# comments)
+/// Parse zero or more documentation comments (separated by whitespace/single-# comments)
 fn documentations(input: Span) -> IResult<Span, Vec<Documentation>> {
     separated_list0(space_comment1, documentation).parse(input)
 }
@@ -1952,12 +1972,17 @@ mod test {
 
     #[test]
     fn test_documentations_multiple() {
-        let input = "## Line one\n## Line two";
+        // adjacent lines are merged; a blank line or `#` comment separates documentation
+        let input = "## line one\n  ##   line two\n\n## after blank\n# plain\n## after comment";
         let (remaining, result) = documentations(Span::from(input)).expect("failed to parse");
         assert_eq!(remaining.fragment(), &"");
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].content, "Line one");
-        assert_eq!(result[1].content, "Line two");
+        let content: Vec<_> = result.iter().map(|d| d.content.as_str()).collect();
+        // as translated by trang
+        assert_eq!(
+            content,
+            ["line one\n  line two", "after blank", "after comment"]
+        );
+        assert_eq!(result[0].span, 0..27);
     }
 
     #[test]

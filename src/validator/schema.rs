@@ -925,9 +925,7 @@ fn compile_pattern(s: &mut SchemaBuilder, p: &model::Pattern) -> PatId {
         model::Pattern::Empty(_) => s.empty(),
         model::Pattern::Text(span) => {
             let id = s.text();
-            if let Some(span) = span {
-                s.record_source_span(id, *span);
-            }
+            s.record_source_span(id, *span);
             id
         }
         model::Pattern::NotAllowed(_) => s.not_allowed(),
@@ -949,17 +947,13 @@ fn compile_pattern(s: &mut SchemaBuilder, p: &model::Pattern) -> PatId {
         model::Pattern::Attribute(name, p, span, _) => {
             let content = compile_pattern(s, p);
             let id = s.attribute(name.clone(), content);
-            if let Some(span) = span {
-                s.record_source_span(id, *span);
-            }
+            s.record_source_span(id, *span);
             id
         }
         model::Pattern::Element(name, p, span, _) => {
             let content = compile_pattern(s, p);
             let id = s.element(name.clone(), content);
-            if let Some(span) = span {
-                s.record_source_span(id, *span);
-            }
+            s.record_source_span(id, *span);
             id
         }
         model::Pattern::Ref(whence, name, r) => {
@@ -979,9 +973,7 @@ fn compile_pattern(s: &mut SchemaBuilder, p: &model::Pattern) -> PatId {
         }
         model::Pattern::DatatypeValue { datatype, span } => {
             let id = s.datatype_value(datatype.clone());
-            if let Some(span) = span {
-                s.record_source_span(id, *span);
-            }
+            s.record_source_span(id, *span);
             id
         }
         model::Pattern::DatatypeName {
@@ -991,9 +983,7 @@ fn compile_pattern(s: &mut SchemaBuilder, p: &model::Pattern) -> PatId {
         } => {
             let except_id = except.as_ref().map(|e| compile_pattern(s, e));
             let id = s.datatype_name(datatype.clone(), except_id);
-            if let Some(span) = span {
-                s.record_source_span(id, *span);
-            }
+            s.record_source_span(id, *span);
             id
         }
         model::Pattern::List(p, _) => {

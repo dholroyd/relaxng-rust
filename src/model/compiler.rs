@@ -1610,37 +1610,37 @@ impl<FS: Files> Compiler<FS> {
             // choice-related cases,
             (
                 DefineRule::CombineOnly(this, CombineRule::Choice, mut patt_a),
-                DefineRule::CombineOnly(_, CombineRule::Choice, patt_b),
+                DefineRule::CombineOnly(that, CombineRule::Choice, patt_b),
             ) => {
                 let result = if let Pattern::Choice(_, _) = patt_a {
                     Self::append_choice(&mut patt_a, patt_b);
                     patt_a
                 } else {
-                    Pattern::Choice(vec![patt_a, patt_b], None)
+                    Pattern::Choice(vec![patt_a, patt_b], that)
                 };
                 Ok(DefineRule::CombineOnly(this, CombineRule::Choice, result))
             }
             (
                 DefineRule::AssignCombine(this, Some(CombineRule::Choice), mut patt_a),
-                DefineRule::CombineOnly(_, CombineRule::Choice, patt_b),
+                DefineRule::CombineOnly(that, CombineRule::Choice, patt_b),
             )
             | (
                 DefineRule::CombineOnly(this, CombineRule::Choice, mut patt_a),
-                DefineRule::AssignCombine(_, Some(CombineRule::Choice), patt_b),
+                DefineRule::AssignCombine(that, Some(CombineRule::Choice), patt_b),
             )
             | (
                 DefineRule::AssignCombine(this, None, mut patt_a),
-                DefineRule::CombineOnly(_, CombineRule::Choice, patt_b),
+                DefineRule::CombineOnly(that, CombineRule::Choice, patt_b),
             )
             | (
                 DefineRule::CombineOnly(this, CombineRule::Choice, mut patt_a),
-                DefineRule::AssignCombine(_, None, patt_b),
+                DefineRule::AssignCombine(that, None, patt_b),
             ) => {
                 let result = if let Pattern::Choice(_, _) = patt_a {
                     Self::append_choice(&mut patt_a, patt_b);
                     patt_a
                 } else {
-                    Pattern::Choice(vec![patt_a, patt_b], None)
+                    Pattern::Choice(vec![patt_a, patt_b], that)
                 };
                 Ok(DefineRule::AssignCombine(
                     this,
@@ -1651,13 +1651,13 @@ impl<FS: Files> Compiler<FS> {
             // interleave-related cases,
             (
                 DefineRule::CombineOnly(this, CombineRule::Interleave, mut patt_a),
-                DefineRule::CombineOnly(_, CombineRule::Interleave, patt_b),
+                DefineRule::CombineOnly(that, CombineRule::Interleave, patt_b),
             ) => {
                 let result = if let Pattern::Interleave(_, _) = patt_a {
                     Self::append_interleave(&mut patt_a, patt_b);
                     patt_a
                 } else {
-                    Pattern::Interleave(vec![patt_a, patt_b], None)
+                    Pattern::Interleave(vec![patt_a, patt_b], that)
                 };
                 Ok(DefineRule::CombineOnly(
                     this,
@@ -1667,25 +1667,25 @@ impl<FS: Files> Compiler<FS> {
             }
             (
                 DefineRule::AssignCombine(this, Some(CombineRule::Interleave), mut patt_a),
-                DefineRule::CombineOnly(_, CombineRule::Interleave, patt_b),
+                DefineRule::CombineOnly(that, CombineRule::Interleave, patt_b),
             )
             | (
                 DefineRule::CombineOnly(this, CombineRule::Interleave, mut patt_a),
-                DefineRule::AssignCombine(_, Some(CombineRule::Interleave), patt_b),
+                DefineRule::AssignCombine(that, Some(CombineRule::Interleave), patt_b),
             )
             | (
                 DefineRule::AssignCombine(this, None, mut patt_a),
-                DefineRule::CombineOnly(_, CombineRule::Interleave, patt_b),
+                DefineRule::CombineOnly(that, CombineRule::Interleave, patt_b),
             )
             | (
                 DefineRule::CombineOnly(this, CombineRule::Interleave, mut patt_a),
-                DefineRule::AssignCombine(_, None, patt_b),
+                DefineRule::AssignCombine(that, None, patt_b),
             ) => {
                 let result = if let Pattern::Interleave(_, _) = patt_a {
                     Self::append_interleave(&mut patt_a, patt_b);
                     patt_a
                 } else {
-                    Pattern::Interleave(vec![patt_a, patt_b], None)
+                    Pattern::Interleave(vec![patt_a, patt_b], that)
                 };
                 Ok(DefineRule::AssignCombine(
                     this,
@@ -1733,38 +1733,34 @@ impl<FS: Files> Compiler<FS> {
             types::Pattern::Element(e) => self.compile_element(ctx, e),
             types::Pattern::Attribute(e) => self.compile_attribute(ctx, e),
             types::Pattern::List(l) => self.compile_list(ctx, l),
-            types::Pattern::Mixed(p) => Ok(model::Pattern::Mixed(
-                Box::new(self.compile_pattern(ctx, &p.0)?),
-                None,
+            types::Pattern::Mixed(types::MixedPattern(span, p)) => Ok(model::Pattern::Mixed(
+                Box::new(self.compile_pattern(ctx, p)?),
+                ctx.convert_span(span),
             )),
             types::Pattern::Identifier(i) => self.compile_ref(ctx, i),
             types::Pattern::Parent(p) => self.compile_parent(ctx, p),
-            types::Pattern::Empty(span) => Ok(model::Pattern::Empty(
-                span.as_ref().map(|s| ctx.convert_span(s)),
-            )),
-            types::Pattern::Text(span) => Ok(model::Pattern::Text(
-                span.as_ref().map(|s| ctx.convert_span(s)),
-            )),
-            types::Pattern::NotAllowed(span) => Ok(model::Pattern::NotAllowed(
-                span.as_ref().map(|s| ctx.convert_span(s)),
-            )),
+            types::Pattern::Empty(span) => Ok(model::Pattern::Empty(ctx.convert_span(span))),
+            types::Pattern::Text(span) => Ok(model::Pattern::Text(ctx.convert_span(span))),
+            types::Pattern::NotAllowed(span) => {
+                Ok(model::Pattern::NotAllowed(ctx.convert_span(span)))
+            }
             types::Pattern::External(e) => self.compile_external(ctx, e),
             types::Pattern::Grammar(g) => self.compile_grammar_pattern(ctx, g),
-            types::Pattern::Group(g) => self.compile_pattern(ctx, g),
-            types::Pattern::ListPair(a, b) => self.compile_sequence(ctx, a, b),
-            types::Pattern::InterleavePair(a, b) => self.compile_interleave(ctx, a, b),
-            types::Pattern::ChoicePair(a, b) => self.compile_choice(ctx, a, b),
+            types::Pattern::Group(_, g) => self.compile_pattern(ctx, g),
+            types::Pattern::ListPair(span, a, b) => self.compile_sequence(ctx, span, a, b),
+            types::Pattern::InterleavePair(span, a, b) => self.compile_interleave(ctx, span, a, b),
+            types::Pattern::ChoicePair(span, a, b) => self.compile_choice(ctx, span, a, b),
             types::Pattern::Optional(span, p) => Ok(model::Pattern::Optional(
                 Box::new(self.compile_pattern(ctx, p)?),
-                span.as_ref().map(|s| ctx.convert_span(s)),
+                ctx.convert_span(span),
             )),
             types::Pattern::ZeroOrMore(span, p) => Ok(model::Pattern::ZeroOrMore(
                 Box::new(self.compile_pattern(ctx, p)?),
-                span.as_ref().map(|s| ctx.convert_span(s)),
+                ctx.convert_span(span),
             )),
             types::Pattern::OneOrMore(span, p) => Ok(model::Pattern::OneOrMore(
                 Box::new(self.compile_pattern(ctx, p)?),
-                span.as_ref().map(|s| ctx.convert_span(s)),
+                ctx.convert_span(span),
             )),
             types::Pattern::DatatypeValue(d) => self.compile_datatype_value_pattern(ctx, d),
             types::Pattern::DatatypeName(d) => self.compile_datatype_name_pattern(ctx, d),
@@ -1796,7 +1792,7 @@ impl<FS: Files> Compiler<FS> {
         Ok(model::Pattern::Element(
             name_class,
             Box::new(self.compile_pattern(&mut el_ctx, &element.pattern)?),
-            Some(span),
+            span,
             None,
         ))
     }
@@ -1811,7 +1807,7 @@ impl<FS: Files> Compiler<FS> {
         Ok(model::Pattern::Attribute(
             name_class,
             Box::new(self.compile_pattern(&mut att_ctx, &attribute.pattern)?),
-            Some(span),
+            span,
             None,
         ))
     }
@@ -1821,8 +1817,8 @@ impl<FS: Files> Compiler<FS> {
         list: &types::ListPattern,
     ) -> Result<model::Pattern, RelaxError> {
         Ok(model::Pattern::List(
-            Box::new(self.compile_pattern(ctx, &list.0)?),
-            None,
+            Box::new(self.compile_pattern(ctx, &list.1)?),
+            ctx.convert_span(&list.0),
         ))
     }
     fn compile_ref(
@@ -1957,6 +1953,7 @@ impl<FS: Files> Compiler<FS> {
     fn compile_sequence(
         &mut self,
         ctx: &mut Context,
+        span: &types::Span,
         a: &types::Pattern,
         b: &types::Pattern,
     ) -> Result<model::Pattern, RelaxError> {
@@ -1971,11 +1968,12 @@ impl<FS: Files> Compiler<FS> {
             Pattern::Group(mut v, _) => i.append(&mut v),
             _ => i.push(b),
         }
-        Ok(model::Pattern::Group(i, None))
+        Ok(model::Pattern::Group(i, ctx.convert_span(span)))
     }
     fn compile_interleave(
         &mut self,
         ctx: &mut Context,
+        span: &types::Span,
         a: &types::Pattern,
         b: &types::Pattern,
     ) -> Result<model::Pattern, RelaxError> {
@@ -1990,11 +1988,12 @@ impl<FS: Files> Compiler<FS> {
             Pattern::Interleave(mut v, _) => i.append(&mut v),
             _ => i.push(b),
         }
-        Ok(model::Pattern::Interleave(i, None))
+        Ok(model::Pattern::Interleave(i, ctx.convert_span(span)))
     }
     fn compile_choice(
         &mut self,
         ctx: &mut Context,
+        span: &types::Span,
         a: &types::Pattern,
         b: &types::Pattern,
     ) -> Result<model::Pattern, RelaxError> {
@@ -2009,7 +2008,7 @@ impl<FS: Files> Compiler<FS> {
             Pattern::Choice(mut v, _) => c.append(&mut v),
             _ => c.push(b),
         }
-        Ok(model::Pattern::Choice(c, None))
+        Ok(model::Pattern::Choice(c, ctx.convert_span(span)))
     }
     fn compile_datatype_value_pattern(
         &mut self,
@@ -2039,7 +2038,7 @@ impl<FS: Files> Compiler<FS> {
                 NcName(localname.0.clone(), localname.1.clone()),
             )),
         };
-        let span = Some(ctx.convert_span(&datatype_value.0));
+        let span = ctx.convert_span(&datatype_value.0);
         let datatype = self
             .datatype_compiler
             .datatype_value(
@@ -2081,7 +2080,7 @@ impl<FS: Files> Compiler<FS> {
                 NcName(localname.0.clone(), localname.1.clone()),
             )),
         };
-        let span = Some(ctx.convert_span(&datatype_name.0));
+        let span = ctx.convert_span(&datatype_name.0);
         let datatype = self
             .datatype_compiler
             .datatype_name(ctx, &name, params)

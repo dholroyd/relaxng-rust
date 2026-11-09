@@ -223,25 +223,21 @@ fn lint(syntax: Syntax, schema: PathBuf) {
                     (format!("redundant {outer}({inner}(...))"), *span)
                 }
             };
-            if let Some(span) = span {
-                let d = codemap_diagnostic::Diagnostic {
-                    level: codemap_diagnostic::Level::Warning,
-                    message,
-                    code: None,
-                    spans: vec![codemap_diagnostic::SpanLabel {
-                        span,
-                        style: codemap_diagnostic::SpanStyle::Primary,
-                        label: None,
-                    }],
-                };
-                let mut emitter = codemap_diagnostic::Emitter::stderr(
-                    codemap_diagnostic::ColorConfig::Auto,
-                    Some(compiler.code_map()),
-                );
-                emitter.emit(&[d]);
-            } else {
-                eprintln!("warning: {message}");
-            }
+            let d = codemap_diagnostic::Diagnostic {
+                level: codemap_diagnostic::Level::Warning,
+                message,
+                code: None,
+                spans: vec![codemap_diagnostic::SpanLabel {
+                    span,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                    label: None,
+                }],
+            };
+            let mut emitter = codemap_diagnostic::Emitter::stderr(
+                codemap_diagnostic::ColorConfig::Auto,
+                Some(compiler.code_map()),
+            );
+            emitter.emit(&[d]);
             warning_count += 1;
         }
 
@@ -258,21 +254,18 @@ fn lint(syntax: Syntax, schema: PathBuf) {
             match &w.kind {
                 relaxng::model::ambiguity::AmbiguityKind::AmbiguousGrammar { ambiguous_pairs } => {
                     for (span_a, span_b) in ambiguous_pairs {
-                        let mut spans = Vec::new();
-                        if let Some(s) = span_a {
-                            spans.push(codemap_diagnostic::SpanLabel {
-                                span: *s,
+                        let spans = vec![
+                            codemap_diagnostic::SpanLabel {
+                                span: *span_a,
                                 style: codemap_diagnostic::SpanStyle::Primary,
                                 label: Some("this element".to_string()),
-                            });
-                        }
-                        if let Some(s) = span_b {
-                            spans.push(codemap_diagnostic::SpanLabel {
-                                span: *s,
+                            },
+                            codemap_diagnostic::SpanLabel {
+                                span: *span_b,
                                 style: codemap_diagnostic::SpanStyle::Primary,
                                 label: Some("ambiguous with this element".to_string()),
-                            });
-                        }
+                            },
+                        ];
                         let d = codemap_diagnostic::Diagnostic {
                             level: codemap_diagnostic::Level::Warning,
                             message: "grammar is ambiguous: elements with overlapping names have ambiguous content models".to_string(),

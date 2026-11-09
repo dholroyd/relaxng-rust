@@ -743,11 +743,12 @@ fn pattern_primary(input: Span) -> IResult<Span, Pattern> {
     if is_data_except(&result) {
         return Err(nom::Err::Failure(Error::ExceptNeedsParentheses(op_at)));
     }
+    let span = result.span().start..original_offset(&i);
     let result = Box::new(result);
     let repeated = match op {
-        '?' => Pattern::Optional(None, result),
-        '*' => Pattern::ZeroOrMore(None, result),
-        _ => Pattern::OneOrMore(None, result),
+        '?' => Pattern::Optional(span, result),
+        '*' => Pattern::ZeroOrMore(span, result),
+        _ => Pattern::OneOrMore(span, result),
     };
     let (i, follow) = follow_annotation_list(i)?;
     Ok((i, with_follow_annotations(repeated, follow)))
@@ -770,17 +771,17 @@ fn lead_annotated_primary(input: Span) -> IResult<Span, Pattern> {
             Pattern::Parent(p)
         }),
         map((position, tag("empty"), position), |(s, _, e)| {
-            Pattern::Empty(Some(span(s, e)))
+            Pattern::Empty(span(s, e))
         }),
         map((position, tag("text"), position), |(s, _, e)| {
-            Pattern::Text(Some(span(s, e)))
+            Pattern::Text(span(s, e))
         }),
         map((position, tag("notAllowed"), position), |(s, _, e)| {
-            Pattern::NotAllowed(Some(span(s, e)))
+            Pattern::NotAllowed(span(s, e))
         }),
         map(external_pattern, Pattern::External),
         map(grammar_pattern, Pattern::Grammar),
-        map(group_pattern, |p| Pattern::Group(Box::new(p))),
+        group_pattern,
     ))
     .parse(input)?;
     let result = match annotations {
@@ -865,11 +866,12 @@ fn pattern(input: Span) -> IResult<Span, Pattern> {
         if is_data_except(&right) {
             return Err(parens_needed());
         }
+        let span = result.span().start..right.span().end;
         let (left, right) = (Box::new(result), Box::new(right));
         result = match op {
-            ',' => Pattern::ListPair(left, right),
-            '&' => Pattern::InterleavePair(left, right),
-            _ => Pattern::ChoicePair(left, right),
+            ',' => Pattern::ListPair(span, left, right),
+            '&' => Pattern::InterleavePair(span, left, right),
+            _ => Pattern::ChoicePair(span, left, right),
         };
         input = i;
     }
@@ -935,10 +937,11 @@ fn list_pattern(input: Span) -> IResult<Span, ListPattern> {
         cut(pattern),
         space_comment0,
         cut(tag("}")),
+        position,
     );
 
-    map(parse, |(_, _, _, _, pattern, _, _)| {
-        ListPattern(Box::new(pattern))
+    map(parse, |(start, _, _, _, pattern, _, _, end)| {
+        ListPattern(span(start, end), Box::new(pattern))
     })
     .parse(input)
 }
@@ -951,10 +954,11 @@ fn mixed_pattern(input: Span) -> IResult<Span, MixedPattern> {
         cut(pattern),
         space_comment0,
         cut(tag("}")),
+        position,
     );
 
-    map(parse, |(_, _, _, _, pattern, _, _)| {
-        MixedPattern(Box::new(pattern))
+    map(parse, |(start, _, _, _, pattern, _, _, end)| {
+        MixedPattern(span(start, end), Box::new(pattern))
     })
     .parse(input)
 }
@@ -999,9 +1003,18 @@ fn grammar_pattern(input: Span) -> IResult<Span, GrammarPattern> {
 }
 
 fn group_pattern(input: Span) -> IResult<Span, Pattern> {
-    let parse = (tag("("), space_comment0, pattern, space_comment0, tag(")"));
+    let parse = (
+        tag("("),
+        space_comment0,
+        pattern,
+        space_comment0,
+        tag(")"),
+        position,
+    );
 
-    let mut parser = map(parse, |(_, _, content, _, _)| content);
+    let mut parser = map(parse, |(start, _, content, _, _, end)| {
+        Pattern::Group(span(start, end), Box::new(content))
+    });
 
     parser.parse(input)
 }
@@ -1848,7 +1861,9 @@ mod test {
             pattern,
             "a,b , c",
             Pattern::ListPair(
+                0..7,
                 Box::new(Pattern::ListPair(
+                    0..3,
                     Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string()))),
                     Box::new(Pattern::Identifier(Identifier(2..3, "b".to_string()))),
                 )),
@@ -1863,7 +1878,7 @@ mod test {
             pattern,
             "a?",
             Pattern::Optional(
-                None,
+                0..2,
                 Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string()))),
             ),
         )
@@ -1877,7 +1892,7 @@ mod test {
             AttributePattern {
                 span: 0..20,
                 name_class: NameClass::AnyName(AnyName(None)),
-                pattern: Box::new(Pattern::Text(Some(14..18))),
+                pattern: Box::new(Pattern::Text(14..18)),
             },
         )
     }
@@ -1888,8 +1903,9 @@ mod test {
             pattern,
             "a*, b",
             Pattern::ListPair(
+                0..5,
                 Box::new(Pattern::ZeroOrMore(
-                    None,
+                    0..2,
                     Box::new(Pattern::Identifier(Identifier(0..1, "a".to_string()))),
                 )),
                 Box::new(Pattern::Identifier(Identifier(4..5, "b".to_string()))),
@@ -2251,7 +2267,7 @@ mod test {
     #[test]
     fn test_unannotated_pattern_no_wrap() {
         // Unannotated patterns should NOT be wrapped in Annotated
-        ck(pattern, "text", Pattern::Text(Some(0..4)));
+        ck(pattern, "text", Pattern::Text(0..4));
     }
 
     #[test]
@@ -2624,7 +2640,8 @@ mod test {
         assert_eq!(*define.name.span(), 0..8);
         assert_eq!(define.span, 0..23);
         match define.pattern {
-            Pattern::ChoicePair(a, b) => {
+            Pattern::ChoicePair(span, a, b) => {
+                assert_eq!(span, 11..23);
                 assert_eq!(*a, Pattern::Identifier(Identifier(11..12, "a".to_string())));
                 assert_eq!(*b, Pattern::Identifier(Identifier(17..23, "b".to_string())));
             }
@@ -2727,7 +2744,7 @@ mod test {
         };
         assert_eq!(pattern_docs(&el.pattern), ["inner"]);
 
-        let Pattern::ChoicePair(_, b) = start_pattern("start = a |\n  ## second\n  b") else {
+        let Pattern::ChoicePair(_, _, b) = start_pattern("start = a |\n  ## second\n  b") else {
             panic!("expected choice");
         };
         assert_eq!(pattern_docs(&b), ["second"]);
@@ -2825,7 +2842,7 @@ mod test {
         assert!(matches!(except_of(&p), Pattern::Annotated(a, _) if a.initial.is_some()));
 
         let p = element_body("xsd:string - (\"a\" | \"b\")");
-        assert!(matches!(except_of(&p), Pattern::Group(_)));
+        assert!(matches!(except_of(&p), Pattern::Group(..)));
     }
 
     #[test]

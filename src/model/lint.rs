@@ -7,13 +7,13 @@ pub enum LintWarning {
     /// A Group or Interleave contains NotAllowed, making the whole pattern dead.
     DeadComposite {
         kind: &'static str,
-        span: Option<codemap::Span>,
+        span: codemap::Span,
     },
     /// Redundant nesting, e.g. Optional(Optional(x)).
     RedundantWrapping {
         outer: &'static str,
         inner: &'static str,
-        span: Option<codemap::Span>,
+        span: codemap::Span,
     },
 }
 
@@ -106,7 +106,7 @@ impl LintWarning {
 fn check_redundant_wrapping(
     outer: &'static str,
     inner: &Pattern,
-    span: Option<codemap::Span>,
+    span: codemap::Span,
     warnings: &mut Vec<LintWarning>,
 ) {
     let inner_name = match inner {
@@ -153,27 +153,27 @@ mod tests {
     }
 
     fn empty() -> Pattern {
-        Pattern::Empty(None)
+        Pattern::Empty(dummy_span())
     }
 
     fn not_allowed() -> Pattern {
-        Pattern::NotAllowed(None)
+        Pattern::NotAllowed(dummy_span())
     }
 
     fn text() -> Pattern {
-        Pattern::Text(None)
+        Pattern::Text(dummy_span())
     }
 
     #[test]
     fn no_warnings_for_clean_pattern() {
-        let pat = Pattern::Choice(vec![empty(), text()], None);
+        let pat = Pattern::Choice(vec![empty(), text()], dummy_span());
         let warnings = lint_pattern(&pat);
         assert!(warnings.is_empty());
     }
 
     #[test]
     fn dead_group_detected() {
-        let pat = Pattern::Group(vec![text(), not_allowed()], None);
+        let pat = Pattern::Group(vec![text(), not_allowed()], dummy_span());
         let warnings = lint_pattern(&pat);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].is_dead_composite());
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn dead_interleave_detected() {
-        let pat = Pattern::Interleave(vec![text(), not_allowed()], None);
+        let pat = Pattern::Interleave(vec![text(), not_allowed()], dummy_span());
         let warnings = lint_pattern(&pat);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].is_dead_composite());
@@ -195,8 +195,8 @@ mod tests {
 
     #[test]
     fn redundant_optional_optional() {
-        let inner = Pattern::Optional(Box::new(empty()), None);
-        let pat = Pattern::Optional(Box::new(inner), None);
+        let inner = Pattern::Optional(Box::new(empty()), dummy_span());
+        let pat = Pattern::Optional(Box::new(inner), dummy_span());
         let warnings = lint_pattern(&pat);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].is_redundant_wrapping());
@@ -208,8 +208,8 @@ mod tests {
 
     #[test]
     fn redundant_optional_zero_or_more() {
-        let inner = Pattern::ZeroOrMore(Box::new(text()), None);
-        let pat = Pattern::Optional(Box::new(inner), None);
+        let inner = Pattern::ZeroOrMore(Box::new(text()), dummy_span());
+        let pat = Pattern::Optional(Box::new(inner), dummy_span());
         let warnings = lint_pattern(&pat);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].is_redundant_wrapping());
@@ -221,8 +221,8 @@ mod tests {
 
     #[test]
     fn redundant_zero_or_more_zero_or_more() {
-        let inner = Pattern::ZeroOrMore(Box::new(text()), None);
-        let pat = Pattern::ZeroOrMore(Box::new(inner), None);
+        let inner = Pattern::ZeroOrMore(Box::new(text()), dummy_span());
+        let pat = Pattern::ZeroOrMore(Box::new(inner), dummy_span());
         let warnings = lint_pattern(&pat);
         assert_eq!(warnings.len(), 1);
         if let LintWarning::RedundantWrapping { outer, inner, .. } = &warnings[0] {
@@ -233,8 +233,8 @@ mod tests {
 
     #[test]
     fn redundant_zero_or_more_one_or_more() {
-        let inner = Pattern::OneOrMore(Box::new(text()), None);
-        let pat = Pattern::ZeroOrMore(Box::new(inner), None);
+        let inner = Pattern::OneOrMore(Box::new(text()), dummy_span());
+        let pat = Pattern::ZeroOrMore(Box::new(inner), dummy_span());
         let warnings = lint_pattern(&pat);
         assert_eq!(warnings.len(), 1);
         if let LintWarning::RedundantWrapping { outer, inner, .. } = &warnings[0] {
@@ -245,8 +245,8 @@ mod tests {
 
     #[test]
     fn redundant_zero_or_more_optional() {
-        let inner = Pattern::Optional(Box::new(text()), None);
-        let pat = Pattern::ZeroOrMore(Box::new(inner), None);
+        let inner = Pattern::Optional(Box::new(text()), dummy_span());
+        let pat = Pattern::ZeroOrMore(Box::new(inner), dummy_span());
         let warnings = lint_pattern(&pat);
         assert_eq!(warnings.len(), 1);
         if let LintWarning::RedundantWrapping { outer, inner, .. } = &warnings[0] {
@@ -257,8 +257,8 @@ mod tests {
 
     #[test]
     fn redundant_one_or_more_zero_or_more() {
-        let inner = Pattern::ZeroOrMore(Box::new(text()), None);
-        let pat = Pattern::OneOrMore(Box::new(inner), None);
+        let inner = Pattern::ZeroOrMore(Box::new(text()), dummy_span());
+        let pat = Pattern::OneOrMore(Box::new(inner), dummy_span());
         let warnings = lint_pattern(&pat);
         assert_eq!(warnings.len(), 1);
         if let LintWarning::RedundantWrapping { outer, inner, .. } = &warnings[0] {
@@ -270,8 +270,8 @@ mod tests {
     #[test]
     fn no_redundant_one_or_more_optional() {
         // oneOrMore(optional(x)) is NOT redundant — it means "1+ of (x or nothing)"
-        let inner = Pattern::Optional(Box::new(text()), None);
-        let pat = Pattern::OneOrMore(Box::new(inner), None);
+        let inner = Pattern::Optional(Box::new(text()), dummy_span());
+        let pat = Pattern::OneOrMore(Box::new(inner), dummy_span());
         let warnings = lint_pattern(&pat);
         assert!(warnings.is_empty());
     }
@@ -280,8 +280,8 @@ mod tests {
     fn no_redundant_one_or_more_one_or_more() {
         // oneOrMore(oneOrMore(x)) is actually equivalent to oneOrMore(x), but the simplification
         // rules don't flag it since it's arguable. If needed, add later.
-        let inner = Pattern::OneOrMore(Box::new(text()), None);
-        let pat = Pattern::OneOrMore(Box::new(inner), None);
+        let inner = Pattern::OneOrMore(Box::new(text()), dummy_span());
+        let pat = Pattern::OneOrMore(Box::new(inner), dummy_span());
         let warnings = lint_pattern(&pat);
         assert!(warnings.is_empty());
     }
@@ -290,7 +290,7 @@ mod tests {
     fn follows_refs_once() {
         // Build a Ref that points to a pattern with a warning (dead group)
         let span = dummy_span();
-        let inner_pat = Pattern::Group(vec![text(), not_allowed()], None);
+        let inner_pat = Pattern::Group(vec![text(), not_allowed()], dummy_span());
         let define = DefineRule::AssignCombine(span, None, inner_pat);
         let pat_ref = Rc::new(RefCell::new(Some(define)));
         let ref_pat = Pattern::Ref(dummy_span(), "test".to_string(), PatRef(pat_ref));
@@ -304,7 +304,7 @@ mod tests {
         // Build a self-referencing Ref — lint should not infinite loop
         let pat_ref: Rc<RefCell<Option<DefineRule>>> = Rc::new(RefCell::new(None));
         let ref_pat = Pattern::Ref(dummy_span(), "rec".to_string(), PatRef(Rc::clone(&pat_ref)));
-        let choice = Pattern::Choice(vec![text(), ref_pat], None);
+        let choice = Pattern::Choice(vec![text(), ref_pat], dummy_span());
         let define = DefineRule::AssignCombine(dummy_span(), None, choice);
         *pat_ref.borrow_mut() = Some(define);
 

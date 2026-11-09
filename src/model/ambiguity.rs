@@ -510,7 +510,7 @@ fn bisimulation_blocks(
 /// Elements are stored in LabelId order, so elements[i] has label LabelId(i).
 struct ElementInfo {
     name_class: NameClass,
-    span: Option<codemap::Span>,
+    span: codemap::Span,
 }
 
 /// Walk the pattern tree and enumerate all Element patterns, assigning each a unique LabelId.
@@ -1053,7 +1053,7 @@ pub enum AmbiguityKind {
     /// multiple valid interpretations of some document instances.
     AmbiguousGrammar {
         /// Pairs of element spans that are in the ambiguous relation
-        ambiguous_pairs: Vec<(Option<codemap::Span>, Option<codemap::Span>)>,
+        ambiguous_pairs: Vec<(codemap::Span, codemap::Span)>,
     },
 }
 
@@ -1259,6 +1259,13 @@ mod tests {
     use super::*;
     use crate::model::NameClass;
 
+    /// A placeholder source location for hand-built patterns
+    fn sp() -> codemap::Span {
+        codemap::CodeMap::new()
+            .add_file("test".to_string(), String::new())
+            .span
+    }
+
     // -- NFA operation tests --
 
     #[test]
@@ -1440,7 +1447,7 @@ mod tests {
                 name: name.to_string(),
             },
             Box::new(body),
-            None,
+            sp(),
             None,
         )
     }
@@ -1453,10 +1460,10 @@ mod tests {
             "root",
             Pattern::Choice(
                 vec![
-                    make_element("", "a", Pattern::Empty(None)),
-                    make_element("", "b", Pattern::Empty(None)),
+                    make_element("", "a", Pattern::Empty(sp())),
+                    make_element("", "b", Pattern::Empty(sp())),
                 ],
-                None,
+                sp(),
             ),
         );
         let warnings = check_ambiguity(&root).unwrap();
@@ -1476,10 +1483,10 @@ mod tests {
             "root",
             Pattern::Choice(
                 vec![
-                    make_element("", "foo", make_element("", "bar", Pattern::Empty(None))),
-                    make_element("", "foo", make_element("", "bar", Pattern::Empty(None))),
+                    make_element("", "foo", make_element("", "bar", Pattern::Empty(sp()))),
+                    make_element("", "foo", make_element("", "bar", Pattern::Empty(sp()))),
                 ],
-                None,
+                sp(),
             ),
         );
         let warnings = check_ambiguity(&root).unwrap();
@@ -1499,10 +1506,10 @@ mod tests {
             "root",
             Pattern::Choice(
                 vec![
-                    make_element("", "foo", make_element("", "x", Pattern::Empty(None))),
-                    make_element("", "foo", make_element("", "y", Pattern::Empty(None))),
+                    make_element("", "foo", make_element("", "x", Pattern::Empty(sp()))),
+                    make_element("", "foo", make_element("", "y", Pattern::Empty(sp()))),
                 ],
-                None,
+                sp(),
             ),
         );
         let warnings = check_ambiguity(&root).unwrap();
@@ -1526,8 +1533,8 @@ mod tests {
                         "",
                         "foo",
                         Pattern::OneOrMore(
-                            Box::new(make_element("", "x", Pattern::Empty(None))),
-                            None,
+                            Box::new(make_element("", "x", Pattern::Empty(sp()))),
+                            sp(),
                         ),
                     ),
                     make_element(
@@ -1535,14 +1542,14 @@ mod tests {
                         "foo",
                         Pattern::Group(
                             vec![
-                                make_element("", "x", Pattern::Empty(None)),
-                                make_element("", "x", Pattern::Empty(None)),
+                                make_element("", "x", Pattern::Empty(sp())),
+                                make_element("", "x", Pattern::Empty(sp())),
                             ],
-                            None,
+                            sp(),
                         ),
                     ),
                 ],
-                None,
+                sp(),
             ),
         );
         let warnings = check_ambiguity(&root).unwrap();
@@ -1559,11 +1566,11 @@ mod tests {
                     namespace_uri: String::new(),
                     name: name.to_string(),
                 },
-                Box::new(Pattern::Text(None)),
-                None,
+                Box::new(Pattern::Text(sp())),
+                sp(),
                 None,
             )),
-            None,
+            sp(),
         )
     }
 
@@ -1578,13 +1585,13 @@ mod tests {
                     (0..4)
                         .map(|a| optional_attr(&format!("a{g}_{a}")))
                         .collect(),
-                    None,
+                    sp(),
                 )
             })
             .collect();
-        let child = make_element("", "child", Pattern::Empty(None));
+        let child = make_element("", "child", Pattern::Empty(sp()));
         arms.push(child);
-        let body = Pattern::Interleave(arms, None);
+        let body = Pattern::Interleave(arms, sp());
         let root = make_element("", "root", body);
 
         let (elements, ptr_to_label) = enumerate_elements(&root);
@@ -1602,7 +1609,7 @@ mod tests {
     #[test]
     fn label_free_unsatisfiable_collapses_to_dead() {
         // group { attribute a { text }?, notAllowed } accepts nothing
-        let pattern = Pattern::Group(vec![optional_attr("a"), Pattern::NotAllowed(None)], None);
+        let pattern = Pattern::Group(vec![optional_attr("a"), Pattern::NotAllowed(sp())], sp());
         let nfa = pattern_to_nfa(&pattern, &HashMap::new(), &mut HashSet::new()).unwrap();
         assert_eq!(nfa.num_states, 1);
         assert!(nfa.is_empty());
@@ -1773,7 +1780,7 @@ mod tests {
     }
 
     fn named_element(name: &str) -> Pattern {
-        make_element("", name, Pattern::Empty(None))
+        make_element("", name, Pattern::Empty(sp()))
     }
 
     fn content_nfa_states(body: Pattern) -> u32 {
@@ -1787,17 +1794,17 @@ mod tests {
     fn interleaved_zero_or_more_arms_reduce_to_one_state() {
         // interleave { element e0 {empty}* & ... & element e9 {empty}* } is (e0|...|e9)*
         let arms = (0..10)
-            .map(|i| Pattern::ZeroOrMore(Box::new(named_element(&format!("e{i}"))), None))
+            .map(|i| Pattern::ZeroOrMore(Box::new(named_element(&format!("e{i}"))), sp()))
             .collect();
-        assert_eq!(content_nfa_states(Pattern::Interleave(arms, None)), 1);
+        assert_eq!(content_nfa_states(Pattern::Interleave(arms, sp())), 1);
     }
 
     #[test]
     fn interleaved_optional_arms_need_one_bit_each() {
         // Each optional arm must remember whether it has been used: 2^k states.
         let arms = (0..6)
-            .map(|i| Pattern::Optional(Box::new(named_element(&format!("e{i}"))), None))
+            .map(|i| Pattern::Optional(Box::new(named_element(&format!("e{i}"))), sp()))
             .collect();
-        assert_eq!(content_nfa_states(Pattern::Interleave(arms, None)), 1 << 6);
+        assert_eq!(content_nfa_states(Pattern::Interleave(arms, sp())), 1 << 6);
     }
 }

@@ -327,11 +327,12 @@ fn name_class_choice(node: Node, in_except: InExcept) -> Result<NameClass> {
 }
 
 fn single_pattern_or_group(mut node: Node) -> Result<Pattern> {
+    let start = node.range().start;
     let mut pat = pattern(node)?;
     while let Some(next) = next_rng_sibling(node) {
         let this = pattern(next)?;
         node = next;
-        pat = Pattern::ListPair(Box::new(pat), Box::new(this));
+        pat = Pattern::ListPair(start..node.range().end, Box::new(pat), Box::new(this));
     }
     Ok(pat)
 }
@@ -367,7 +368,7 @@ fn attribute(node: Node) -> Result<AttributePattern> {
     let (pattern, rest) = if let Some(child) = rest {
         (pattern(child)?, next_rng_sibling(child))
     } else {
-        (Pattern::Text(None), None)
+        (Pattern::Text(node.range()), None)
     };
     if let Some(rest) = rest {
         return Err(Error::Unexpected(
@@ -386,7 +387,7 @@ fn group(node: Node) -> Result<Pattern> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
     )?;
-    Ok(Pattern::Group(Box::new(patt)))
+    Ok(Pattern::Group(node.range(), Box::new(patt)))
 }
 fn interleave(node: Node) -> Result<Pattern> {
     let mut child = first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?;
@@ -394,7 +395,7 @@ fn interleave(node: Node) -> Result<Pattern> {
     while let Some(next) = next_rng_sibling(child) {
         let this = pattern(next)?;
         child = next;
-        pat = Pattern::InterleavePair(Box::new(pat), Box::new(this));
+        pat = Pattern::InterleavePair(node.range(), Box::new(pat), Box::new(this));
     }
     Ok(pat)
 }
@@ -402,10 +403,10 @@ fn interleave(node: Node) -> Result<Pattern> {
 fn choice(node: Node) -> Result<Pattern> {
     let mut child = first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?;
     let mut pat = pattern(child)?;
-    while let Some(node) = next_rng_sibling(child) {
-        let this = pattern(node)?;
-        pat = Pattern::ChoicePair(Box::new(pat), Box::new(this));
-        child = node;
+    while let Some(next) = next_rng_sibling(child) {
+        let this = pattern(next)?;
+        pat = Pattern::ChoicePair(node.range(), Box::new(pat), Box::new(this));
+        child = next;
     }
     Ok(pat)
 }
@@ -414,35 +415,35 @@ fn optional(node: Node) -> Result<Pattern> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
     )?;
-    Ok(Pattern::Optional(Some(node.range()), Box::new(patt)))
+    Ok(Pattern::Optional(node.range(), Box::new(patt)))
 }
 
 fn zero_or_more(node: Node) -> Result<Pattern> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
     )?;
-    Ok(Pattern::ZeroOrMore(Some(node.range()), Box::new(patt)))
+    Ok(Pattern::ZeroOrMore(node.range(), Box::new(patt)))
 }
 
 fn one_or_more(node: Node) -> Result<Pattern> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
     )?;
-    Ok(Pattern::OneOrMore(Some(node.range()), Box::new(patt)))
+    Ok(Pattern::OneOrMore(node.range(), Box::new(patt)))
 }
 
 fn list(node: Node) -> Result<ListPattern> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
     )?;
-    Ok(ListPattern(Box::new(patt)))
+    Ok(ListPattern(node.range(), Box::new(patt)))
 }
 
 fn mixed(node: Node) -> Result<MixedPattern> {
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "pattern child"))?,
     )?;
-    Ok(MixedPattern(Box::new(patt)))
+    Ok(MixedPattern(node.range(), Box::new(patt)))
 }
 
 fn ref_patt(node: Node) -> Result<Identifier> {
@@ -466,13 +467,13 @@ fn parent_ref(node: Node) -> Result<Identifier> {
 fn empty(node: Node) -> Result<Pattern> {
     no_attrs(node)?;
     no_rng_element_children(node)?;
-    Ok(Pattern::Empty(Some(node.range())))
+    Ok(Pattern::Empty(node.range()))
 }
 
 fn text(node: Node) -> Result<Pattern> {
     no_attrs(node)?;
     no_rng_element_children(node)?;
-    Ok(Pattern::Text(Some(node.range())))
+    Ok(Pattern::Text(node.range()))
 }
 
 fn value(node: Node) -> Result<DatatypeValuePattern> {
@@ -586,11 +587,12 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
 }
 
 fn single_pattern_or_choice(mut node: Node) -> Result<Pattern> {
+    let start = node.range().start;
     let mut pat = pattern(node)?;
     while let Some(next) = next_rng_sibling(node) {
         let this = pattern(next)?;
         node = next;
-        pat = Pattern::ChoicePair(Box::new(pat), Box::new(this));
+        pat = Pattern::ChoicePair(start..node.range().end, Box::new(pat), Box::new(this));
     }
     Ok(pat)
 }
@@ -639,7 +641,7 @@ fn param(node: Node) -> Result<Param> {
 fn not_allowed(node: Node) -> Result<Pattern> {
     no_attrs(node)?;
     no_rng_element_children(node)?;
-    Ok(Pattern::NotAllowed(Some(node.range())))
+    Ok(Pattern::NotAllowed(node.range()))
 }
 
 fn external_ref(node: Node) -> Result<ExternalPattern> {

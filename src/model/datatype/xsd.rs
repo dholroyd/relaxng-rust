@@ -314,7 +314,7 @@ impl super::Datatype for XsdDatatypes {
             XsdDatatypes::PositiveInteger(min_max, patt) => {
                 num_bigint::BigUint::from_str(value)
                     .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
+                    .is_some_and(|v| v != num_bigint::BigUint::ZERO && min_max.is_valid(&v))
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::NonNegativeInteger(min_max, patt) => {
@@ -2733,6 +2733,16 @@ mod test {
         assert!(dt.is_valid("-3.14"));
         assert!(dt.is_valid("0"));
         assert!(!dt.is_valid("abc"));
+    }
+
+    #[test]
+    fn positive_integer_valid() {
+        let dt = compile_no_params("positiveInteger");
+        assert!(dt.is_valid("1"));
+        assert!(dt.is_valid("42"));
+        assert!(!dt.is_valid("0"));
+        assert!(!dt.is_valid("00"));
+        assert!(!dt.is_valid("-1"));
     }
 
     #[test]

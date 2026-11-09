@@ -1093,12 +1093,14 @@ fn param(input: Span) -> IResult<Span, Param> {
 //                   | "string"
 //                   | "token"
 fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
-    // `string` and `token` are keywords only when not followed by more NCName characters;
-    // otherwise they are the start of an identifier such as `token.content` or `string-foo`
+    // A CName is a single token, so it is tried first: `string:int` is a CName, not the keyword
+    // `string` followed by `:int`.  `string` and `token` are keywords only when not followed by
+    // more NCName characters; otherwise they are the start of an identifier such as
+    // `token.content` or `string-foo`
     alt((
+        map(cname, DatatypeName::CName),
         map((tag("string"), not(nc_name_char)), |_| DatatypeName::String),
         map((tag("token"), not(nc_name_char)), |_| DatatypeName::Token),
-        map(cname, DatatypeName::CName),
     ))
     .parse(input)
 }
@@ -3023,6 +3025,26 @@ mod test {
                 Pattern::Identifier(Identifier(_, id)) => assert_eq!(id, name),
                 other => panic!("expected identifier {name:?}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn cname_with_datatype_keyword_as_prefix() {
+        // issue #84: a CName is a single token, so this is not the keyword `string` followed by
+        // `:int`
+        for (src, prefix) in [
+            ("start = string:int", "string"),
+            ("start = token:int \"3\"", "token"),
+        ] {
+            let name = match start_pattern(src) {
+                Pattern::DatatypeName(DatatypeNamePattern(_, name, _, _))
+                | Pattern::DatatypeValue(DatatypeValuePattern(_, Some(name), _, _, _)) => name,
+                other => panic!("expected datatype for {src:?}, got {other:?}"),
+            };
+            let DatatypeName::CName(QName(NcName(_, p), NcName(_, l))) = &name else {
+                panic!("expected CName for {src:?}, got {name:?}");
+            };
+            assert_eq!((p.as_str(), l.as_str()), (prefix, "int"));
         }
     }
 

@@ -124,7 +124,7 @@ lazy_static! {
     static ref GDAY_RE: regex::Regex = regex::Regex::new(r"^---[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref GMONTH_RE: regex::Regex = regex::Regex::new(r"^--[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref HEX_RE: regex::Regex = regex::Regex::new(r"^([0-9a-fA-F]{2})*$").unwrap();
-    static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^[A-Za-z0-9+/]*={0,2}$").unwrap();
+    static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=|[A-Za-z0-9+/][AQgw]==)?$").unwrap();
 }
 
 fn capture_num(caps: &regex::Captures, i: usize) -> Option<u32> {
@@ -2845,6 +2845,10 @@ mod test {
         assert!(dt.is_valid("SGVsbG8="));
         assert!(dt.is_valid("AQID"));
         assert!(!dt.is_valid("!!!"));
+        assert!(dt.is_valid("AQ\nID"));
+        for bad in ["A", "AQ", "AQI", "AQ=", "AQIDB", "AQID=", "AQ\nI"] {
+            assert!(!dt.is_valid(bad), "{bad:?} should be rejected");
+        }
     }
 
     #[test]

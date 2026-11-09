@@ -33,40 +33,55 @@ pub enum CombineRule {
 
 #[derive(Debug)]
 pub enum Pattern {
-    Choice(Vec<Pattern>, Option<codemap::Span>),
-    Interleave(Vec<Pattern>, Option<codemap::Span>),
+    Choice(Vec<Pattern>, codemap::Span),
+    Interleave(Vec<Pattern>, codemap::Span),
     /// An ordered sequence of patterns
-    Group(Vec<Pattern>, Option<codemap::Span>),
-    Mixed(Box<Pattern>, Option<codemap::Span>),
-    Empty(Option<codemap::Span>),
-    Text(Option<codemap::Span>),
-    NotAllowed(Option<codemap::Span>),
-    Optional(Box<Pattern>, Option<codemap::Span>),
-    ZeroOrMore(Box<Pattern>, Option<codemap::Span>),
-    OneOrMore(Box<Pattern>, Option<codemap::Span>),
-    Attribute(
-        NameClass,
-        Box<Pattern>,
-        Option<codemap::Span>,
-        Option<Annotation>,
-    ),
-    Element(
-        NameClass,
-        Box<Pattern>,
-        Option<codemap::Span>,
-        Option<Annotation>,
-    ),
+    Group(Vec<Pattern>, codemap::Span),
+    Mixed(Box<Pattern>, codemap::Span),
+    Empty(codemap::Span),
+    Text(codemap::Span),
+    NotAllowed(codemap::Span),
+    Optional(Box<Pattern>, codemap::Span),
+    ZeroOrMore(Box<Pattern>, codemap::Span),
+    OneOrMore(Box<Pattern>, codemap::Span),
+    Attribute(NameClass, Box<Pattern>, codemap::Span, Option<Annotation>),
+    Element(NameClass, Box<Pattern>, codemap::Span, Option<Annotation>),
     Ref(codemap::Span, String, PatRef),
     DatatypeValue {
         datatype: crate::model::datatype::DatatypeValues,
-        span: Option<codemap::Span>,
+        span: codemap::Span,
     },
     DatatypeName {
         datatype: crate::model::datatype::Datatypes,
         except: Option<Box<Pattern>>,
-        span: Option<codemap::Span>,
+        span: codemap::Span,
     },
-    List(Box<Pattern>, Option<codemap::Span>),
+    List(Box<Pattern>, codemap::Span),
+}
+
+impl Pattern {
+    /// The source location of this pattern.  For a pattern that merges several definitions
+    /// combined with `|=` or `&=`, this is the location of one of those definitions.
+    pub fn span(&self) -> codemap::Span {
+        match self {
+            Pattern::Choice(_, s)
+            | Pattern::Interleave(_, s)
+            | Pattern::Group(_, s)
+            | Pattern::Mixed(_, s)
+            | Pattern::Empty(s)
+            | Pattern::Text(s)
+            | Pattern::NotAllowed(s)
+            | Pattern::Optional(_, s)
+            | Pattern::ZeroOrMore(_, s)
+            | Pattern::OneOrMore(_, s)
+            | Pattern::Attribute(_, _, s, _)
+            | Pattern::Element(_, _, s, _)
+            | Pattern::Ref(s, _, _)
+            | Pattern::List(_, s)
+            | Pattern::DatatypeValue { span: s, .. }
+            | Pattern::DatatypeName { span: s, .. } => *s,
+        }
+    }
 }
 
 // Factored out from Pattern primarily to avoid infinite recursion in Debug impl

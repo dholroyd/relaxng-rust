@@ -33,7 +33,6 @@ pub struct DatatypesDeclaration {
     pub uri: Literal,
 }
 
-// TODO: ensure all patterns have spans
 #[derive(Debug, PartialEq)]
 pub enum Pattern {
     Element(ElementPattern),
@@ -43,24 +42,54 @@ pub enum Pattern {
     // TODO: maybe rename this variant 'Ref'
     Identifier(Identifier),
     Parent(Identifier),
-    Empty(Option<Span>),
-    Text(Option<Span>),
-    NotAllowed(Option<Span>),
+    Empty(Span),
+    Text(Span),
+    NotAllowed(Span),
     External(ExternalPattern),
     Grammar(GrammarPattern),
-    Group(Box<Pattern>),
+    /// A parenthesised pattern in compact syntax, or a `<group>` element in XML syntax
+    Group(Span, Box<Pattern>),
     // TODO: don't simplify into 'pairs' at this level of representation; have these hold
     //       Vec<Pattern>, and then simplify into pairs when transforming into relaxng-model form
     // TODO: ListPart should really be GroupPair to follow spec terminology
-    ListPair(Box<Pattern>, Box<Pattern>),
-    InterleavePair(Box<Pattern>, Box<Pattern>),
-    ChoicePair(Box<Pattern>, Box<Pattern>),
-    Optional(Option<Span>, Box<Pattern>),
-    ZeroOrMore(Option<Span>, Box<Pattern>),
-    OneOrMore(Option<Span>, Box<Pattern>),
+    ListPair(Span, Box<Pattern>, Box<Pattern>),
+    InterleavePair(Span, Box<Pattern>, Box<Pattern>),
+    ChoicePair(Span, Box<Pattern>, Box<Pattern>),
+    Optional(Span, Box<Pattern>),
+    ZeroOrMore(Span, Box<Pattern>),
+    OneOrMore(Span, Box<Pattern>),
     DatatypeValue(DatatypeValuePattern),
     DatatypeName(DatatypeNamePattern),
     Annotated(Annotations, Box<Pattern>),
+}
+
+impl Pattern {
+    /// The source range of this pattern, not including any annotations
+    pub fn span(&self) -> Span {
+        match self {
+            Pattern::Element(ElementPattern { span, .. })
+            | Pattern::Attribute(AttributePattern { span, .. })
+            | Pattern::List(ListPattern(span, _))
+            | Pattern::Mixed(MixedPattern(span, _))
+            | Pattern::Identifier(Identifier(span, _))
+            | Pattern::Parent(Identifier(span, _))
+            | Pattern::Empty(span)
+            | Pattern::Text(span)
+            | Pattern::NotAllowed(span)
+            | Pattern::External(ExternalPattern(Literal(span, _), _, _))
+            | Pattern::Grammar(GrammarPattern { span, .. })
+            | Pattern::Group(span, _)
+            | Pattern::ListPair(span, _, _)
+            | Pattern::InterleavePair(span, _, _)
+            | Pattern::ChoicePair(span, _, _)
+            | Pattern::Optional(span, _)
+            | Pattern::ZeroOrMore(span, _)
+            | Pattern::OneOrMore(span, _)
+            | Pattern::DatatypeValue(DatatypeValuePattern(span, ..))
+            | Pattern::DatatypeName(DatatypeNamePattern(span, ..)) => span.clone(),
+            Pattern::Annotated(_, inner) => inner.span(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -84,10 +113,10 @@ pub struct AttributePattern {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct ListPattern(pub Box<Pattern>);
+pub struct ListPattern(pub Span, pub Box<Pattern>);
 
 #[derive(Debug, PartialEq)]
-pub struct MixedPattern(pub Box<Pattern>);
+pub struct MixedPattern(pub Span, pub Box<Pattern>);
 
 #[derive(Debug, PartialEq)]
 pub struct ExternalPattern(pub Literal, pub Option<Inherit>, pub Option<String>);

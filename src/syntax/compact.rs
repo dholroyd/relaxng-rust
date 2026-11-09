@@ -76,9 +76,6 @@ impl Drop for RecursionGuard {
 // per https://www.oasis-open.org/committees/relax-ng/compact-20021121.html
 
 // TODO:
-//  - check rules are left-factored as required to avoid inefficiently rematching the same sub-rule
-//    in multiple alternatives
-//
 //  - the spec (Appendix A, sections 2.1 and 2.2) allows UTF-16 input (detected by a byte
 //    order mark, or specified by metadata such as a MIME charset), and supports a leading byte
 //    order mark in UTF-8.  We only support only UTF-8 without a BOM. It's not clear that
@@ -552,8 +549,8 @@ fn decl_datatypes(input: Span) -> IResult<Span, DatatypesDeclaration> {
 //                             | keyword
 fn identifier_or_keyword(input: Span) -> IResult<Span, IdentifierOrKeyword> {
     alt((
-        map(identifier, IdentifierOrKeyword::Identifier),
-        map(keyword, IdentifierOrKeyword::Keyword),
+        map(quoted_identifier, IdentifierOrKeyword::Identifier),
+        map(nc_name_text, identifier_or_keyword_of),
     ))
     .parse(input)
 }
@@ -612,23 +609,84 @@ fn span(start: Span, end: Span) -> Range<usize> {
 // identifier	  ::=  	(NCName - keyword)
 //                   | quotedIdentifier
 fn identifier(input: Span) -> IResult<Span, Identifier> {
-    let (input, start) = position(input)?;
-    let (input, text) = alt((
-        // quotedIdentifier ::= "\" NCName; the backslash is not part of the name
-        map(preceded(tag("\\"), nc_name), |name: NcName| name.1),
-        map(preceded(not(peek(keyword)), nc_name), |name: NcName| name.1),
+    alt((
+        quoted_identifier,
+        map(
+            verify(nc_name_text, |text: &Span| !is_keyword(text.fragment())),
+            |text| Identifier(token_span(&text), text.fragment().to_string()),
+        ),
     ))
-    .parse(input)?;
-    let (input, end) = position(input)?;
-    Ok((input, Identifier(span(start, end), text)))
+    .parse(input)
+}
+
+// quotedIdentifier  ::=  "\" NCName
+//
+// The span includes the backslash, but the name doesn't.
+fn quoted_identifier(input: Span) -> IResult<Span, Identifier> {
+    let (rest, (_, text)) = (tag("\\"), nc_name_text).parse(input)?;
+    Ok((
+        rest,
+        Identifier(span(input, rest), text.fragment().to_string()),
+    ))
 }
 
 pub(crate) fn nc_name(input: Span) -> IResult<Span, NcName> {
-    let (input, start) = position(input)?;
-    let (input, name) =
-        recognize((satisfy(is_nc_name_start_char), take_while(is_nc_name_char))).parse(input)?;
-    let (input, end) = position(input)?;
-    Ok((input, NcName(span(start, end), name.fragment().to_string())))
+    map(nc_name_text, nc_name_of).parse(input)
+}
+
+/// The text of an NCName.  Unlike [`nc_name`], this doesn't allocate, so that callers can decide
+/// what the name is before paying for the `String`.
+fn nc_name_text(input: Span) -> IResult<Span, Span> {
+    recognize((satisfy(is_nc_name_start_char), take_while(is_nc_name_char))).parse(input)
+}
+
+/// The range of a token returned by [`recognize`], as byte offsets in the original source.
+fn token_span(token: &Span) -> Range<usize> {
+    original_offset(token)
+        ..token
+            .extra
+            .original(token.location_offset() + token.fragment().len())
+}
+
+fn nc_name_of(text: Span) -> NcName {
+    NcName(token_span(&text), text.fragment().to_string())
+}
+
+/// An unquoted NCName, which is a keyword if it's spelled like one
+fn identifier_or_keyword_of(text: Span) -> IdentifierOrKeyword {
+    let (span, name) = (token_span(&text), text.fragment().to_string());
+    if is_keyword(text.fragment()) {
+        IdentifierOrKeyword::Keyword(Keyword(span, name))
+    } else {
+        IdentifierOrKeyword::Identifier(Identifier(span, name))
+    }
+}
+
+/// A token that begins with a name.  Several alternatives of the grammar begin with one, e.g. a
+/// reference to a definition and a datatype name, so callers scan it once, with [`name_token`],
+/// and then let the token and what follows it decide between them, rather than each alternative
+/// rescanning the same name.
+enum NameToken<'a> {
+    /// `\` NCName: always an identifier, even if the NCName is a keyword
+    Quoted(Identifier),
+    /// NCName `:` NCName
+    CName(QName),
+    /// An NCName that isn't the prefix of a CName, which may be a keyword (see [`is_keyword`]),
+    /// or the prefix of an nsName (`prefix:*`)
+    NcName(Span<'a>),
+}
+
+fn name_token(input: Span) -> IResult<Span, NameToken> {
+    if let Ok((rest, id)) = quoted_identifier(input) {
+        return Ok((rest, NameToken::Quoted(id)));
+    }
+    let (rest, text) = nc_name_text(input)?;
+    // a CName is a single token, so `string:int` is a CName, not the keyword `string`
+    if let Ok((rest, local)) = preceded(tag(":"), nc_name_text).parse(rest) {
+        let qname = QName(nc_name_of(text), nc_name_of(local));
+        return Ok((rest, NameToken::CName(qname)));
+    }
+    Ok((rest, NameToken::NcName(text)))
 }
 
 fn nc_name_char(input: Span) -> IResult<Span, char> {
@@ -668,38 +726,31 @@ fn is_nc_name_char(c: char) -> bool {
         )
 }
 
-fn keyword(input: Span) -> IResult<Span, Keyword> {
-    let parse = (
-        alt((
-            tag("attribute"),
-            tag("default"),
-            tag("datatypes"),
-            tag("div"),
-            tag("element"),
-            tag("empty"),
-            tag("external"),
-            tag("grammar"),
-            tag("include"),
-            tag("inherit"),
-            tag("list"),
-            tag("mixed"),
-            tag("namespace"),
-            tag("notAllowed"),
-            tag("parent"),
-            tag("start"),
-            tag("string"),
-            tag("text"),
-            tag("token"),
-        )),
-        position,
-        peek(not(nc_name_char)),
-    );
-
-    let mut parser = map(parse, |(k, end, _)| {
-        Keyword(span(k, end), k.fragment().to_string())
-    });
-
-    parser.parse(input)
+/// Is the whole of an NCName a keyword?  Callers scan the full NCName first, so that e.g.
+/// `elements` is not the keyword `element` followed by `s`.
+fn is_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "attribute"
+            | "default"
+            | "datatypes"
+            | "div"
+            | "element"
+            | "empty"
+            | "external"
+            | "grammar"
+            | "include"
+            | "inherit"
+            | "list"
+            | "mixed"
+            | "namespace"
+            | "notAllowed"
+            | "parent"
+            | "start"
+            | "string"
+            | "text"
+            | "token"
+    )
 }
 
 // pattern  ::=
@@ -765,8 +816,7 @@ fn lead_annotated_primary(input: Span) -> IResult<Span, Pattern> {
         map(list_pattern, Pattern::List),
         map(mixed_pattern, Pattern::Mixed),
         map(datatype_value_pattern, Pattern::DatatypeValue),
-        map(datatype_param_pattern, Pattern::DatatypeName),
-        map(identifier, Pattern::Identifier),
+        name_led_pattern,
         map((tag("parent"), after_keyword, identifier), |(_, _, p)| {
             Pattern::Parent(p)
         }),
@@ -1019,25 +1069,59 @@ fn group_pattern(input: Span) -> IResult<Span, Pattern> {
     parser.parse(input)
 }
 
-// [datatypeName] datatypeValue
+// [datatypeName] datatypeValue, without the datatypeName; see name_led_pattern() for the form with
+// one
 fn datatype_value_pattern(input: Span) -> IResult<Span, DatatypeValuePattern> {
-    let parse = (
-        position,
-        opt(datatype_name),
-        space_comment0,
-        datatype_value,
-        position,
-    );
-
-    let mut parser = map(parse, |(start, name, _, value, end)| {
-        DatatypeValuePattern(span(start, end), name, value, None, vec![])
-    });
-
-    parser.parse(input)
+    let (rest, value) = datatype_value(input)?;
+    Ok((
+        rest,
+        DatatypeValuePattern(span(input, rest), None, value, None, vec![]),
+    ))
 }
 
-// datatypeName ["{" param* "}"] [exceptPattern]
-fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
+// The patterns that start with a name:
+//
+//   identifier
+//   datatypeName datatypeValue
+//   datatypeName ["{" param* "}"] [exceptPattern]
+//
+// datatypeName  ::=   CName
+//                   | "string"
+//                   | "token"
+//
+// Any except pattern is added by pattern_primary().
+fn name_led_pattern(input: Span) -> IResult<Span, Pattern> {
+    let (rest, token) = name_token(input)?;
+    let name = match token {
+        NameToken::Quoted(id) => return Ok((rest, Pattern::Identifier(id))),
+        NameToken::CName(qname) => DatatypeName::CName(qname),
+        NameToken::NcName(text) => match *text.fragment() {
+            "string" => DatatypeName::String,
+            "token" => DatatypeName::Token,
+            // left for the alternatives that begin with other keywords
+            k if is_keyword(k) => {
+                return Err(nom::Err::Error(Error::Nom(input, ErrorKind::Verify)));
+            }
+            _ => {
+                let id = Identifier(token_span(&text), text.fragment().to_string());
+                return Ok((rest, Pattern::Identifier(id)));
+            }
+        },
+    };
+    let (rest, value) = opt(preceded(space_comment0, datatype_value)).parse(rest)?;
+    if let Some(value) = value {
+        let value = DatatypeValuePattern(span(input, rest), Some(name), value, None, vec![]);
+        return Ok((rest, Pattern::DatatypeValue(value)));
+    }
+    let (rest, params) = opt(datatype_params).parse(rest)?;
+    Ok((
+        rest,
+        Pattern::DatatypeName(DatatypeNamePattern(span(input, rest), name, params, None)),
+    ))
+}
+
+// "{" param* "}"
+fn datatype_params(input: Span) -> IResult<Span, Vec<Param>> {
     let params = (
         space_comment0,
         tag("{"),
@@ -1046,15 +1130,7 @@ fn datatype_param_pattern(input: Span) -> IResult<Span, DatatypeNamePattern> {
         space_comment0,
         cut(tag("}")),
     );
-    let params = map(params, |(_, _, _, p, _, _)| p);
-
-    let parse = (position, datatype_name, opt(params), position);
-    // any except pattern is added by pattern_primary()
-    let mut parser = map(parse, |(start, name, params, end)| {
-        DatatypeNamePattern(span(start, end), name, params, None)
-    });
-
-    parser.parse(input)
+    map(params, |(_, _, _, p, _, _)| p).parse(input)
 }
 
 // datatypeValue  ::= 	literal
@@ -1087,22 +1163,6 @@ fn param(input: Span) -> IResult<Span, Param> {
     );
 
     parser.parse(input)
-}
-
-// datatypeName  ::=   CName
-//                   | "string"
-//                   | "token"
-fn datatype_name(input: Span) -> IResult<Span, DatatypeName> {
-    // A CName is a single token, so it is tried first: `string:int` is a CName, not the keyword
-    // `string` followed by `:int`.  `string` and `token` are keywords only when not followed by
-    // more NCName characters; otherwise they are the start of an identifier such as
-    // `token.content` or `string-foo`
-    alt((
-        map(cname, DatatypeName::CName),
-        map((tag("string"), not(nc_name_char)), |_| DatatypeName::String),
-        map((tag("token"), not(nc_name_char)), |_| DatatypeName::Token),
-    ))
-    .parse(input)
 }
 
 // Parse a single atomic name class with annotations.
@@ -1138,8 +1198,7 @@ fn lead_annotated_primary_name_class(input: Span) -> IResult<Span, NameClass> {
     let (input, annotations) = maybe_annotations(input)?;
     let (input, _) = space_comment0(input)?;
     let (input, primary) = alt((
-        map(ns_name_nc, NameClass::NsName),
-        map(name, NameClass::Name),
+        name_led_name_class,
         map(any_name_nc, NameClass::AnyName),
         map(paren_nc, NameClass::Paren),
     ))
@@ -1210,21 +1269,33 @@ fn name_class(input: Span) -> IResult<Span, NameClass> {
 // name	  ::=  	identifierOrKeyword
 //            | CName
 fn name(input: Span) -> IResult<Span, Name> {
-    alt((
-        map(cname, Name::CName),
-        map(identifier_or_keyword, Name::Identifier),
-    ))
+    map(name_token, |token| match token {
+        NameToken::Quoted(id) => Name::Identifier(IdentifierOrKeyword::Identifier(id)),
+        NameToken::CName(qname) => Name::CName(qname),
+        NameToken::NcName(text) => Name::Identifier(identifier_or_keyword_of(text)),
+    })
     .parse(input)
 }
 
-fn ns_name_nc(input: Span) -> IResult<Span, NsName> {
-    // any except is added by name_class_primary()
-    let mut parser = map((nc_name, tag(":*")), |(name, _)| NsName {
-        name: NamespaceOrPrefix::Prefix(name),
-        except: None,
-    });
-
-    parser.parse(input)
+// The name classes that start with a name: a name, or nsName, i.e. `prefix:*`.  Any except is
+// added by name_class_primary().
+fn name_led_name_class(input: Span) -> IResult<Span, NameClass> {
+    let (rest, token) = name_token(input)?;
+    let name = match token {
+        NameToken::NcName(prefix) => {
+            if let Ok((rest, _)) = tag::<_, _, Error<Span>>(":*")(rest) {
+                let ns_name = NsName {
+                    name: NamespaceOrPrefix::Prefix(nc_name_of(prefix)),
+                    except: None,
+                };
+                return Ok((rest, NameClass::NsName(ns_name)));
+            }
+            Name::Identifier(identifier_or_keyword_of(prefix))
+        }
+        NameToken::Quoted(id) => Name::Identifier(IdentifierOrKeyword::Identifier(id)),
+        NameToken::CName(qname) => Name::CName(qname),
+    };
+    Ok((rest, NameClass::Name(name)))
 }
 
 fn any_name_nc(input: Span) -> IResult<Span, AnyName> {
@@ -1269,10 +1340,43 @@ fn cname(input: Span) -> IResult<Span, QName> {
 fn grammar_content(input: Span) -> IResult<Span, GrammarContent> {
     let (input, _guard) = RecursionGuard::enter(input)?;
     alt((
-        map(annotation_element_not_keyword, GrammarContent::Annotation),
+        |i| name_led_member(i, GrammarContent::Annotation, GrammarContent::Define),
         annotated_grammar_component,
     ))
     .parse(input)
+}
+
+/// An annotation element, or a definition without annotations, which both start with a name; the
+/// name is scanned once, and what follows it decides which this is.  An annotation element can't
+/// have an unprefixed keyword as its name, e.g. `div [ ]`, and neither can a definition, so those
+/// are left to [`annotated_grammar_component`] or [`annotated_include_component`].
+///
+/// The result is built with `annotation` or `define`, for grammar or include content.
+fn name_led_member<T>(
+    input: Span,
+    annotation: fn(AnnotationElement) -> T,
+    define: fn(Define) -> T,
+) -> IResult<Span, T> {
+    let (rest, token) = name_token(input)?;
+    let id = match token {
+        NameToken::NcName(text) if is_keyword(text.fragment()) => {
+            return Err(nom::Err::Error(Error::Nom(input, ErrorKind::Verify)));
+        }
+        NameToken::NcName(text) => Identifier(token_span(&text), text.fragment().to_string()),
+        NameToken::Quoted(id) => id,
+        NameToken::CName(qname) => {
+            let (rest, element) = annotation_element_rest(Name::CName(qname), rest)?;
+            return Ok((rest, annotation(element)));
+        }
+    };
+    let (rest, _) = space_comment0(rest)?;
+    if rest.fragment().starts_with('[') {
+        let name = Name::Identifier(IdentifierOrKeyword::Identifier(id));
+        let (rest, element) = annotation_element_rest(name, rest)?;
+        return Ok((rest, annotation(element)));
+    }
+    let (rest, d) = define_rest(input, id, rest)?;
+    Ok((rest, define(d)))
 }
 
 fn annotated_grammar_component(input: Span) -> IResult<Span, GrammarContent> {
@@ -1292,15 +1396,6 @@ fn annotated_grammar_component(input: Span) -> IResult<Span, GrammarContent> {
         GrammarContent::Annotation(_) => unreachable!("not parsed here"),
     }
     Ok((input, item))
-}
-
-/// An annotation element in place of grammar or include content, which can't have an unprefixed
-/// keyword as its name, e.g. `div [ ]`
-fn annotation_element_not_keyword(input: Span) -> IResult<Span, AnnotationElement> {
-    verify(annotation_element, |e| {
-        !matches!(e.name, Name::Identifier(IdentifierOrKeyword::Keyword(_)))
-    })
-    .parse(input)
 }
 
 // start	  ::=  	"start" assignMethod pattern
@@ -1332,28 +1427,29 @@ fn start(input: Span) -> IResult<Span, Define> {
 
 // define	  ::=  	identifier assignMethod pattern
 fn define(input: Span) -> IResult<Span, Define> {
-    let parse = (
-        position,
-        identifier,
-        space_comment0,
-        assign_method,
-        space_comment0,
-        cut(pattern),
-        position,
-    );
+    let (rest, (identifier, _)) = (identifier, space_comment0).parse(input)?;
+    define_rest(input, identifier, rest)
+}
 
-    let mut parser = map(
-        parse,
-        |(start, identifier, _, assign_method, _, pattern, end)| Define {
-            span: span(start, end),
+/// The rest of a definition named `identifier`, from its assignMethod.  `start` is where the
+/// definition began.
+fn define_rest<'a>(
+    start: Span<'a>,
+    identifier: Identifier,
+    input: Span<'a>,
+) -> IResult<Span<'a>, Define> {
+    let (rest, (assign_method, _, pattern)) =
+        (assign_method, space_comment0, cut(pattern)).parse(input)?;
+    Ok((
+        rest,
+        Define {
+            span: span(start, rest),
             name: DefineName::Named(identifier),
             assign_method,
             pattern,
             annotations: None,
         },
-    );
-
-    parser.parse(input)
+    ))
 }
 
 fn assign_method(input: Span) -> IResult<Span, AssignMethod> {
@@ -1445,7 +1541,7 @@ fn inherit(input: Span) -> IResult<Span, Inherit> {
 fn include_content(input: Span) -> IResult<Span, IncludeContent> {
     let (input, _guard) = RecursionGuard::enter(input)?;
     alt((
-        map(annotation_element_not_keyword, IncludeContent::Annotation),
+        |i| name_led_member(i, IncludeContent::Annotation, IncludeContent::Define),
         annotated_include_component,
     ))
     .parse(input)
@@ -1699,9 +1795,14 @@ fn nested_annotation_attribute(input: Span) -> IResult<Span, AnnotationAttribute
 }
 
 fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
+    let (rest, name) = name(input)?;
+    annotation_element_rest(name, rest)
+}
+
+/// The rest of an annotation element named `name`, from its `[`
+fn annotation_element_rest(name: Name, input: Span) -> IResult<Span, AnnotationElement> {
     let (input, _guard) = RecursionGuard::enter(input)?;
-    let parse = (
-        name,
+    let mut parse = (
         space_comment0,
         tag("["),
         space_comment0,
@@ -1712,23 +1813,20 @@ fn annotation_element(input: Span) -> IResult<Span, AnnotationElement> {
         tag("]"),
         position,
     );
-
-    let mut parser = map(
-        parse,
-        |(name, _, _, _, annotation_attributes, _, annotation_elements_or_literals, _, _, end)| {
-            AnnotationElement {
-                span: Range {
-                    start: name.span().start,
-                    end: original_offset(&end),
-                },
-                name,
-                annotation_attributes,
-                annotation_elements_or_literals,
-            }
+    let (rest, (_, _, _, annotation_attributes, _, annotation_elements_or_literals, _, _, end)) =
+        parse.parse(input)?;
+    Ok((
+        rest,
+        AnnotationElement {
+            span: Range {
+                start: name.span().start,
+                end: original_offset(&end),
+            },
+            name,
+            annotation_attributes,
+            annotation_elements_or_literals,
         },
-    );
-
-    parser.parse(input)
+    ))
 }
 
 fn annotation_element_or_literal(input: Span) -> IResult<Span, AnnotationElementOrLiteral> {

@@ -737,6 +737,33 @@ impl Default for Compiler<FsFiles> {
         Self::new(FsFiles, Syntax::Auto)
     }
 }
+/// The namespace that a file referenced by `include` or `external` inherits as its default.
+///
+/// An XML-syntax reference carries this as its (possibly inherited) `ns` attribute.  A
+/// compact-syntax reference passes on the namespace bound to its `inherit = prefix` clause, or
+/// the including file's default namespace when there is no such clause.
+fn inherited_namespace(
+    ctx: &Context,
+    ns: Option<&str>,
+    inherit: Option<&types::Inherit>,
+) -> Result<String, RelaxError> {
+    if let Some(ns) = ns {
+        return Ok(ns.to_string());
+    }
+    match inherit {
+        Some(inherit) => {
+            let prefix = inherit.0.to_string();
+            ctx.namespace_uri_for_prefix_str(&prefix)
+                .map(str::to_string)
+                .ok_or_else(|| RelaxError::UndefinedNamespacePrefix {
+                    span: ctx.convert_span(&inherit.0.span()),
+                    prefix,
+                })
+        }
+        None => Ok(ctx.default_namespace_uri().to_string()),
+    }
+}
+
 impl<FS: Files> Compiler<FS> {
     pub fn new(fs: FS, syntax: Syntax) -> Compiler<FS> {
         Compiler {
@@ -1520,19 +1547,8 @@ impl<FS: Files> Compiler<FS> {
         // TODO: get the span of the grammar in the file, rather than the span of the whole file
         let include_span = file.span;
 
-        let mut inc_ctx = ctx.new_include(span, file, inc.ns.as_deref())?;
-
-        if let Some(ref inherit) = inc.inherit {
-            let prefix = inherit.0.to_string();
-            let namespace_uri = ctx
-                .namespace_uri_for_prefix_str(&prefix)
-                .ok_or_else(|| RelaxError::UndefinedNamespacePrefix {
-                    span: ctx.convert_span(&inherit.0.span()),
-                    prefix: prefix.clone(),
-                })?
-                .to_string();
-            inc_ctx.declare_namespace(prefix, namespace_uri)?;
-        }
+        let ns = inherited_namespace(ctx, inc.ns.as_deref(), inc.inherit.as_ref())?;
+        let mut inc_ctx = ctx.new_include(span, file, Some(&ns))?;
 
         // replace any definitions for which the including file provides an override
         if let Some(ref overrides) = inc.content {
@@ -1844,17 +1860,7 @@ impl<FS: Files> Compiler<FS> {
         ctx: &mut Context,
         external: &types::ExternalPattern,
     ) -> Result<model::Pattern, RelaxError> {
-        if external.1.is_some() {
-            unimplemented!("inherit");
-        }
-        let ns_override: Option<String> = external.2.clone().or_else(|| {
-            let ns = ctx.default_namespace_uri();
-            if ns.is_empty() {
-                None
-            } else {
-                Some(ns.to_string())
-            }
-        });
+        let ns = inherited_namespace(ctx, external.2.as_deref(), external.1.as_ref())?;
         let file = ctx.file();
         let parent_dir = Path::new(file.name()).parent().unwrap_or(Path::new("."));
         let path = parent_dir.join(external.0.as_string_value());
@@ -1863,7 +1869,7 @@ impl<FS: Files> Compiler<FS> {
             .get_schema(&path)
             .map_err(|e| RelaxError::IncludeError(span, Box::new(e)))?;
         let file_span = file.span;
-        let mut inc_ctx = ctx.new_include(span, file, ns_override.as_deref())?;
+        let mut inc_ctx = ctx.new_include(span, file, Some(&ns))?;
 
         match &s.pattern_or_grammar {
             types::PatternOrGrammar::Pattern(pat) => self
@@ -2511,6 +2517,47 @@ mod tests {
             if let Err(e) = c.compile(Path::new("main.rnc")) {
                 panic!("including {inc:?} failed: {e:?}");
             }
+        }
+    }
+
+    #[test]
+    fn included_file_inherits_default_namespace() {
+        for (main, expected) in [
+            (
+                "default namespace = \"urn:a\"\ninclude \"inc.rnc\"",
+                "urn:a",
+            ),
+            (
+                "default namespace = \"urn:a\"\nnamespace b = \"urn:b\"\ninclude \"inc.rnc\" inherit = b",
+                "urn:b",
+            ),
+            (
+                "default namespace = \"urn:a\"\nstart = external \"ext.rnc\"",
+                "urn:a",
+            ),
+            (
+                "namespace b = \"urn:b\"\nstart = external \"ext.rnc\" inherit = b",
+                "urn:b",
+            ),
+        ] {
+            let mut c = Compiler::new(
+                MemFiles(vec![
+                    ("main.rnc", main),
+                    ("inc.rnc", "start = element foo { empty }"),
+                    ("ext.rnc", "element foo { empty }"),
+                ]),
+                Syntax::Compact,
+            );
+            let result = c
+                .compile(Path::new("main.rnc"))
+                .unwrap_or_else(|e| panic!("{main:?} failed to compile: {e:?}"));
+            let start = result.start.borrow();
+            let Some(model::Pattern::Element(model::NameClass::Named { namespace_uri, .. }, ..)) =
+                start.as_ref().map(|d| d.pattern())
+            else {
+                panic!("{main:?}: expected named element as start pattern");
+            };
+            assert_eq!(namespace_uri, expected, "{main:?}");
         }
     }
 

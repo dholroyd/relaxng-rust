@@ -7,6 +7,8 @@
 //! U+2003 EM SPACE), and `u8::is_ascii_whitespace()` includes form feed, so none of those should
 //! be used when interpreting XML content.
 
+use std::borrow::Cow;
+
 /// True for the characters matched by the XML `S` production: `#x20 | #x9 | #xD | #xA`.
 #[inline]
 pub(crate) fn is_xml_whitespace(c: char) -> bool {
@@ -38,6 +40,26 @@ pub(crate) fn trim_xml_whitespace(s: &str) -> &str {
 #[inline]
 pub(crate) fn split_xml_whitespace(s: &str) -> impl Iterator<Item = &str> {
     s.split(is_xml_whitespace).filter(|t| !t.is_empty())
+}
+
+/// Applies XML Schema's `whiteSpace="collapse"`: strips leading and trailing XML whitespace and
+/// reduces each internal run of it to a single space.  Borrows when the input is already collapsed.
+pub(crate) fn collapse_xml_whitespace(s: &str) -> Cow<'_, str> {
+    let already_collapsed = !s.starts_with(is_xml_whitespace)
+        && !s.ends_with(is_xml_whitespace)
+        && !s.contains(['\t', '\r', '\n'])
+        && !s.contains("  ");
+    if already_collapsed {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    for tok in split_xml_whitespace(s) {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(tok);
+    }
+    Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -77,5 +99,27 @@ mod tests {
         let v: Vec<_> = split_xml_whitespace("a\u{A0}b c").collect();
         assert_eq!(v, ["a\u{A0}b", "c"]);
         assert_eq!(split_xml_whitespace(" \n ").count(), 0);
+    }
+
+    #[test]
+    fn collapse() {
+        for (input, expected) in [
+            ("", ""),
+            ("  ", ""),
+            ("a", "a"),
+            ("a b", "a b"),
+            (" a", "a"),
+            ("a\n", "a"),
+            ("\t a \r\n b  c ", "a b c"),
+            ("a\u{A0} b", "a\u{A0} b"),
+        ] {
+            let got = collapse_xml_whitespace(input);
+            assert_eq!(got, expected, "{input:?}");
+            assert_eq!(
+                matches!(got, Cow::Borrowed(_)),
+                input == expected,
+                "{input:?}"
+            );
+        }
     }
 }

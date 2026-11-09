@@ -2,7 +2,9 @@ use crate::model::compiler::Context;
 use crate::model::datatype::relax::normalize_whitespace;
 use crate::syntax::types;
 use crate::syntax::types::DatatypeName;
-use crate::xml_whitespace::{is_xml_whitespace, split_xml_whitespace, trim_xml_whitespace};
+use crate::xml_whitespace::{
+    collapse_xml_whitespace, is_xml_whitespace, split_xml_whitespace, trim_xml_whitespace,
+};
 use lazy_static::lazy_static;
 use std::fmt;
 use std::str::FromStr;
@@ -116,6 +118,7 @@ lazy_static! {
     static ref DURATION_RE: regex::Regex = regex::Regex::new(r"^P(([0-9]+([.,][0-9]*)?Y)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?D)?T?([0-9]+([.,][0-9]*)?H)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?S)?)|[0-9]{4}-?(0[1-9]|11|12)-?(?:[0-2][0-9]|30|31)T((?:[0-1][0-9]|[2][0-3]):?(?:[0-5][0-9]):?(?:[0-5][0-9]|60)|2400|24:00)$").unwrap();
     static ref TIME_RE: regex::Regex = regex::Regex::new(r"^[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref GYEARMONTH_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4,}-[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
+    static ref DATE_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4}-[0-9]{2}-[0-9]{2}$").unwrap();
     static ref GYEAR_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4,}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref GMONTHDAY_RE: regex::Regex = regex::Regex::new(r"^--[0-9]{2}-[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref GDAY_RE: regex::Regex = regex::Regex::new(r"^---[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
@@ -198,11 +201,16 @@ impl XsdDatatypes {
 }
 impl super::Datatype for XsdDatatypes {
     fn is_valid(&self, value: &str) -> bool {
+        // The whiteSpace facet is applied before anything else, so the lexical checks and the
+        // pattern / length facets below all see the normalized value.  `string` preserves
+        // whitespace and every other type collapses it.
+        let normalized = match self {
+            XsdDatatypes::String(_) => std::borrow::Cow::Borrowed(value),
+            _ => collapse_xml_whitespace(value),
+        };
+        let value: &str = &normalized;
         match self {
-            XsdDatatypes::NormalizedString(str_facets) => {
-                let normal_val = super::relax::normalize_whitespace(value);
-                str_facets.is_valid(&normal_val)
-            }
+            XsdDatatypes::NormalizedString(str_facets) => str_facets.is_valid(value),
             XsdDatatypes::String(str_facets) => str_facets.is_valid(value),
             XsdDatatypes::Byte(min_max, patt) => {
                 i8::from_str(value)
@@ -317,20 +325,19 @@ impl super::Datatype for XsdDatatypes {
                 is_valid_ncname(value) && str_facets.is_valid(value)
             }
             XsdDatatypes::QName(str_facets) => {
-                let value = trim_xml_whitespace(value);
                 parse_qname(value).is_some() && str_facets.is_valid(value)
             }
             XsdDatatypes::Name(str_facets) => is_valid_name(value) && str_facets.is_valid(value),
-            XsdDatatypes::Token(str_facets) => {
-                let normalized = super::relax::normalize_whitespace(value);
-                str_facets.is_valid(&normalized)
-            }
+            XsdDatatypes::Token(str_facets) => str_facets.is_valid(value),
             XsdDatatypes::Duration(patt) => {
                 DURATION_RE.is_match(value)
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Date(patt) => {
-                chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
+                // chrono's parser is lenient (e.g. it skips Unicode whitespace and accepts
+                // single-digit fields), so check the lexical form first.
+                DATE_RE.is_match(value)
+                    && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Datetime(patt) => {
@@ -2800,6 +2807,87 @@ mod test {
         let dt = compile_no_params("base64Binary");
         assert!(dt.is_valid("AQID\nBAUG"));
         assert!(!dt.is_valid("AQID\u{A0}BAUG"));
+    }
+
+    #[test]
+    fn collapsing_types_ignore_surrounding_whitespace() {
+        for (type_name, value) in [
+            ("ID", "foo"),
+            ("IDREF", "foo"),
+            ("ENTITY", "foo"),
+            ("NCName", "foo"),
+            ("Name", "a:b"),
+            ("NMTOKEN", "1a"),
+            ("language", "en-GB"),
+            ("anyURI", "http://example.com/"),
+            ("boolean", "true"),
+            ("byte", "-5"),
+            ("short", "5"),
+            ("int", "5"),
+            ("long", "5"),
+            ("unsignedByte", "5"),
+            ("unsignedShort", "5"),
+            ("unsignedInt", "5"),
+            ("unsignedLong", "5"),
+            ("integer", "5"),
+            ("positiveInteger", "5"),
+            ("nonNegativeInteger", "5"),
+            ("nonPositiveInteger", "-5"),
+            ("negativeInteger", "-5"),
+            ("decimal", "1.5"),
+            ("float", "1.5"),
+            ("double", "1.5"),
+            ("date", "2024-01-31"),
+            ("dateTime", "2024-01-31T12:00:00"),
+            ("time", "12:00:00"),
+            ("duration", "P1D"),
+            ("gYear", "2024"),
+            ("gYearMonth", "2024-01"),
+            ("gMonth", "--01"),
+            ("gMonthDay", "--01-31"),
+            ("gDay", "---31"),
+            ("hexBinary", "0A"),
+            ("base64Binary", "AQID"),
+        ] {
+            let dt = compile_no_params(type_name);
+            assert!(dt.is_valid(value), "{type_name} {value:?}");
+            let padded = format!(" \t\r\n{value}\n ");
+            assert!(dt.is_valid(&padded), "{type_name} {padded:?}");
+            // Only XML whitespace is collapsed
+            let nbsp = format!("\u{A0}{value}");
+            assert!(!dt.is_valid(&nbsp), "{type_name} {nbsp:?}");
+        }
+    }
+
+    #[test]
+    fn date_lexical_form_is_strict() {
+        let dt = compile_no_params("date");
+        assert!(dt.is_valid("2024-01-31"));
+        assert!(dt.is_valid("-0001-01-01"));
+        assert!(!dt.is_valid("2024-02-30"));
+        assert!(!dt.is_valid("2024- 01-31"));
+        assert!(!dt.is_valid("2024-1-31"));
+        assert!(!dt.is_valid("+2024-01-31"));
+        assert!(!dt.is_valid("\u{2003}2024-01-31"));
+    }
+
+    #[test]
+    fn facets_see_collapsed_value() {
+        let dt = compile_one_param("integer", "pattern", "[0-9]+");
+        assert!(dt.is_valid(" 42\n"));
+        let dt = compile_one_param("NCName", "maxLength", "3");
+        assert!(dt.is_valid("  foo  "));
+        let dt = compile_one_param("decimal", "totalDigits", "2");
+        assert!(dt.is_valid(" 12 "));
+        let dt = compile_one_param("NMTOKENS", "pattern", "a b");
+        assert!(dt.is_valid("\ta\n\nb "));
+    }
+
+    #[test]
+    fn string_preserves_whitespace() {
+        let dt = compile_one_param("string", "length", "3");
+        assert!(dt.is_valid(" a\n"));
+        assert!(!dt.is_valid("a"));
     }
 
     #[test]

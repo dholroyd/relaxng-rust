@@ -16,4 +16,4 @@ pub use pattern::{
     Annotation, AnnotationAttribute, AnnotationContent, AnnotationDocumentation, AnnotationElement,
     CombineRule, DefineRule, NameClass, Param, PatRef, Pattern,
 };
-pub use restrictions::RestrictionKind;
+pub use restrictions::{RestrictionKind, Violation};

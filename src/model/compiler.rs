@@ -219,7 +219,7 @@ pub enum RelaxError {
         attribute_span: codemap::Span,
         element_span: codemap::Span,
     },
-    RestrictionViolation(restrictions::RestrictionKind),
+    RestrictionViolation(restrictions::Violation),
     RecursiveInclude {
         name: String,
         span: codemap::Span,
@@ -1313,12 +1313,26 @@ impl<FS: Files> Compiler<FS> {
                     spans: vec![override_label, include_label],
                 }
             }
-            RelaxError::RestrictionViolation(kind) => codemap_diagnostic::Diagnostic {
-                level: codemap_diagnostic::Level::Error,
-                message: format!("Schema restriction violated: {kind}"),
-                code: None,
-                spans: vec![],
-            },
+            RelaxError::RestrictionViolation(violation) => {
+                let mut spans = vec![codemap_diagnostic::SpanLabel {
+                    span: violation.span,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                    label: None,
+                }];
+                if let Some(span) = violation.other_span {
+                    spans.push(codemap_diagnostic::SpanLabel {
+                        span,
+                        style: codemap_diagnostic::SpanStyle::Secondary,
+                        label: Some("overlaps with this".to_string()),
+                    });
+                }
+                codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: format!("Schema restriction violated: {}", violation.kind),
+                    code: None,
+                    spans,
+                }
+            }
             RelaxError::TopLevelFollowAnnotation(span) => codemap_diagnostic::Diagnostic {
                 level: codemap_diagnostic::Level::Error,
                 message: "The top-level pattern can't have follow annotations".to_string(),
@@ -1788,6 +1802,8 @@ impl<FS: Files> Compiler<FS> {
     ) -> Result<model::Pattern, RelaxError> {
         let name_class = self.compile_nameclass(ctx, ElemAttr::Element, &element.name_class)?;
         let span = ctx.convert_span(&element.span);
+        restrictions::check_name_class_restrictions(&name_class, span)
+            .map_err(RelaxError::RestrictionViolation)?;
         let mut el_ctx = ctx.new_element(span)?;
         Ok(model::Pattern::Element(
             name_class,
@@ -1803,6 +1819,8 @@ impl<FS: Files> Compiler<FS> {
     ) -> Result<model::Pattern, RelaxError> {
         let name_class = self.compile_nameclass(ctx, ElemAttr::Attribute, &attribute.name_class)?;
         let span = ctx.convert_span(&attribute.span);
+        restrictions::check_name_class_restrictions(&name_class, span)
+            .map_err(RelaxError::RestrictionViolation)?;
         let mut att_ctx = ctx.new_attribute(span);
         Ok(model::Pattern::Attribute(
             name_class,
@@ -2206,9 +2224,6 @@ impl<FS: Files> Compiler<FS> {
                 self.compile_nameclass(ctx, elem_attr, inner)
             }
         }?;
-        // Check name class structural restrictions (anyName/except, nsName/except)
-        restrictions::check_name_class_restrictions(&result)
-            .map_err(RelaxError::RestrictionViolation)?;
         Ok(result)
     }
 
@@ -2591,6 +2606,44 @@ mod tests {
             };
             assert_matches!(**content, model::Pattern::Ref(_, ref n, _) if n == "start");
         }
+    }
+
+    #[test]
+    fn attribute_overlap_ignores_not_allowed_branch() {
+        // The validator.nu HTML5 schema disables one definition of cols/rows by interleaving
+        // it with notAllowed, then adds another; section 7.3 applies after simplification
+        // has removed the disabled branch.
+        let mut c = Compiler::new(
+            MemFiles(vec![(
+                "test.rnc",
+                "start = element textarea { textarea.attrs }
+                 textarea.attrs = wf1
+                 wf1 = inner
+                 inner = attribute cols { text } & attribute rows { text }
+                 inner &= notAllowed
+                 wf1 |= empty
+                 textarea.attrs &= attribute rows { text }? & attribute cols { text }?",
+            )]),
+            Syntax::Compact,
+        );
+        if let Err(e) = c.compile(Path::new("test.rnc")) {
+            panic!("{e:?}");
+        }
+    }
+
+    #[test]
+    fn optional_not_allowed_does_not_hide_attribute_overlap() {
+        // `notAllowed?` simplifies to `empty`, so the group around it is still checked
+        let text = "start = element e {\n  attribute b { notAllowed }?,\n  attribute a { text },\n  attribute a { text }\n}";
+        let mut c = Compiler::new(MemFiles(vec![("test.rnc", text)]), Syntax::Compact);
+        let Err(RelaxError::RestrictionViolation(v)) = c.compile(Path::new("test.rnc")) else {
+            panic!("expected a restriction violation");
+        };
+        assert_matches!(v.kind, restrictions::RestrictionKind::AttributeNameOverlap);
+        let line_of = |span: codemap::Span| c.codemap.look_up_span(span).begin.line;
+        // 0-based lines of the second and first `attribute a`
+        assert_eq!(line_of(v.span), 3);
+        assert_eq!(line_of(v.other_span.expect("other span")), 2);
     }
 
     #[test]

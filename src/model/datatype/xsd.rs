@@ -114,17 +114,74 @@ impl super::Datatype for XsdDatatypeValues {
 
 lazy_static! {
     static ref LANG_RE: regex::Regex = regex::Regex::new(r"^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$").unwrap();
-    static ref DATETIME_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:Z(?:(?:\+|-)[0-9]{2}:[0-9]{2})?)?$").unwrap();
+    static ref DATETIME_RE: regex::Regex = regex::Regex::new(r"^(-?)([0-9]{4,})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?(?:Z|[+-]([0-9]{2}):([0-9]{2}))?$").unwrap();
     static ref DURATION_RE: regex::Regex = regex::Regex::new(r"^P(([0-9]+([.,][0-9]*)?Y)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?D)?T?([0-9]+([.,][0-9]*)?H)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?S)?)|[0-9]{4}-?(0[1-9]|11|12)-?(?:[0-2][0-9]|30|31)T((?:[0-1][0-9]|[2][0-3]):?(?:[0-5][0-9]):?(?:[0-5][0-9]|60)|2400|24:00)$").unwrap();
     static ref TIME_RE: regex::Regex = regex::Regex::new(r"^[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref GYEARMONTH_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4,}-[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
-    static ref DATE_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4}-[0-9]{2}-[0-9]{2}$").unwrap();
+    static ref DATE_RE: regex::Regex = regex::Regex::new(r"^(-?)([0-9]{4,})-([0-9]{2})-([0-9]{2})(?:Z|[+-]([0-9]{2}):([0-9]{2}))?$").unwrap();
     static ref GYEAR_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4,}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref GMONTHDAY_RE: regex::Regex = regex::Regex::new(r"^--[0-9]{2}-[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref GDAY_RE: regex::Regex = regex::Regex::new(r"^---[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref GMONTH_RE: regex::Regex = regex::Regex::new(r"^--[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
     static ref HEX_RE: regex::Regex = regex::Regex::new(r"^([0-9a-fA-F]{2})*$").unwrap();
     static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^[A-Za-z0-9+/]*={0,2}$").unwrap();
+}
+
+fn capture_num(caps: &regex::Captures, i: usize) -> Option<u32> {
+    caps.get(i).map(|m| m.as_str().parse().unwrap())
+}
+
+fn is_valid_year_month_day(caps: &regex::Captures, first: usize) -> bool {
+    let negative = !caps[first].is_empty();
+    let year = &caps[first + 1];
+    // More than four digits must not have leading zeros, and there is no year 0000
+    if (year.len() > 4 && year.starts_with('0')) || year == "0000" {
+        return false;
+    }
+    let month = capture_num(caps, first + 2).unwrap();
+    let day = capture_num(caps, first + 3).unwrap();
+
+    let last4: i32 = year[year.len() - 4..].parse().unwrap();
+    let equivalent_year = if negative { -last4 } else { last4 }.rem_euclid(400);
+    chrono::NaiveDate::from_ymd_opt(equivalent_year, month, day).is_some()
+}
+
+fn is_valid_timezone(caps: &regex::Captures, first: usize) -> bool {
+    match (capture_num(caps, first), capture_num(caps, first + 1)) {
+        (Some(tz_hour), Some(tz_minute)) => {
+            tz_minute < 60 && (tz_hour < 14 || (tz_hour == 14 && tz_minute == 0))
+        }
+        _ => true,
+    }
+}
+
+fn is_valid_date(value: &str) -> bool {
+    DATE_RE
+        .captures(value)
+        .is_some_and(|caps| is_valid_year_month_day(&caps, 1) && is_valid_timezone(&caps, 5))
+}
+
+fn is_valid_datetime(value: &str) -> bool {
+    let Some(caps) = DATETIME_RE.captures(value) else {
+        return false;
+    };
+    if !is_valid_year_month_day(&caps, 1) {
+        return false;
+    }
+    let num = |i| capture_num(&caps, i).unwrap();
+    let (hour, minute, second) = (num(5), num(6), num(7));
+    let fraction_is_zero = caps
+        .get(8)
+        .is_none_or(|f| f.as_str().bytes().all(|b| b == b'0'));
+
+    // Hour 24 is allowed only as 24:00:00, meaning the first instant of the following day.
+    // Seconds may be 60 to allow for leap seconds.
+    let time_ok = if hour == 24 {
+        minute == 0 && second == 0 && fraction_is_zero
+    } else {
+        hour < 24 && minute < 60 && second <= 60
+    };
+    time_ok && is_valid_timezone(&caps, 9)
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -334,14 +391,10 @@ impl super::Datatype for XsdDatatypes {
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Date(patt) => {
-                // chrono's parser is lenient (e.g. it skips Unicode whitespace and accepts
-                // single-digit fields), so check the lexical form first.
-                DATE_RE.is_match(value)
-                    && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+                is_valid_date(value) && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Datetime(patt) => {
-                DATETIME_RE.is_match(value)
+                is_valid_datetime(value)
                     && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
             }
             XsdDatatypes::Time(patt) => {
@@ -2862,13 +2915,147 @@ mod test {
     #[test]
     fn date_lexical_form_is_strict() {
         let dt = compile_no_params("date");
-        assert!(dt.is_valid("2024-01-31"));
-        assert!(dt.is_valid("-0001-01-01"));
-        assert!(!dt.is_valid("2024-02-30"));
-        assert!(!dt.is_valid("2024- 01-31"));
-        assert!(!dt.is_valid("2024-1-31"));
-        assert!(!dt.is_valid("+2024-01-31"));
-        assert!(!dt.is_valid("\u{2003}2024-01-31"));
+        for v in [
+            "2024-01-31",
+            "-0001-01-01",
+            "2024-01-31Z",
+            "2024-01-31+14:00",
+            "2024-01-31-14:00",
+            "2024-01-31-05:30",
+            "12345-01-01",
+            "99999999999-12-31",
+            "2024-02-29",
+            "2000-02-29",
+            "-0004-02-29",
+            "10000-02-29",
+        ] {
+            assert!(dt.is_valid(v), "{v:?}");
+        }
+        for v in [
+            "2024-02-30",
+            "2024- 01-31",
+            "2024-1-31",
+            "024-01-31",
+            "+2024-01-31",
+            "\u{2003}2024-01-31",
+            "0000-01-01",
+            "-0000-01-01",
+            "012345-01-01",
+            "2024-00-01",
+            "2024-13-01",
+            "2024-01-00",
+            "2024-04-31",
+            "2023-02-29",
+            "1900-02-29",
+            "1500-02-29",
+            "-0001-02-29",
+            "12100-02-29",
+            "2024-01-31T00:00:00",
+            "2024-01-31Z+01:00",
+            "2024-01-31+0100",
+            "2024-01-31+14:01",
+            "2024-01-31+15:00",
+            "2024-01-31+01:60",
+        ] {
+            assert!(!dt.is_valid(v), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn datetime_lexical_form() {
+        let dt = compile_no_params("dateTime");
+        for v in [
+            "2024-01-01T00:00:00",
+            "2024-01-01T00:00:00Z",
+            "2024-01-01T00:00:00+01:00",
+            "2024-01-01T00:00:00-00:30",
+            "2024-01-01T00:00:00.5",
+            "2024-01-01T00:00:00.123456789012Z",
+            "-0001-01-01T00:00:00",
+            "12345-01-01T00:00:00",
+            "99999999999-12-31T23:59:59",
+        ] {
+            assert!(dt.is_valid(v), "{v:?}");
+        }
+        for v in [
+            "2024-01-01",
+            "2024-1-01T00:00:00",
+            "024-01-01T00:00:00",
+            "+2024-01-01T00:00:00",
+            "012345-01-01T00:00:00",
+            "0000-01-01T00:00:00",
+            "-0000-01-01T00:00:00",
+            "2024-01-01T00:00",
+            "2024-01-01T00:00:00.",
+            "2024-01-01T00:00:00Z+01:00",
+            "2024-01-01T00:00:00+0100",
+            "2024-01-01t00:00:00",
+        ] {
+            assert!(!dt.is_valid(v), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn datetime_date_must_exist() {
+        let dt = compile_no_params("dateTime");
+        for v in [
+            "2024-01-31T00:00:00",
+            "2024-04-30T00:00:00",
+            "2024-02-29T00:00:00",
+            "2000-02-29T00:00:00",
+            "1500-03-01T00:00:00",
+            "-0004-02-29T00:00:00",
+            "10000-02-29T00:00:00",
+            "12004-02-29T00:00:00",
+        ] {
+            assert!(dt.is_valid(v), "{v:?}");
+        }
+        for v in [
+            "2024-00-01T00:00:00",
+            "2024-13-01T00:00:00",
+            "2024-01-00T00:00:00",
+            "2024-01-32T00:00:00",
+            "2024-04-31T00:00:00",
+            "2023-02-29T00:00:00",
+            "1900-02-29T00:00:00",
+            // proleptic Gregorian, not Julian
+            "1500-02-29T00:00:00",
+            // XSD 1.0 applies the leap year rule to the year number as written
+            "-0001-02-29T00:00:00",
+            "-0005-02-29T00:00:00",
+            "12100-02-29T00:00:00",
+        ] {
+            assert!(!dt.is_valid(v), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn datetime_time_and_timezone_ranges() {
+        let dt = compile_no_params("dateTime");
+        for v in [
+            "2024-01-01T23:59:59.999",
+            "2024-01-01T24:00:00",
+            "2024-01-01T24:00:00.000",
+            "2024-12-31T23:59:60",
+            "2024-01-01T00:00:00+14:00",
+            "2024-01-01T00:00:00-14:00",
+            "2024-01-01T00:00:00-13:59",
+        ] {
+            assert!(dt.is_valid(v), "{v:?}");
+        }
+        for v in [
+            "2024-01-01T25:00:00",
+            "2024-01-01T24:00:01",
+            "2024-01-01T24:01:00",
+            "2024-01-01T24:00:00.1",
+            "2024-01-01T23:60:00",
+            "2024-01-01T23:59:61",
+            "2024-01-01T00:00:00+14:01",
+            "2024-01-01T00:00:00+15:00",
+            "2024-01-01T00:00:00+01:60",
+        ] {
+            assert!(!dt.is_valid(v), "{v:?}");
+        }
     }
 
     #[test]

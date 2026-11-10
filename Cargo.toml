@@ -29,7 +29,6 @@ regex = "1.11.1"
 num-bigint = "0.4.6"
 bigdecimal = "0.4.8"
 lazy_static = "1.5.0"
-chrono = "0.4.19"
 uriparse = "0.6.3"
 
 # validator

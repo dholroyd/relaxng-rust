@@ -6,6 +6,7 @@ use crate::xml_whitespace::{
     collapse_xml_whitespace, is_xml_whitespace, split_xml_whitespace, trim_xml_whitespace,
 };
 use lazy_static::lazy_static;
+use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
@@ -112,76 +113,404 @@ impl super::Datatype for XsdDatatypeValues {
     }
 }
 
+/// A value in the value space of an XSD datatype: two lexical forms of a datatype represent the
+/// same value exactly when their `XsdValue`s are equal.
+///
+/// Equality follows Jing:
+///
+///  - numbers compare numerically, with float/double `-0` equal to `0` and `NaN` equal to itself
+///  - durations compare field by field, so `P1D` is not equal to `PT24H`
+///  - date/time values compare as points on the timeline, normalized to UTC when they have a
+///    timezone; a value with a timezone never equals one without. `time` values do not wrap
+///    around midnight, so `00:00:00Z` is not equal to `23:00:00-01:00`
+///  - `language` and `anyURI` compare as strings, case-sensitively
+///
+/// Values borrow from the text they were parsed from where they can, so that checking a value is
+/// valid doesn't allocate.
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub(crate) enum XsdValue<'a> {
+    /// Types whose value space is a string, after whitespace normalization. For `QName` this is
+    /// the lexical form, since its value depends on namespace bindings; see [`QNameVal`].
+    String(Cow<'a, str>),
+    /// `NMTOKENS`, `IDREFS` and `ENTITIES`
+    List(Vec<Cow<'a, str>>),
+    /// `integer` and all types derived from it
+    Integer(XsdInteger),
+    /// Normalized, so that `1.0` and `1` are the same value
+    Decimal(bigdecimal::BigDecimal),
+    /// The bits of the value, with `-0` stored as `0` and every `NaN` as the same `NaN`
+    Float(u32),
+    Double(u64),
+    Boolean(bool),
+    /// `hexBinary` and `base64Binary`
+    Binary(Vec<u8>),
+    Duration(Box<Duration>),
+    /// date and time types
+    Instant(Instant<'a>),
+}
+
+impl XsdValue<'_> {
+    fn into_owned(self) -> XsdValue<'static> {
+        fn owned(s: Cow<'_, str>) -> Cow<'static, str> {
+            Cow::Owned(s.into_owned())
+        }
+        match self {
+            XsdValue::String(s) => XsdValue::String(owned(s)),
+            XsdValue::List(l) => XsdValue::List(l.into_iter().map(owned).collect()),
+            XsdValue::Integer(v) => XsdValue::Integer(v),
+            XsdValue::Decimal(v) => XsdValue::Decimal(v),
+            XsdValue::Float(v) => XsdValue::Float(v),
+            XsdValue::Double(v) => XsdValue::Double(v),
+            XsdValue::Boolean(v) => XsdValue::Boolean(v),
+            XsdValue::Binary(v) => XsdValue::Binary(v),
+            XsdValue::Duration(v) => XsdValue::Duration(v),
+            XsdValue::Instant(Instant {
+                has_timezone,
+                year,
+                second,
+                fraction,
+            }) => XsdValue::Instant(Instant {
+                has_timezone,
+                year,
+                second,
+                fraction: owned(fraction),
+            }),
+        }
+    }
+}
+
+/// An integer of any size, held without allocating when it fits in an `i64`
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub(crate) enum XsdInteger {
+    Small(i64),
+    /// Only used for values that don't fit in an `i64`, so that each value has one representation
+    Big(num_bigint::BigInt),
+}
+impl XsdInteger {
+    /// The `xsd:integer` lexical space: an optional sign, then one or more ASCII digits
+    fn parse(s: &str) -> Option<Self> {
+        let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        // `i64::from_str` fails only on overflow here, since the syntax has been checked
+        Some(match i64::from_str(s) {
+            Ok(v) => XsdInteger::Small(v),
+            Err(_) => XsdInteger::Big(
+                num_bigint::BigInt::from_str(s.strip_prefix('+').unwrap_or(s)).ok()?,
+            ),
+        })
+    }
+
+    fn from_bigint(v: num_bigint::BigInt) -> Self {
+        match i64::try_from(&v) {
+            Ok(small) => XsdInteger::Small(small),
+            Err(_) => XsdInteger::Big(v),
+        }
+    }
+
+    fn from_i128(v: i128) -> Self {
+        match i64::try_from(v) {
+            Ok(small) => XsdInteger::Small(small),
+            Err(_) => XsdInteger::Big(v.into()),
+        }
+    }
+
+    fn to_bigint(&self) -> num_bigint::BigInt {
+        match self {
+            XsdInteger::Small(v) => (*v).into(),
+            XsdInteger::Big(v) => v.clone(),
+        }
+    }
+
+    /// The year after (or before) this one. There is no year zero in XSD 1.0.
+    fn step_year(&self, forward: bool) -> Self {
+        let delta = if forward { 1 } else { -1 };
+        if let XsdInteger::Small(v) = self
+            && let Some(next) = v.checked_add(delta)
+        {
+            return XsdInteger::Small(if next == 0 { delta } else { next });
+        }
+        XsdInteger::from_bigint(self.to_bigint() + delta)
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub(crate) struct Duration {
+    negative: bool,
+    years: XsdInteger,
+    months: XsdInteger,
+    days: XsdInteger,
+    hours: XsdInteger,
+    minutes: XsdInteger,
+    /// Normalized, so that `1.0` and `1` are the same value
+    seconds: bigdecimal::BigDecimal,
+}
+
+/// A point on the timeline. Fields missing from the lexical form take the values of
+/// `2000-01-01T00:00:00`, so that `--02-29` is a valid `gMonthDay`. When there is a timezone the
+/// point is normalized to UTC.
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub(crate) struct Instant<'a> {
+    has_timezone: bool,
+    year: XsdInteger,
+    /// Whole seconds since the start of `year`
+    second: i64,
+    /// Digits of the fractional second, without trailing zeros
+    fraction: Cow<'a, str>,
+}
+
 lazy_static! {
     static ref LANG_RE: regex::Regex = regex::Regex::new(r"^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$").unwrap();
-    static ref DATETIME_RE: regex::Regex = regex::Regex::new(r"^(-?)([0-9]{4,})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?(?:Z|[+-]([0-9]{2}):([0-9]{2}))?$").unwrap();
-    static ref DURATION_RE: regex::Regex = regex::Regex::new(r"^P(([0-9]+([.,][0-9]*)?Y)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?D)?T?([0-9]+([.,][0-9]*)?H)?([0-9]+([.,][0-9]*)?M)?([0-9]+([.,][0-9]*)?S)?)|[0-9]{4}-?(0[1-9]|11|12)-?(?:[0-2][0-9]|30|31)T((?:[0-1][0-9]|[2][0-3]):?(?:[0-5][0-9]):?(?:[0-5][0-9]|60)|2400|24:00)$").unwrap();
-    static ref TIME_RE: regex::Regex = regex::Regex::new(r"^[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
-    static ref GYEARMONTH_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4,}-[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
-    static ref DATE_RE: regex::Regex = regex::Regex::new(r"^(-?)([0-9]{4,})-([0-9]{2})-([0-9]{2})(?:Z|[+-]([0-9]{2}):([0-9]{2}))?$").unwrap();
-    static ref GYEAR_RE: regex::Regex = regex::Regex::new(r"^-?[0-9]{4,}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
-    static ref GMONTHDAY_RE: regex::Regex = regex::Regex::new(r"^--[0-9]{2}-[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
-    static ref GDAY_RE: regex::Regex = regex::Regex::new(r"^---[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
-    static ref GMONTH_RE: regex::Regex = regex::Regex::new(r"^--[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})?$").unwrap();
-    static ref HEX_RE: regex::Regex = regex::Regex::new(r"^([0-9a-fA-F]{2})*$").unwrap();
+    static ref DECIMAL_RE: regex::Regex =
+        regex::Regex::new(r"^([+-]?)([0-9]*)(?:\.([0-9]*))?$").unwrap();
     static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=|[A-Za-z0-9+/][AQgw]==)?$").unwrap();
+    static ref DURATION_RE: regex::Regex = regex::Regex::new(
+        r"^(-)?P(?:([0-9]+)Y)?(?:([0-9]+)M)?(?:([0-9]+)D)?(?:T(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+(?:\.[0-9]*)?|\.[0-9]+)S)?)?$"
+    )
+    .unwrap();
+    static ref DATETIME_RE: regex::Regex =
+        date_time_regex(&format!("{YEAR}-(?P<mo>[0-9]{{2}})-(?P<d>[0-9]{{2}})T{TIME}"));
+    static ref DATE_RE: regex::Regex =
+        date_time_regex(&format!("{YEAR}-(?P<mo>[0-9]{{2}})-(?P<d>[0-9]{{2}})"));
+    static ref TIME_RE: regex::Regex = date_time_regex(TIME);
+    static ref GYEARMONTH_RE: regex::Regex =
+        date_time_regex(&format!("{YEAR}-(?P<mo>[0-9]{{2}})"));
+    static ref GYEAR_RE: regex::Regex = date_time_regex(YEAR);
+    static ref GMONTHDAY_RE: regex::Regex =
+        date_time_regex("--(?P<mo>[0-9]{2})-(?P<d>[0-9]{2})");
+    static ref GDAY_RE: regex::Regex = date_time_regex("---(?P<d>[0-9]{2})");
+    static ref GMONTH_RE: regex::Regex = date_time_regex("--(?P<mo>[0-9]{2})");
 }
 
-fn capture_num(caps: &regex::Captures, i: usize) -> Option<u32> {
-    caps.get(i).map(|m| m.as_str().parse().unwrap())
+// Building blocks of the date and time regexes. These use only the ASCII digits: the regex
+// crate's `\d` matches every Unicode decimal digit.
+const YEAR: &str = r"(?P<y>-?[0-9]{4,})";
+const TIME: &str = r"(?P<h>[0-9]{2}):(?P<mi>[0-9]{2}):(?P<s>[0-9]{2})(?:\.(?P<f>[0-9]+))?";
+const TIMEZONE: &str = r"(?P<tz>Z|[+-][0-9]{2}:[0-9]{2})?";
+
+fn date_time_regex(body: &str) -> regex::Regex {
+    regex::Regex::new(&format!("^{body}{TIMEZONE}$")).unwrap()
 }
 
-fn is_valid_year_month_day(caps: &regex::Captures, first: usize) -> bool {
-    let negative = !caps[first].is_empty();
-    let year = &caps[first + 1];
-    // More than four digits must not have leading zeros, and there is no year 0000
-    if (year.len() > 4 && year.starts_with('0')) || year == "0000" {
-        return false;
+/// The `xsd:decimal` lexical space, without normalizing, so that `1.50` has a scale of 2
+fn parse_decimal(s: &str) -> Option<bigdecimal::BigDecimal> {
+    let caps = DECIMAL_RE.captures(s)?;
+    let int = caps.get(2).map_or("", |m| m.as_str());
+    let frac = caps.get(3).map_or("", |m| m.as_str());
+    if int.is_empty() && frac.is_empty() {
+        return None;
     }
-    let month = capture_num(caps, first + 2).unwrap();
-    let day = capture_num(caps, first + 3).unwrap();
-
-    let last4: i32 = year[year.len() - 4..].parse().unwrap();
-    let equivalent_year = if negative { -last4 } else { last4 }.rem_euclid(400);
-    chrono::NaiveDate::from_ymd_opt(equivalent_year, month, day).is_some()
+    let digits = num_bigint::BigInt::from_str(&format!("{}0{int}{frac}", &caps[1])).ok()?;
+    Some(bigdecimal::BigDecimal::new(
+        digits,
+        i64::try_from(frac.len()).ok()?,
+    ))
 }
 
-fn is_valid_timezone(caps: &regex::Captures, first: usize) -> bool {
-    match (capture_num(caps, first), capture_num(caps, first + 1)) {
-        (Some(tz_hour), Some(tz_minute)) => {
-            tz_minute < 60 && (tz_hour < 14 || (tz_hour == 14 && tz_minute == 0))
+fn parse_hex(s: &str) -> Option<Vec<u8>> {
+    fn nibble(b: u8) -> Option<u8> {
+        (b as char).to_digit(16).map(|d| d as u8)
+    }
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    bytes
+        .chunks(2)
+        .map(|pair| Some(nibble(pair[0])? << 4 | nibble(pair[1])?))
+        .collect()
+}
+
+fn parse_base64(s: &str) -> Option<Vec<u8>> {
+    let stripped: String = s.chars().filter(|&c| !is_xml_whitespace(c)).collect();
+    if !BASE64_RE.is_match(&stripped) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(stripped.len() * 3 / 4);
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for c in stripped.bytes().take_while(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            _ => 63, // '/', as the regex allows nothing else
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
         }
-        _ => true,
     }
+    Some(out)
 }
 
-fn is_valid_date(value: &str) -> bool {
-    DATE_RE
-        .captures(value)
-        .is_some_and(|caps| is_valid_year_month_day(&caps, 1) && is_valid_timezone(&caps, 5))
-}
-
-fn is_valid_datetime(value: &str) -> bool {
-    let Some(caps) = DATETIME_RE.captures(value) else {
-        return false;
+fn parse_duration(s: &str) -> Option<Duration> {
+    // The regex allows every field to be absent, and allows a `T` with no time fields after it
+    if s.ends_with('P') || s.ends_with('T') {
+        return None;
+    }
+    let caps = DURATION_RE.captures(s)?;
+    let int = |i| match caps.get(i) {
+        Some(m) => XsdInteger::parse(m.as_str()),
+        None => Some(XsdInteger::Small(0)),
     };
-    if !is_valid_year_month_day(&caps, 1) {
-        return false;
+    let seconds = match caps.get(7) {
+        Some(m) => parse_decimal(m.as_str())?.normalized(),
+        None => bigdecimal::BigDecimal::from(0),
+    };
+    let mut d = Duration {
+        negative: caps.get(1).is_some(),
+        years: int(2)?,
+        months: int(3)?,
+        days: int(4)?,
+        hours: int(5)?,
+        minutes: int(6)?,
+        seconds,
+    };
+    let zero = XsdInteger::Small(0);
+    if [&d.years, &d.months, &d.days, &d.hours, &d.minutes]
+        .iter()
+        .all(|v| **v == zero)
+        && d.seconds == 0
+    {
+        d.negative = false;
     }
-    let num = |i| capture_num(&caps, i).unwrap();
-    let (hour, minute, second) = (num(5), num(6), num(7));
-    let fraction_is_zero = caps
-        .get(8)
-        .is_none_or(|f| f.as_str().bytes().all(|b| b == b'0'));
+    Some(d)
+}
 
+const REFERENCE_YEAR: i64 = 2000;
+const DAYS_BEFORE_MONTH: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+
+/// The proleptic Gregorian rule, applied to negative years by their position in the 400 year
+/// cycle, so that -0001 is not a leap year
+fn is_leap_year(year: &XsdInteger) -> bool {
+    let y = match year {
+        XsdInteger::Small(v) => v.rem_euclid(400),
+        XsdInteger::Big(v) => i64::try_from(v % 400).unwrap().rem_euclid(400),
+    };
+    y % 4 == 0 && (y % 100 != 0 || y == 0)
+}
+
+fn days_in_month(month: i64, leap: bool) -> i64 {
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn seconds_in_year(year: &XsdInteger) -> i64 {
+    (if is_leap_year(year) { 366 } else { 365 }) * SECONDS_PER_DAY
+}
+
+/// The offset from UTC in minutes
+fn parse_timezone(tz: &str) -> Option<i64> {
+    if tz == "Z" {
+        return Some(0);
+    }
+    let hours: i64 = tz[1..3].parse().ok()?;
+    let minutes: i64 = tz[4..6].parse().ok()?;
+    if minutes >= 60 || hours > 14 || (hours == 14 && minutes > 0) {
+        return None;
+    }
+    let offset = hours * 60 + minutes;
+    Some(if tz.starts_with('-') { -offset } else { offset })
+}
+
+fn parse_instant<'a>(re: &regex::Regex, s: &'a str) -> Option<Instant<'a>> {
+    let caps = re.captures(s)?;
+    // Every numeric group except the year is exactly two ASCII digits
+    let num = |name, default: i64| {
+        caps.name(name)
+            .map_or(Some(default), |m| m.as_str().parse().ok())
+    };
+    let mut year = match caps.name("y") {
+        Some(m) => {
+            let digits = m.as_str().trim_start_matches('-');
+            // More than four digits must not have leading zeros, and there is no year 0000
+            if (digits.len() > 4 && digits.starts_with('0')) || digits == "0000" {
+                return None;
+            }
+            XsdInteger::parse(m.as_str())?
+        }
+        None => XsdInteger::Small(REFERENCE_YEAR),
+    };
+    let month = num("mo", 1)?;
+    let day = num("d", 1)?;
+    let hour = num("h", 0)?;
+    let minute = num("mi", 0)?;
+    let second = num("s", 0)?;
+    let fraction = caps
+        .name("f")
+        .map_or("", |m| m.as_str().trim_end_matches('0'));
+    let timezone = match caps.name("tz") {
+        Some(m) => Some(parse_timezone(m.as_str())?),
+        None => None,
+    };
+
+    let leap = is_leap_year(&year);
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(month, leap) {
+        return None;
+    }
     // Hour 24 is allowed only as 24:00:00, meaning the first instant of the following day.
     // Seconds may be 60 to allow for leap seconds.
     let time_ok = if hour == 24 {
-        minute == 0 && second == 0 && fraction_is_zero
+        minute == 0 && second == 0 && fraction.is_empty()
     } else {
         hour < 24 && minute < 60 && second <= 60
     };
-    time_ok && is_valid_timezone(&caps, 9)
+    if !time_ok {
+        return None;
+    }
+
+    let day_of_year =
+        DAYS_BEFORE_MONTH[month as usize - 1] + i64::from(leap && month > 2) + day - 1;
+    let mut second = day_of_year * SECONDS_PER_DAY + hour * 3600 + minute * 60 + second
+        - timezone.unwrap_or(0) * 60;
+    // the timezone adjustment, 24:00:00 and leap seconds can move the instant into the year
+    // before or after
+    while second < 0 {
+        year = year.step_year(false);
+        second += seconds_in_year(&year);
+    }
+    while second >= seconds_in_year(&year) {
+        second -= seconds_in_year(&year);
+        year = year.step_year(true);
+    }
+
+    Some(Instant {
+        has_timezone: timezone.is_some(),
+        year,
+        second,
+        fraction: Cow::Borrowed(fraction),
+    })
+}
+
+fn float_bits(v: f32) -> u32 {
+    if v.is_nan() {
+        f32::NAN.to_bits()
+    } else if v == 0.0 {
+        0
+    } else {
+        v.to_bits()
+    }
+}
+
+fn double_bits(v: f64) -> u64 {
+    if v.is_nan() {
+        f64::NAN.to_bits()
+    } else if v == 0.0 {
+        0
+    } else {
+        v.to_bits()
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -256,249 +585,222 @@ impl XsdDatatypes {
         }
     }
 }
-impl super::Datatype for XsdDatatypes {
-    fn is_valid(&self, value: &str) -> bool {
+impl XsdDatatypes {
+    /// The value that `text` represents in this datatype's value space, or `None` if `text` is
+    /// not a valid lexical form of the datatype or the value is not allowed by its facets.
+    pub(crate) fn parse_value<'a>(&self, text: &'a str) -> Option<XsdValue<'a>> {
         // The whiteSpace facet is applied before anything else, so the lexical checks and the
-        // pattern / length facets below all see the normalized value.  `string` preserves
-        // whitespace and every other type collapses it.
+        // pattern / length facets all see the normalized value.
         let normalized = match self {
-            XsdDatatypes::String(_) => std::borrow::Cow::Borrowed(value),
-            _ => collapse_xml_whitespace(value),
+            XsdDatatypes::String(_) => Cow::Borrowed(text),
+            _ => collapse_xml_whitespace(text),
         };
-        let value: &str = &normalized;
+        match normalized {
+            Cow::Borrowed(s) => self.parse_normalized(s),
+            Cow::Owned(s) => self.parse_normalized(&s).map(XsdValue::into_owned),
+        }
+    }
+
+    fn pattern(&self) -> Option<&PatternFacet> {
         match self {
-            XsdDatatypes::NormalizedString(str_facets) => str_facets.is_valid(value),
-            XsdDatatypes::String(str_facets) => str_facets.is_valid(value),
-            XsdDatatypes::Byte(min_max, patt) => {
-                i8::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            XsdDatatypes::NormalizedString(f)
+            | XsdDatatypes::String(f)
+            | XsdDatatypes::NmToken(f)
+            | XsdDatatypes::NcName(f)
+            | XsdDatatypes::QName(f)
+            | XsdDatatypes::Name(f)
+            | XsdDatatypes::Token(f)
+            | XsdDatatypes::AnyURI(f)
+            | XsdDatatypes::Language(f)
+            | XsdDatatypes::Id(f)
+            | XsdDatatypes::IdRef(f)
+            | XsdDatatypes::Entity(f) => f.pattern.as_ref(),
+            XsdDatatypes::Byte(_, p)
+            | XsdDatatypes::Short(_, p)
+            | XsdDatatypes::UnsignedByte(_, p)
+            | XsdDatatypes::UnsignedShort(_, p)
+            | XsdDatatypes::Long(_, p)
+            | XsdDatatypes::Int(_, p)
+            | XsdDatatypes::Integer(_, p)
+            | XsdDatatypes::PositiveInteger(_, p)
+            | XsdDatatypes::NonNegativeInteger(_, p)
+            | XsdDatatypes::NonPositiveInteger(_, p)
+            | XsdDatatypes::NegativeInteger(_, p)
+            | XsdDatatypes::UnsignedInt(_, p)
+            | XsdDatatypes::UnsignedLong(_, p)
+            | XsdDatatypes::Float(_, p)
+            | XsdDatatypes::Double(_, p)
+            | XsdDatatypes::NmTokens(_, p)
+            | XsdDatatypes::HexBinary(_, p)
+            | XsdDatatypes::Base64Binary(_, p)
+            | XsdDatatypes::IdRefs(_, p)
+            | XsdDatatypes::Entities(_, p)
+            | XsdDatatypes::Decimal { pattern: p, .. }
+            | XsdDatatypes::Duration(p)
+            | XsdDatatypes::Date(p)
+            | XsdDatatypes::Datetime(p)
+            | XsdDatatypes::Time(p)
+            | XsdDatatypes::GYearMonth(p)
+            | XsdDatatypes::GYear(p)
+            | XsdDatatypes::GMonthDay(p)
+            | XsdDatatypes::GDay(p)
+            | XsdDatatypes::GMonth(p)
+            | XsdDatatypes::Boolean(p) => p.as_ref(),
+        }
+    }
+
+    /// Parse whitespace-normalized text: check it is in the lexical space, convert it to a value,
+    /// and check the value against the datatype's own range and its facets.
+    fn parse_normalized<'a>(&self, s: &'a str) -> Option<XsdValue<'a>> {
+        fn string<'a>(s: &'a str, valid: bool, facets: &StringFacets) -> Option<XsdValue<'a>> {
+            (valid && facets.len.is_valid(s)).then_some(XsdValue::String(Cow::Borrowed(s)))
+        }
+        fn list<'a>(
+            s: &'a str,
+            item_valid: fn(&str) -> bool,
+            len: &LengthFacet,
+        ) -> Option<XsdValue<'a>> {
+            let items: Vec<Cow<'a, str>> = split_xml_whitespace(s).map(Cow::Borrowed).collect();
+            (!items.is_empty()
+                && items.iter().all(|i| item_valid(i))
+                && len.is_valid_count(items.len()))
+            .then_some(XsdValue::List(items))
+        }
+        /// A fixed-size integer type, whose range comes from `T`
+        fn sized<'a, T>(s: &str, min_max: &MinMaxFacet<T>) -> Option<XsdValue<'a>>
+        where
+            T: PartialOrd + FromStr + Into<i128>,
+        {
+            let v = T::from_str(s).ok()?;
+            min_max
+                .is_valid(&v)
+                .then(|| XsdValue::Integer(XsdInteger::from_i128(v.into())))
+        }
+        /// An unbounded integer type, whose range is checked by `in_range`
+        fn unbounded<'a, T>(
+            s: &str,
+            min_max: &MinMaxFacet<T>,
+            in_range: impl FnOnce(&T) -> bool,
+        ) -> Option<XsdValue<'a>>
+        where
+            T: PartialOrd + FromStr + Into<num_bigint::BigInt>,
+        {
+            let v = T::from_str(s).ok()?;
+            (in_range(&v) && min_max.is_valid(&v))
+                .then(|| XsdValue::Integer(XsdInteger::from_bigint(v.into())))
+        }
+        use num_bigint::{BigInt, BigUint};
+
+        if self.pattern().is_some_and(|p| !p.is_valid(s)) {
+            return None;
+        }
+        match self {
+            XsdDatatypes::String(f)
+            | XsdDatatypes::NormalizedString(f)
+            | XsdDatatypes::Token(f) => string(s, true, f),
+            XsdDatatypes::Language(f) => string(s, LANG_RE.is_match(s), f),
+            XsdDatatypes::NmToken(f) => string(s, is_valid_nmtoken(s), f),
+            XsdDatatypes::Name(f) => string(s, is_valid_name(s), f),
+            XsdDatatypes::NcName(f)
+            | XsdDatatypes::Id(f)
+            | XsdDatatypes::IdRef(f)
+            | XsdDatatypes::Entity(f) => string(s, is_valid_ncname(s), f),
+            XsdDatatypes::QName(f) => string(s, parse_qname(s).is_some(), f),
+            XsdDatatypes::AnyURI(f) => string(s, is_valid_any_uri(s), f),
+            XsdDatatypes::NmTokens(len, _) => list(s, is_valid_nmtoken, len),
+            XsdDatatypes::IdRefs(len, _) | XsdDatatypes::Entities(len, _) => {
+                list(s, is_valid_ncname, len)
             }
-            XsdDatatypes::Short(min_max, patt) => {
-                i16::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            XsdDatatypes::Byte(min_max, _) => sized(s, min_max),
+            XsdDatatypes::Short(min_max, _) => sized(s, min_max),
+            XsdDatatypes::Int(min_max, _) => sized(s, min_max),
+            XsdDatatypes::Long(min_max, _) => sized(s, min_max),
+            XsdDatatypes::UnsignedByte(min_max, _) => sized(s, min_max),
+            XsdDatatypes::UnsignedShort(min_max, _) => sized(s, min_max),
+            XsdDatatypes::UnsignedInt(min_max, _) => sized(s, min_max),
+            XsdDatatypes::UnsignedLong(min_max, _) => sized(s, min_max),
+            XsdDatatypes::Integer(min_max, _) => unbounded::<BigInt>(s, min_max, |_| true),
+            XsdDatatypes::NonPositiveInteger(min_max, _) => {
+                unbounded::<BigInt>(s, min_max, |v| *v <= BigInt::ZERO)
             }
-            XsdDatatypes::UnsignedByte(min_max, patt) => {
-                u8::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            XsdDatatypes::NegativeInteger(min_max, _) => {
+                unbounded::<BigInt>(s, min_max, |v| *v < BigInt::ZERO)
             }
-            XsdDatatypes::UnsignedShort(min_max, patt) => {
-                u16::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            XsdDatatypes::NonNegativeInteger(min_max, _) => {
+                unbounded::<BigUint>(s, min_max, |_| true)
             }
-            XsdDatatypes::Long(min_max, patt) => {
-                i64::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::Int(min_max, patt) => {
-                i32::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::Integer(min_max, patt) => {
-                num_bigint::BigInt::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::PositiveInteger(min_max, patt) => {
-                num_bigint::BigUint::from_str(value)
-                    .ok()
-                    .is_some_and(|v| v != num_bigint::BigUint::ZERO && min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::NonNegativeInteger(min_max, patt) => {
-                num_bigint::BigUint::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::NonPositiveInteger(min_max, patt) => {
-                num_bigint::BigInt::from_str(value)
-                    .ok()
-                    .is_some_and(|v| v <= num_bigint::BigInt::from(0) && min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::NegativeInteger(min_max, patt) => {
-                num_bigint::BigInt::from_str(value)
-                    .ok()
-                    .is_some_and(|v| v < num_bigint::BigInt::from(0) && min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            XsdDatatypes::PositiveInteger(min_max, _) => {
+                unbounded::<BigUint>(s, min_max, |v| *v != BigUint::ZERO)
             }
             XsdDatatypes::Decimal {
                 min_max,
-                pattern: pat,
+                pattern: _,
                 fraction_digits,
                 total_digits,
             } => {
-                bigdecimal::BigDecimal::from_str(value)
-                    .ok()
-                    .is_some_and(|v| {
-                        if !min_max.is_valid(&v) {
-                            return false;
-                        }
-                        if let Some(td) = total_digits {
-                            // totalDigits counts significant digits (ignoring sign, decimal point, leading zeros)
-                            let stripped = value.trim_start_matches('-').trim_start_matches('0');
-                            let sig_digits: usize =
-                                stripped.chars().filter(|c| c.is_ascii_digit()).count();
-                            let sig_digits = if sig_digits == 0 { 1 } else { sig_digits };
-                            if sig_digits > *td as usize {
-                                return false;
-                            }
-                        }
-                        if let Some(fd) = fraction_digits {
-                            let (_digits, scale) = v.as_bigint_and_exponent();
-                            let actual_frac = if scale > 0 { scale as usize } else { 0 };
-                            if actual_frac > *fd as usize {
-                                return false;
-                            }
-                        }
-                        true
-                    })
-                    && pat.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::NmTokens(len, patt) => {
-                let tokens: Vec<&str> = split_xml_whitespace(value).collect();
-                !tokens.is_empty()
-                    && tokens.iter().all(|t| is_valid_nmtoken(t))
-                    && len.is_valid_count(tokens.len())
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::NmToken(str_facets) => {
-                is_valid_nmtoken(value) && str_facets.is_valid(value)
-            }
-            XsdDatatypes::NcName(str_facets) => {
-                is_valid_ncname(value) && str_facets.is_valid(value)
-            }
-            XsdDatatypes::QName(str_facets) => {
-                parse_qname(value).is_some() && str_facets.is_valid(value)
-            }
-            XsdDatatypes::Name(str_facets) => is_valid_name(value) && str_facets.is_valid(value),
-            XsdDatatypes::Token(str_facets) => str_facets.is_valid(value),
-            XsdDatatypes::Duration(patt) => {
-                DURATION_RE.is_match(value)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::Date(patt) => {
-                is_valid_date(value) && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::Datetime(patt) => {
-                is_valid_datetime(value)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::Time(patt) => {
-                TIME_RE.is_match(value)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::GYearMonth(patt) => {
-                GYEARMONTH_RE.is_match(value)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::GYear(patt) => {
-                GYEAR_RE.is_match(value)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::GMonthDay(patt) => {
-                GMONTHDAY_RE.is_match(value)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::GDay(patt) => {
-                GDAY_RE.is_match(value)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::GMonth(patt) => {
-                GMONTH_RE.is_match(value)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::HexBinary(len, patt) => {
-                HEX_RE.is_match(value)
-                    && len.is_valid_count(value.len() / 2)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::Base64Binary(len, patt) => {
-                let stripped: std::string::String =
-                    value.chars().filter(|&c| !is_xml_whitespace(c)).collect();
-                if !BASE64_RE.is_match(&stripped) {
-                    return false;
+                let v = bigdecimal::BigDecimal::from_str(s).ok()?;
+                if !min_max.is_valid(&v) {
+                    return None;
                 }
-                // Count decoded bytes: each 4 base64 chars = 3 bytes, minus padding
-                let padding = stripped.chars().rev().take_while(|&c| c == '=').count();
-                let data_chars = stripped.len() - padding;
-                let decoded_len = if stripped.is_empty() {
-                    0
-                } else {
-                    (data_chars * 3) / 4
-                };
-                len.is_valid_count(decoded_len)
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+                if let Some(td) = total_digits {
+                    // totalDigits counts significant digits (ignoring sign, decimal point, leading zeros)
+                    let stripped = s.trim_start_matches('-').trim_start_matches('0');
+                    let sig_digits = stripped.chars().filter(|c| c.is_ascii_digit()).count();
+                    if sig_digits.max(1) > *td as usize {
+                        return None;
+                    }
+                }
+                if let Some(fd) = fraction_digits {
+                    let (_digits, scale) = v.as_bigint_and_exponent();
+                    if scale > i64::from(*fd) {
+                        return None;
+                    }
+                }
+                Some(XsdValue::Decimal(v.normalized()))
             }
-            XsdDatatypes::Float(min_max, patt) => {
-                value
-                    .parse::<f32>()
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&FiniteF32(v)))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            XsdDatatypes::Float(min_max, _) => {
+                let v: f32 = s.parse().ok()?;
+                min_max
+                    .is_valid(&FiniteF32(v))
+                    .then_some(XsdValue::Float(float_bits(v)))
             }
-            XsdDatatypes::Double(min_max, patt) => {
-                value
-                    .parse::<f64>()
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&FiniteF64(v)))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
+            XsdDatatypes::Double(min_max, _) => {
+                let v: f64 = s.parse().ok()?;
+                min_max
+                    .is_valid(&FiniteF64(v))
+                    .then_some(XsdValue::Double(double_bits(v)))
             }
-            XsdDatatypes::AnyURI(str_facets) => {
-                is_valid_any_uri(value) && str_facets.is_valid(value)
+            XsdDatatypes::Boolean(_) => match s {
+                "true" | "1" => Some(XsdValue::Boolean(true)),
+                "false" | "0" => Some(XsdValue::Boolean(false)),
+                _ => None,
+            },
+            XsdDatatypes::HexBinary(len, _) => {
+                let bytes = parse_hex(s)?;
+                len.is_valid_count(bytes.len())
+                    .then_some(XsdValue::Binary(bytes))
             }
-            XsdDatatypes::Language(str_facets) => {
-                LANG_RE.is_match(value) && str_facets.is_valid(value)
+            XsdDatatypes::Base64Binary(len, _) => {
+                let bytes = parse_base64(s)?;
+                len.is_valid_count(bytes.len())
+                    .then_some(XsdValue::Binary(bytes))
             }
-            XsdDatatypes::Boolean(patt) => {
-                (value == "true" || value == "false" || value == "1" || value == "0")
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::UnsignedInt(min_max, patt) => {
-                u32::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::UnsignedLong(min_max, patt) => {
-                u64::from_str(value)
-                    .ok()
-                    .is_some_and(|v| min_max.is_valid(&v))
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::Id(str_facets) => is_valid_ncname(value) && str_facets.is_valid(value),
-            XsdDatatypes::IdRef(str_facets) => is_valid_ncname(value) && str_facets.is_valid(value),
-            XsdDatatypes::IdRefs(len, patt) => {
-                let tokens: Vec<&str> = split_xml_whitespace(value).collect();
-                !tokens.is_empty()
-                    && tokens.iter().all(|t| is_valid_ncname(t))
-                    && len.is_valid_count(tokens.len())
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
-            XsdDatatypes::Entity(str_facets) => {
-                is_valid_ncname(value) && str_facets.is_valid(value)
-            }
-            XsdDatatypes::Entities(len, patt) => {
-                let tokens: Vec<&str> = split_xml_whitespace(value).collect();
-                !tokens.is_empty()
-                    && tokens.iter().all(|t| is_valid_ncname(t))
-                    && len.is_valid_count(tokens.len())
-                    && patt.as_ref().map(|p| p.1.is_match(value)).unwrap_or(true)
-            }
+            XsdDatatypes::Duration(_) => parse_duration(s).map(|d| XsdValue::Duration(Box::new(d))),
+            XsdDatatypes::Datetime(_) => parse_instant(&DATETIME_RE, s).map(XsdValue::Instant),
+            XsdDatatypes::Date(_) => parse_instant(&DATE_RE, s).map(XsdValue::Instant),
+            XsdDatatypes::Time(_) => parse_instant(&TIME_RE, s).map(XsdValue::Instant),
+            XsdDatatypes::GYearMonth(_) => parse_instant(&GYEARMONTH_RE, s).map(XsdValue::Instant),
+            XsdDatatypes::GYear(_) => parse_instant(&GYEAR_RE, s).map(XsdValue::Instant),
+            XsdDatatypes::GMonthDay(_) => parse_instant(&GMONTHDAY_RE, s).map(XsdValue::Instant),
+            XsdDatatypes::GDay(_) => parse_instant(&GDAY_RE, s).map(XsdValue::Instant),
+            XsdDatatypes::GMonth(_) => parse_instant(&GMONTH_RE, s).map(XsdValue::Instant),
         }
+    }
+}
+
+impl super::Datatype for XsdDatatypes {
+    fn is_valid(&self, value: &str) -> bool {
+        self.parse_value(value).is_some()
     }
 }
 
@@ -558,15 +860,6 @@ pub struct StringFacets {
     pattern: Option<PatternFacet>,
 }
 impl StringFacets {
-    fn is_valid(&self, value: &str) -> bool {
-        self.len.is_valid(value)
-            && if let Some(ref pat) = self.pattern {
-                pat.is_valid(value)
-            } else {
-                true
-            }
-    }
-
     pub fn bounded(&self) -> bool {
         !matches!(self.len, LengthFacet::Unbounded)
     }
@@ -2546,7 +2839,7 @@ mod test {
             ("gMonthDay", "--01-31", "--٠١-٣١"),
             ("gDay", "---31", "---٣١"),
             ("gMonth", "--01", "--٠١"),
-            ("duration", "0001-01-01T10:30:00", "٠٠٠١-٠١-٠١T١٠:٣٠:٠٠"),
+            ("duration", "P2025Y1DT10H30M", "P٢٠٢٥Y١DT١٠H٣٠M"),
         ];
         for (type_name, ascii, non_ascii) in cases {
             let dt = compile_no_params(type_name);
@@ -3178,6 +3471,79 @@ mod test {
             "ENTITIES",
         ] {
             compile_no_params(name);
+        }
+    }
+
+    #[test]
+    fn lexical_spaces_match_jing() {
+        // (type, text, expected validity), checked against Jing
+        let cases = [
+            ("float", "-INF", true),
+            ("float", "1.", true),
+            ("float", ".5", true),
+            ("float", "+1.5E+3", true),
+            ("float", ".", false),
+            ("decimal", "+.5", true),
+            ("decimal", "1.", true),
+            ("decimal", ".", false),
+            ("duration", "-P1D", true),
+            ("duration", "P1Dx", false),
+            ("duration", "P", false),
+            ("duration", "PT", false),
+            ("duration", "P1DT", false),
+            ("duration", "PT1.S", true),
+            ("duration", "PT.5S", true),
+            ("duration", "P1.5D", false),
+            ("duration", "P-1D", false),
+            ("duration", "0001-01-01T10:30:00", false),
+            ("time", "99:00:00", false),
+            ("time", "12:60:00", false),
+            ("time", "23:59:60", true),
+            ("time", "12:00:00+14:01", false),
+            ("gMonthDay", "--02-29", true),
+            ("gMonthDay", "--02-30", false),
+            ("gMonthDay", "--13-01", false),
+            ("gDay", "---31", true),
+            ("gDay", "---32", false),
+            ("gDay", "---00", false),
+            ("gMonth", "--13", false),
+            ("gMonth", "--02--", false),
+            ("gYear", "10000", true),
+            ("gYear", "-0001", true),
+            ("gYear", "0000", false),
+            ("gYear", "-0000", false),
+            ("gYear", "02000", false),
+            ("gYearMonth", "2000-13", false),
+            ("nonNegativeInteger", "+5", true),
+            ("positiveInteger", "+1", true),
+            ("nonPositiveInteger", "+0", true),
+            ("hexBinary", "+a", false),
+        ];
+        for (type_name, text, expected) in cases {
+            assert_eq!(
+                compile_no_params(type_name).is_valid(text),
+                expected,
+                "xsd:{type_name} {text:?}"
+            );
+        }
+
+        // (type, facet, facet value, text, expected validity)
+        let cases = [
+            ("normalizedString", "maxLength", "3", " a\t", true),
+            ("normalizedString", "pattern", "a b", "a\tb", true),
+            ("decimal", "totalDigits", "2", "1.50", false),
+            ("decimal", "totalDigits", "2", "100", false),
+            ("decimal", "fractionDigits", "1", "1.50", false),
+            ("float", "maxInclusive", "1e2", "50", true),
+            ("float", "minInclusive", "0", "NaN", false),
+            ("int", "pattern", "0.*", " 05", true),
+        ];
+        for (type_name, facet, facet_value, text, expected) in cases {
+            assert_eq!(
+                compile_one_param(type_name, facet, facet_value).is_valid(text),
+                expected,
+                "xsd:{type_name} {{ {facet} = {facet_value:?} }} {text:?}"
+            );
         }
     }
 }

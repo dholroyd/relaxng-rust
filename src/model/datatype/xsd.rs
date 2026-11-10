@@ -43,25 +43,49 @@ fn is_valid_any_uri(value: &str) -> bool {
 
 pub(crate) const NAMESPACE_URI: &str = "http://www.w3.org/2001/XMLSchema-datatypes";
 
-/// Wrapper for floats that implements Eq and Hash. Facets hold only non-NaN values, for which
-/// equality is reflexive; values being checked against facets may be NaN.
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-pub struct FiniteF64(f64);
-impl Eq for FiniteF64 {}
-impl std::hash::Hash for FiniteF64 {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
-    }
+/// Defines a wrapper for a `float` or `double` value as the min/max facets see it. `-0` is the
+/// same value as `0`, and `NaN` equals itself but is incomparable with every other value, so
+/// an inclusive `NaN` bound allows only `NaN` and an exclusive one allows nothing (XSD 1.0
+/// §3.2.4). Equality is reflexive, so the wrapper can implement `Eq` and `Hash`.
+macro_rules! xsd_float {
+    ($name:ident, $f:ty) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name($f);
+        impl $name {
+            fn new(v: $f) -> Self {
+                $name(if v == 0.0 {
+                    0.0
+                } else if v.is_nan() {
+                    <$f>::NAN
+                } else {
+                    v
+                })
+            }
+        }
+        impl PartialEq for $name {
+            fn eq(&self, other: &Self) -> bool {
+                self.0.to_bits() == other.0.to_bits()
+            }
+        }
+        impl Eq for $name {}
+        impl std::hash::Hash for $name {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.0.to_bits().hash(state);
+            }
+        }
+        impl PartialOrd for $name {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                if self.0.is_nan() && other.0.is_nan() {
+                    Some(std::cmp::Ordering::Equal)
+                } else {
+                    self.0.partial_cmp(&other.0)
+                }
+            }
+        }
+    };
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-pub struct FiniteF32(f32);
-impl Eq for FiniteF32 {}
-impl std::hash::Hash for FiniteF32 {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
-    }
-}
+xsd_float!(XsdFloat, f32);
+xsd_float!(XsdDouble, f64);
 
 /// The bound of a `float` or `double` min/max facet
 trait FloatBound: Sized {
@@ -72,14 +96,14 @@ trait FloatBound: Sized {
         None
     }
 }
-impl FloatBound for FiniteF32 {
+impl FloatBound for XsdFloat {
     fn from_f32(v: f32) -> Option<Self> {
-        (!v.is_nan()).then_some(FiniteF32(v))
+        Some(XsdFloat::new(v))
     }
 }
-impl FloatBound for FiniteF64 {
+impl FloatBound for XsdDouble {
     fn from_f64(v: f64) -> Option<Self> {
-        (!v.is_nan()).then_some(FiniteF64(v))
+        Some(XsdDouble::new(v))
     }
 }
 
@@ -601,8 +625,8 @@ pub enum XsdDatatypes {
         fraction_digits: Option<u16>,
         total_digits: Option<u16>,
     },
-    Float(MinMaxFacet<FiniteF32>, Option<PatternFacet>),
-    Double(MinMaxFacet<FiniteF64>, Option<PatternFacet>),
+    Float(MinMaxFacet<XsdFloat>, Option<PatternFacet>),
+    Double(MinMaxFacet<XsdDouble>, Option<PatternFacet>),
     NmTokens(LengthFacet, Option<PatternFacet>),
     NmToken(StringFacets),
     NcName(StringFacets),
@@ -876,13 +900,13 @@ impl XsdDatatypes {
             XsdDatatypes::Float(min_max, _) => {
                 let v: f32 = parse_float(s)?;
                 min_max
-                    .is_valid(&FiniteF32(v))
+                    .is_valid(&XsdFloat::new(v))
                     .then_some(XsdValue::Float(float_bits(v)))
             }
             XsdDatatypes::Double(min_max, _) => {
                 let v: f64 = parse_float(s)?;
                 min_max
-                    .is_valid(&FiniteF64(v))
+                    .is_valid(&XsdDouble::new(v))
                     .then_some(XsdValue::Double(double_bits(v)))
             }
             XsdDatatypes::Boolean(_) => match s {
@@ -2876,7 +2900,6 @@ impl Compiler {
         })
     }
 
-    /// `NaN` is not allowed as a bound, as it would make every value invalid
     fn float_facet<T: FloatBound>(
         &self,
         ctx: &Context,
@@ -3862,6 +3885,12 @@ mod test {
             ("float", "minInclusive", "INF", "INF", true),
             ("float", "maxInclusive", "1e2", "50", true),
             ("float", "minInclusive", "0", "NaN", false),
+            ("float", "minInclusive", "NaN", "NaN", true),
+            ("float", "maxExclusive", "NaN", "NaN", false),
+            ("double", "maxInclusive", "NaN", "NaN", true),
+            ("double", "maxInclusive", "NaN", "INF", false),
+            ("float", "minInclusive", "-0", "0", true),
+            ("float", "maxExclusive", "0", "-0", false),
             ("int", "pattern", "0.*", " 05", true),
         ];
         for (type_name, facet, facet_value, text, expected) in cases {
@@ -3894,7 +3923,6 @@ mod test {
             ("integer", "maxInclusive", "1.0"),
             ("byte", "maxInclusive", "128"),
             ("positiveInteger", "minInclusive", "0"),
-            ("float", "maxExclusive", "NaN"),
             ("float", "maxExclusive", "inf"),
         ] {
             assert_matches!(

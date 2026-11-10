@@ -268,6 +268,8 @@ pub(crate) struct Instant<'a> {
 
 lazy_static! {
     static ref LANG_RE: regex::Regex = regex::Regex::new(r"^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$").unwrap();
+    static ref FLOAT_RE: regex::Regex =
+        regex::Regex::new(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$").unwrap();
     static ref DECIMAL_RE: regex::Regex =
         regex::Regex::new(r"^([+-]?)([0-9]*)(?:\.([0-9]*))?$").unwrap();
     static ref BASE64_RE: regex::Regex = regex::Regex::new(r"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=|[A-Za-z0-9+/][AQgw]==)?$").unwrap();
@@ -312,6 +314,18 @@ fn parse_decimal(s: &str) -> Option<bigdecimal::BigDecimal> {
         digits,
         i64::try_from(frac.len()).ok()?,
     ))
+}
+
+/// The `xsd:float` / `xsd:double` lexical space, which is narrower than what Rust's `FromStr`
+/// accepts: no `inf`, `Infinity`, `+INF` or `-NaN`
+fn parse_float<F: FromStr>(s: &str) -> Option<F> {
+    match s {
+        "INF" => "inf".parse().ok(),
+        "-INF" => "-inf".parse().ok(),
+        "NaN" => "NaN".parse().ok(),
+        _ if FLOAT_RE.is_match(s) => s.parse().ok(),
+        _ => None,
+    }
 }
 
 fn parse_hex(s: &str) -> Option<Vec<u8>> {
@@ -814,13 +828,13 @@ impl XsdDatatypes {
                 Some(XsdValue::Decimal(v.normalized()))
             }
             XsdDatatypes::Float(min_max, _) => {
-                let v: f32 = s.parse().ok()?;
+                let v: f32 = parse_float(s)?;
                 min_max
                     .is_valid(&FiniteF32(v))
                     .then_some(XsdValue::Float(float_bits(v)))
             }
             XsdDatatypes::Double(min_max, _) => {
-                let v: f64 = s.parse().ok()?;
+                let v: f64 = parse_float(s)?;
                 min_max
                     .is_valid(&FiniteF64(v))
                     .then_some(XsdValue::Double(double_bits(v)))
@@ -3694,6 +3708,10 @@ mod test {
         // (type, text, expected validity), checked against Jing
         let cases = [
             ("float", "-INF", true),
+            ("float", "+INF", false),
+            ("float", "inf", false),
+            ("float", "Infinity", false),
+            ("float", "-NaN", false),
             ("float", "1.", true),
             ("float", ".5", true),
             ("float", "+1.5E+3", true),

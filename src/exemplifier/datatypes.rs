@@ -12,10 +12,8 @@ pub fn generate_datatype_value(dt: &DatatypeValues) -> String {
             BuiltinDatatypeValue::TokenValue(s) | BuiltinDatatypeValue::StringValue(s) => s.clone(),
         },
         DatatypeValues::Xsd(xsd) => match xsd {
-            XsdDatatypeValues::String(s)
-            | XsdDatatypeValues::Token(s)
-            | XsdDatatypeValues::Name(s) => s.clone(),
             XsdDatatypeValues::QName(qn) => qn.localname.clone(),
+            XsdDatatypeValues::Typed(t) => t.lexical.clone(),
         },
     }
 }

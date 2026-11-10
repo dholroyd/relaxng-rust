@@ -190,55 +190,7 @@ pub(crate) fn describe_datatype(dt: &datatype::Datatypes) -> String {
             datatype::relax::BuiltinDatatype::Token => "token".to_string(),
             datatype::relax::BuiltinDatatype::String => "string".to_string(),
         },
-        datatype::Datatypes::Xsd(x) => {
-            use datatype::xsd::XsdDatatypes::*;
-            let name = match x {
-                String(_) => "xsd:string",
-                NormalizedString(_) => "xsd:normalizedString",
-                Token(_) => "xsd:token",
-                Byte(..) => "xsd:byte",
-                Short(..) => "xsd:short",
-                UnsignedByte(..) => "xsd:unsignedByte",
-                UnsignedShort(..) => "xsd:unsignedShort",
-                Int(..) => "xsd:int",
-                Integer(..) => "xsd:integer",
-                Long(..) => "xsd:long",
-                UnsignedInt(..) => "xsd:unsignedInt",
-                UnsignedLong(..) => "xsd:unsignedLong",
-                PositiveInteger(..) => "xsd:positiveInteger",
-                NonNegativeInteger(..) => "xsd:nonNegativeInteger",
-                NonPositiveInteger(..) => "xsd:nonPositiveInteger",
-                NegativeInteger(..) => "xsd:negativeInteger",
-                Decimal { .. } => "xsd:decimal",
-                Float(..) => "xsd:float",
-                Double(..) => "xsd:double",
-                NmTokens(..) => "xsd:NMTOKENS",
-                NmToken(_) => "xsd:NMTOKEN",
-                NcName(_) => "xsd:NCName",
-                QName(_) => "xsd:QName",
-                Name(_) => "xsd:Name",
-                Duration(_) => "xsd:duration",
-                Date(_) => "xsd:date",
-                Datetime(_) => "xsd:dateTime",
-                Time(_) => "xsd:time",
-                GYearMonth(_) => "xsd:gYearMonth",
-                GYear(_) => "xsd:gYear",
-                GMonthDay(_) => "xsd:gMonthDay",
-                GDay(_) => "xsd:gDay",
-                GMonth(_) => "xsd:gMonth",
-                HexBinary(..) => "xsd:hexBinary",
-                Base64Binary(..) => "xsd:base64Binary",
-                AnyURI(_) => "xsd:anyURI",
-                Language(_) => "xsd:language",
-                Boolean(_) => "xsd:boolean",
-                Id(_) => "xsd:ID",
-                IdRef(_) => "xsd:IDREF",
-                IdRefs(..) => "xsd:IDREFS",
-                Entity(_) => "xsd:ENTITY",
-                Entities(..) => "xsd:ENTITIES",
-            };
-            name.to_string()
-        }
+        datatype::Datatypes::Xsd(x) => format!("xsd:{}", x.name()),
     }
 }
 
@@ -253,8 +205,8 @@ pub(crate) fn describe_datatype_value(dt: &datatype::DatatypeValues) -> String {
         datatype::DatatypeValues::Xsd(x) => {
             use datatype::xsd::XsdDatatypeValues::*;
             match x {
-                String(s) | Token(s) | Name(s) => format!("\"{}\"", s),
                 QName(q) => format!("{:?}", q),
+                Typed(t) => format!("\"{}\"", t.lexical),
             }
         }
     }

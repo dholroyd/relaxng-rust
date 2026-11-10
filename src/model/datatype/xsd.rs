@@ -1,5 +1,4 @@
 use crate::model::compiler::Context;
-use crate::model::datatype::relax::normalize_whitespace;
 use crate::syntax::types;
 use crate::syntax::types::DatatypeName;
 use crate::xml_whitespace::{
@@ -66,10 +65,27 @@ impl std::hash::Hash for FiniteF32 {
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum XsdDatatypeValues {
-    String(String),
-    Token(String),
-    Name(String),
+    // TODO: refactor to remove this type?
+    /// QName values are compared after resolving their prefix, which needs the namespace
+    /// bindings of both the schema and the instance document.
     QName(QNameVal),
+    /// A value of any other datatype, compared in the datatype's value space
+    Typed(Box<TypedValue>),
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct TypedValue {
+    pub datatype: XsdDatatypes,
+    /// The value as written in the schema
+    pub lexical: String,
+    value: XsdValue<'static>,
+}
+impl TypedValue {
+    fn is_valid(&self, text: &str) -> bool {
+        self.datatype
+            .parse_value(text)
+            .is_some_and(|v| v == self.value)
+    }
 }
 
 impl XsdDatatypeValues {
@@ -83,14 +99,9 @@ impl XsdDatatypeValues {
         lookup_ns: impl Fn(&str) -> Option<String>,
     ) -> bool {
         match self {
-            XsdDatatypeValues::String(s) => s == value,
-            XsdDatatypeValues::Token(s) => s == &normalize_whitespace(value),
-            XsdDatatypeValues::Name(s) => {
-                let normalized = normalize_whitespace(value);
-                is_valid_name(&normalized) && s == &normalized
-            }
             XsdDatatypeValues::QName(v) => QNameVal::resolve(value, default_ns, lookup_ns)
                 .is_some_and(|resolved| &resolved == v),
+            XsdDatatypeValues::Typed(t) => t.is_valid(value),
         }
     }
 }
@@ -98,17 +109,12 @@ impl XsdDatatypeValues {
 impl super::Datatype for XsdDatatypeValues {
     fn is_valid(&self, value: &str) -> bool {
         match self {
-            XsdDatatypeValues::String(s) => s == value,
-            XsdDatatypeValues::Token(s) => s == &normalize_whitespace(value),
-            XsdDatatypeValues::Name(s) => {
-                let normalized = normalize_whitespace(value);
-                is_valid_name(&normalized) && s == &normalized
-            }
             XsdDatatypeValues::QName(_) => {
                 // QName comparison requires namespace context; fall back to false
                 // when called without context. Use is_valid_with_ns instead.
                 false
             }
+            XsdDatatypeValues::Typed(t) => t.is_valid(value),
         }
     }
 }
@@ -565,6 +571,55 @@ pub enum XsdDatatypes {
     Entities(LengthFacet, Option<PatternFacet>),
 }
 impl XsdDatatypes {
+    /// The name of the datatype within the XSD datatype library, e.g. `"byte"`
+    pub fn name(&self) -> &'static str {
+        match self {
+            XsdDatatypes::String(_) => "string",
+            XsdDatatypes::NormalizedString(_) => "normalizedString",
+            XsdDatatypes::Token(_) => "token",
+            XsdDatatypes::Byte(..) => "byte",
+            XsdDatatypes::Short(..) => "short",
+            XsdDatatypes::UnsignedByte(..) => "unsignedByte",
+            XsdDatatypes::UnsignedShort(..) => "unsignedShort",
+            XsdDatatypes::Int(..) => "int",
+            XsdDatatypes::Integer(..) => "integer",
+            XsdDatatypes::Long(..) => "long",
+            XsdDatatypes::UnsignedInt(..) => "unsignedInt",
+            XsdDatatypes::UnsignedLong(..) => "unsignedLong",
+            XsdDatatypes::PositiveInteger(..) => "positiveInteger",
+            XsdDatatypes::NonNegativeInteger(..) => "nonNegativeInteger",
+            XsdDatatypes::NonPositiveInteger(..) => "nonPositiveInteger",
+            XsdDatatypes::NegativeInteger(..) => "negativeInteger",
+            XsdDatatypes::Decimal { .. } => "decimal",
+            XsdDatatypes::Float(..) => "float",
+            XsdDatatypes::Double(..) => "double",
+            XsdDatatypes::NmTokens(..) => "NMTOKENS",
+            XsdDatatypes::NmToken(_) => "NMTOKEN",
+            XsdDatatypes::NcName(_) => "NCName",
+            XsdDatatypes::QName(_) => "QName",
+            XsdDatatypes::Name(_) => "Name",
+            XsdDatatypes::Duration(_) => "duration",
+            XsdDatatypes::Date(_) => "date",
+            XsdDatatypes::Datetime(_) => "dateTime",
+            XsdDatatypes::Time(_) => "time",
+            XsdDatatypes::GYearMonth(_) => "gYearMonth",
+            XsdDatatypes::GYear(_) => "gYear",
+            XsdDatatypes::GMonthDay(_) => "gMonthDay",
+            XsdDatatypes::GDay(_) => "gDay",
+            XsdDatatypes::GMonth(_) => "gMonth",
+            XsdDatatypes::HexBinary(..) => "hexBinary",
+            XsdDatatypes::Base64Binary(..) => "base64Binary",
+            XsdDatatypes::AnyURI(_) => "anyURI",
+            XsdDatatypes::Language(_) => "language",
+            XsdDatatypes::Boolean(_) => "boolean",
+            XsdDatatypes::Id(_) => "ID",
+            XsdDatatypes::IdRef(_) => "IDREF",
+            XsdDatatypes::IdRefs(..) => "IDREFS",
+            XsdDatatypes::Entity(_) => "ENTITY",
+            XsdDatatypes::Entities(..) => "ENTITIES",
+        }
+    }
+
     /// Validate a value with namespace context, so that the prefix of a QName can be checked
     /// against the namespace bindings in scope in the instance document.
     pub fn is_valid_with_ns(
@@ -1569,18 +1624,6 @@ impl Compiler {
         ns_bindings: &[(String, String)],
     ) -> Result<XsdDatatypeValues, XsdDatatypeError> {
         match name {
-            "string" => Ok(XsdDatatypeValues::String(value.to_string())),
-            "token" => Ok(XsdDatatypeValues::Token(normalize_whitespace(value))),
-            "Name" => {
-                let normalized = normalize_whitespace(value);
-                if !is_valid_name(&normalized) {
-                    return Err(XsdDatatypeError::InvalidValueOfType {
-                        span: ctx.convert_span(span),
-                        type_name: "Name",
-                    });
-                }
-                Ok(XsdDatatypeValues::Name(normalized))
-            }
             "QName" => {
                 // Use the ns attribute from <value> if present, otherwise fall back to context
                 let default_ns = ns.unwrap_or(ctx.default_namespace_uri()).to_string();
@@ -1602,10 +1645,20 @@ impl Compiler {
                 })?;
                 Ok(XsdDatatypeValues::QName(qname))
             }
-            _ => Err(XsdDatatypeError::UnsupportedDatatype {
-                span: ctx.convert_span(span),
-                name: name.to_string(),
-            }),
+            _ => {
+                let datatype = self.compile(ctx, span, name, &[])?;
+                let parsed = datatype.parse_value(value).ok_or_else(|| {
+                    XsdDatatypeError::InvalidValueOfType {
+                        span: ctx.convert_span(span),
+                        type_name: datatype.name(),
+                    }
+                })?;
+                Ok(XsdDatatypeValues::Typed(Box::new(TypedValue {
+                    datatype,
+                    lexical: value.to_string(),
+                    value: parsed.into_owned(),
+                })))
+            }
         }
     }
 
@@ -3472,6 +3525,168 @@ mod test {
         ] {
             compile_no_params(name);
         }
+    }
+
+    fn compile_value(name: &str, value: &str) -> Result<XsdDatatypeValues, XsdDatatypeError> {
+        let mut map = CodeMap::new();
+        let file = map.add_file("test.rnc".to_string(), "test".to_string());
+        let ctx = Context::new(file);
+        Compiler.compile_value(&ctx, &(0..0), name, value, None, &[])
+    }
+
+    #[test]
+    fn typed_values_compare_in_value_space() {
+        // (type, value in schema, instance text, expected match). The expectations were checked
+        // against Jing.
+        let cases = [
+            ("byte", "01", "1", true),
+            ("byte", "01", "+1", true),
+            ("byte", "1", " 1 ", true),
+            ("byte", "1", "2", false),
+            ("short", "-5", "-05", true),
+            (
+                "unsignedLong",
+                "18446744073709551615",
+                "18446744073709551615",
+                true,
+            ),
+            ("nonNegativeInteger", "255", "0255", true),
+            ("positiveInteger", "1", "01", true),
+            ("integer", "0", "-0", true),
+            ("integer", "1", "1.0", false),
+            ("decimal", "1.0", "1", true),
+            ("decimal", "1.50", "+01.5", true),
+            ("decimal", "0", "-0.0", true),
+            ("decimal", ".5", "0.5", true),
+            ("decimal", "0.5", "0.51", false),
+            ("float", "NaN", "NaN", true),
+            ("float", "0", "-0", true),
+            ("float", "1", "1.0E0", true),
+            ("float", "0.1", "0.10000000149011612", true),
+            ("float", "INF", "INF", true),
+            ("float", "INF", "-INF", false),
+            ("double", "1e308", "1E308", true),
+            (
+                "double",
+                "0.1",
+                "0.1000000000000000055511151231257827",
+                true,
+            ),
+            ("double", "0.1", "0.10000000149011612", false),
+            ("boolean", "true", "1", true),
+            ("boolean", "false", "0", true),
+            ("boolean", "true", "false", false),
+            ("language", "en-GB", "en-gb", false),
+            ("language", "en-GB", " en-GB ", true),
+            ("normalizedString", "a b", "a\tb", true),
+            ("anyURI", "http://x/%7e", "http://x/~", false),
+            ("anyURI", " http://x/ ", "http://x/", true),
+            ("NMTOKEN", "a", " a ", true),
+            ("NCName", "a", "b", false),
+            ("hexBinary", "0a", "0A", true),
+            ("hexBinary", "0a", "0b", false),
+            ("base64Binary", "QUJD", "QU JD", true),
+            ("base64Binary", "AA==", "AA==", true),
+            ("base64Binary", "AA==", "AQ==", false),
+            ("NMTOKENS", "a  b", " a b", true),
+            ("NMTOKENS", "a b", "b a", false),
+            ("IDREFS", "a b", "a  b", true),
+            ("duration", "P1D", "PT24H", false),
+            ("duration", "P1Y", "P12M", false),
+            ("duration", "PT60S", "PT1M", false),
+            ("duration", "P1M", "P30D", false),
+            ("duration", "PT1.0S", "PT1S", true),
+            ("duration", "P1Y2M", "P1Y2M0D", true),
+            (
+                "dateTime",
+                "2000-01-01T00:00:00Z",
+                "2000-01-01T01:00:00+01:00",
+                true,
+            ),
+            (
+                "dateTime",
+                "2000-01-01T00:00:00Z",
+                "1999-12-31T23:00:00-01:00",
+                true,
+            ),
+            (
+                "dateTime",
+                "2000-01-01T00:00:00",
+                "2000-01-01T00:00:00Z",
+                false,
+            ),
+            (
+                "dateTime",
+                "2000-01-01T00:00:00",
+                "2000-01-01T00:00:00.000",
+                true,
+            ),
+            (
+                "dateTime",
+                "2000-01-02T00:00:00",
+                "2000-01-01T24:00:00",
+                true,
+            ),
+            (
+                "dateTime",
+                "2001-01-01T00:00:00Z",
+                "2000-12-31T23:59:00-00:01",
+                true,
+            ),
+            (
+                "dateTime",
+                "-0001-12-31T23:00:00Z",
+                "0001-01-01T00:00:00+01:00",
+                true,
+            ),
+            ("date", "2000-01-01Z", "2000-01-01+00:00", true),
+            ("date", "2000-01-01+01:00", "2000-01-01Z", false),
+            ("date", "2000-01-02+12:00", "2000-01-01-12:00", true),
+            ("time", "00:00:00Z", "01:00:00+01:00", true),
+            ("time", "00:00:00Z", "23:00:00-01:00", false),
+            ("time", "12:00:00", "12:00:00.0", true),
+            ("gYear", "2000Z", "2000+00:00", true),
+            ("gYear", "2000+01:00", "2000Z", false),
+            ("gYear", "2000", "2001", false),
+            ("gMonth", "--01", "--01", true),
+            ("gDay", "---01Z", "---01-00:00", true),
+            ("gMonthDay", "--02-29", "--02-29", true),
+            ("gYearMonth", "2000-01Z", "2000-01Z", true),
+        ];
+        for (type_name, schema_value, instance, expected) in cases {
+            let v = compile_value(type_name, schema_value)
+                .unwrap_or_else(|e| panic!("{type_name} {schema_value:?}: {e:?}"));
+            assert_eq!(
+                v.is_valid(instance),
+                expected,
+                "xsd:{type_name} {schema_value:?} against {instance:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_value_must_be_valid_for_its_type() {
+        for (type_name, value) in [
+            ("byte", "128"),
+            ("unsignedByte", "-1"),
+            ("positiveInteger", "0"),
+            ("boolean", "yes"),
+            ("hexBinary", "0"),
+            ("date", "2001-02-29"),
+            ("gMonthDay", "--02-30"),
+            ("time", "25:00:00"),
+            ("NCName", "a:b"),
+        ] {
+            assert_matches!(
+                compile_value(type_name, value),
+                Err(XsdDatatypeError::InvalidValueOfType { type_name: t, .. }) if t == type_name,
+                "xsd:{type_name} {value:?}"
+            );
+        }
+        assert_matches!(
+            compile_value("NOTATION", "x"),
+            Err(XsdDatatypeError::UnsupportedDatatype { .. })
+        );
     }
 
     #[test]

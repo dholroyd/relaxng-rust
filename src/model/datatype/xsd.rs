@@ -43,8 +43,8 @@ fn is_valid_any_uri(value: &str) -> bool {
 
 pub(crate) const NAMESPACE_URI: &str = "http://www.w3.org/2001/XMLSchema-datatypes";
 
-/// Wrapper for finite floats that implements Eq and Hash.
-/// Only constructed from validated finite values.
+/// Wrapper for floats that implements Eq and Hash. Facets hold only non-NaN values, for which
+/// equality is reflexive; values being checked against facets may be NaN.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct FiniteF64(f64);
 impl Eq for FiniteF64 {}
@@ -60,6 +60,26 @@ impl Eq for FiniteF32 {}
 impl std::hash::Hash for FiniteF32 {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.to_bits().hash(state);
+    }
+}
+
+/// The bound of a `float` or `double` min/max facet
+trait FloatBound: Sized {
+    fn from_f32(_v: f32) -> Option<Self> {
+        None
+    }
+    fn from_f64(_v: f64) -> Option<Self> {
+        None
+    }
+}
+impl FloatBound for FiniteF32 {
+    fn from_f32(v: f32) -> Option<Self> {
+        (!v.is_nan()).then_some(FiniteF32(v))
+    }
+}
+impl FloatBound for FiniteF64 {
+    fn from_f64(v: f64) -> Option<Self> {
+        (!v.is_nan()).then_some(FiniteF64(v))
     }
 }
 
@@ -1759,10 +1779,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::i16(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::i16(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::i16(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::i16(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.integer_facet(ctx, param, "short")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.integer_facet(ctx, param, "short")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.integer_facet(ctx, param, "short")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.integer_facet(ctx, param, "short")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1786,10 +1814,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::u16(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::u16(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::u16(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::u16(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.integer_facet(ctx, param, "unsignedShort")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.integer_facet(ctx, param, "unsignedShort")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.integer_facet(ctx, param, "unsignedShort")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.integer_facet(ctx, param, "unsignedShort")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1809,10 +1845,10 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::i64(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::i64(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::i64(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::i64(ctx, param)?)?,
+                "minInclusive" => min_max.min_inclusive(self.integer_facet(ctx, param, "long")?)?,
+                "minExclusive" => min_max.min_exclusive(self.integer_facet(ctx, param, "long")?)?,
+                "maxInclusive" => min_max.max_inclusive(self.integer_facet(ctx, param, "long")?)?,
+                "maxExclusive" => min_max.max_exclusive(self.integer_facet(ctx, param, "long")?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1832,10 +1868,10 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::i32(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::i32(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::i32(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::i32(ctx, param)?)?,
+                "minInclusive" => min_max.min_inclusive(self.integer_facet(ctx, param, "int")?)?,
+                "minExclusive" => min_max.min_exclusive(self.integer_facet(ctx, param, "int")?)?,
+                "maxInclusive" => min_max.max_inclusive(self.integer_facet(ctx, param, "int")?)?,
+                "maxExclusive" => min_max.max_exclusive(self.integer_facet(ctx, param, "int")?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1854,10 +1890,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::bigint(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::bigint(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::bigint(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::bigint(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.bigint_facet(ctx, param, "integer")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.bigint_facet(ctx, param, "integer")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.bigint_facet(ctx, param, "integer")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.bigint_facet(ctx, param, "integer")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1881,10 +1925,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::biguint(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::biguint(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::biguint(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::biguint(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.integer_facet(ctx, param, "positiveInteger")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.integer_facet(ctx, param, "positiveInteger")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.integer_facet(ctx, param, "positiveInteger")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.integer_facet(ctx, param, "positiveInteger")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -1906,10 +1958,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::bigdecimal(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::bigdecimal(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::bigdecimal(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::bigdecimal(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.decimal_facet(ctx, param, "decimal")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.decimal_facet(ctx, param, "decimal")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.decimal_facet(ctx, param, "decimal")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.decimal_facet(ctx, param, "decimal")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 "fractionDigits" => fraction_digits = Some(Self::u16(ctx, param)?),
                 "totalDigits" => total_digits = Some(Self::u16(ctx, param)?),
@@ -1935,10 +1995,10 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::f64(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::f64(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::f64(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::f64(ctx, param)?)?,
+                "minInclusive" => min_max.min_inclusive(self.float_facet(ctx, param, "double")?)?,
+                "minExclusive" => min_max.min_exclusive(self.float_facet(ctx, param, "double")?)?,
+                "maxInclusive" => min_max.max_inclusive(self.float_facet(ctx, param, "double")?)?,
+                "maxExclusive" => min_max.max_exclusive(self.float_facet(ctx, param, "double")?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2188,10 +2248,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::u32(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::u32(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::u32(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::u32(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.integer_facet(ctx, param, "unsignedInt")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.integer_facet(ctx, param, "unsignedInt")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.integer_facet(ctx, param, "unsignedInt")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.integer_facet(ctx, param, "unsignedInt")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2215,10 +2283,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::u64(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::u64(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::u64(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::u64(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.integer_facet(ctx, param, "unsignedLong")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.integer_facet(ctx, param, "unsignedLong")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.integer_facet(ctx, param, "unsignedLong")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.integer_facet(ctx, param, "unsignedLong")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2282,10 +2358,10 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::i8(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::i8(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::i8(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::i8(ctx, param)?)?,
+                "minInclusive" => min_max.min_inclusive(self.integer_facet(ctx, param, "byte")?)?,
+                "minExclusive" => min_max.min_exclusive(self.integer_facet(ctx, param, "byte")?)?,
+                "maxInclusive" => min_max.max_inclusive(self.integer_facet(ctx, param, "byte")?)?,
+                "maxExclusive" => min_max.max_exclusive(self.integer_facet(ctx, param, "byte")?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2309,10 +2385,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::u8(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::u8(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::u8(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::u8(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.integer_facet(ctx, param, "unsignedByte")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.integer_facet(ctx, param, "unsignedByte")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.integer_facet(ctx, param, "unsignedByte")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.integer_facet(ctx, param, "unsignedByte")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2332,10 +2416,10 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::f32(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::f32(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::f32(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::f32(ctx, param)?)?,
+                "minInclusive" => min_max.min_inclusive(self.float_facet(ctx, param, "float")?)?,
+                "minExclusive" => min_max.min_exclusive(self.float_facet(ctx, param, "float")?)?,
+                "maxInclusive" => min_max.max_inclusive(self.float_facet(ctx, param, "float")?)?,
+                "maxExclusive" => min_max.max_exclusive(self.float_facet(ctx, param, "float")?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2359,10 +2443,26 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::biguint(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::biguint(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::biguint(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::biguint(ctx, param)?)?,
+                "minInclusive" => min_max.min_inclusive(self.integer_facet(
+                    ctx,
+                    param,
+                    "nonNegativeInteger",
+                )?)?,
+                "minExclusive" => min_max.min_exclusive(self.integer_facet(
+                    ctx,
+                    param,
+                    "nonNegativeInteger",
+                )?)?,
+                "maxInclusive" => min_max.max_inclusive(self.integer_facet(
+                    ctx,
+                    param,
+                    "nonNegativeInteger",
+                )?)?,
+                "maxExclusive" => min_max.max_exclusive(self.integer_facet(
+                    ctx,
+                    param,
+                    "nonNegativeInteger",
+                )?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2386,10 +2486,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::bigint(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::bigint(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::bigint(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::bigint(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.bigint_facet(ctx, param, "nonPositiveInteger")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.bigint_facet(ctx, param, "nonPositiveInteger")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.bigint_facet(ctx, param, "nonPositiveInteger")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.bigint_facet(ctx, param, "nonPositiveInteger")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2413,10 +2521,18 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(Self::bigint(ctx, param)?)?,
-                "minExclusive" => min_max.min_exclusive(Self::bigint(ctx, param)?)?,
-                "maxInclusive" => min_max.max_inclusive(Self::bigint(ctx, param)?)?,
-                "maxExclusive" => min_max.max_exclusive(Self::bigint(ctx, param)?)?,
+                "minInclusive" => {
+                    min_max.min_inclusive(self.bigint_facet(ctx, param, "negativeInteger")?)?
+                }
+                "minExclusive" => {
+                    min_max.min_exclusive(self.bigint_facet(ctx, param, "negativeInteger")?)?
+                }
+                "maxInclusive" => {
+                    min_max.max_inclusive(self.bigint_facet(ctx, param, "negativeInteger")?)?
+                }
+                "maxExclusive" => {
+                    min_max.max_exclusive(self.bigint_facet(ctx, param, "negativeInteger")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2686,76 +2802,6 @@ impl Compiler {
         Ok(XsdDatatypes::Entities(len, pattern))
     }
 
-    fn i8(ctx: &Context, param: &types::Param) -> Result<i8, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
-    }
-
-    fn u8(ctx: &Context, param: &types::Param) -> Result<u8, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
-    }
-
-    fn i16(ctx: &Context, param: &types::Param) -> Result<i16, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
-    }
-
-    fn i32(ctx: &Context, param: &types::Param) -> Result<i32, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
-    }
-
-    fn i64(ctx: &Context, param: &types::Param) -> Result<i64, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
-    }
-
-    fn u32(ctx: &Context, param: &types::Param) -> Result<u32, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
-    }
-
-    fn u64(ctx: &Context, param: &types::Param) -> Result<u64, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: std::num::ParseIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
-    }
-
     fn u16(ctx: &Context, param: &types::Param) -> Result<u16, FacetError> {
         param
             .value
@@ -2766,73 +2812,82 @@ impl Compiler {
             })
     }
 
-    fn f32(ctx: &Context, param: &types::Param) -> Result<FiniteF32, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse::<f32>()
-            .map_err(|e| FacetError::InvalidFloat(ctx.convert_span(&param.span), e.to_string()))
-            .and_then(|v| {
-                if v.is_finite() {
-                    Ok(FiniteF32(v))
-                } else {
-                    Err(FacetError::InvalidFloat(
-                        ctx.convert_span(&param.span),
-                        "Only finite values allowed".to_string(),
-                    ))
-                }
-            })
-    }
-
-    fn f64(ctx: &Context, param: &types::Param) -> Result<FiniteF64, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse::<f64>()
-            .map_err(|e| FacetError::InvalidFloat(ctx.convert_span(&param.span), e.to_string()))
-            .and_then(|v| {
-                if v.is_finite() {
-                    Ok(FiniteF64(v))
-                } else {
-                    Err(FacetError::InvalidFloat(
-                        ctx.convert_span(&param.span),
-                        "Only finite values allowed".to_string(),
-                    ))
-                }
-            })
-    }
-
-    fn bigint(ctx: &Context, param: &types::Param) -> Result<num_bigint::BigInt, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: num_bigint::ParseBigIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
-    }
-
-    fn biguint(ctx: &Context, param: &types::Param) -> Result<num_bigint::BigUint, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: num_bigint::ParseBigIntError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
-    }
-
-    fn bigdecimal(
+    /// Parse a facet value, such as `maxInclusive = "10"`, which must be in the value space of
+    /// the datatype being restricted
+    fn facet_value<T>(
+        &self,
         ctx: &Context,
         param: &types::Param,
+        type_name: &str,
+        convert: impl FnOnce(XsdValue<'_>) -> Option<T>,
+    ) -> Result<T, FacetError> {
+        let text = param.value.as_string_value();
+        let span = ctx.convert_span(&param.span);
+        let base = self
+            .compile(ctx, &param.span, type_name, &[])
+            .expect("type_name is a supported datatype");
+        base.parse_value(&text).and_then(convert).ok_or_else(|| {
+            let msg = format!("{text:?} is not a valid {type_name}");
+            match base {
+                XsdDatatypes::Float(..) | XsdDatatypes::Double(..) => {
+                    FacetError::InvalidFloat(span, msg)
+                }
+                _ => FacetError::InvalidInt(span, msg),
+            }
+        })
+    }
+
+    fn integer_facet<T>(
+        &self,
+        ctx: &Context,
+        param: &types::Param,
+        type_name: &str,
+    ) -> Result<T, FacetError>
+    where
+        T: TryFrom<i64> + for<'b> TryFrom<&'b num_bigint::BigInt>,
+    {
+        self.facet_value(ctx, param, type_name, |v| match v {
+            XsdValue::Integer(i) => i.to_prim(),
+            _ => None,
+        })
+    }
+
+    fn bigint_facet(
+        &self,
+        ctx: &Context,
+        param: &types::Param,
+        type_name: &str,
+    ) -> Result<num_bigint::BigInt, FacetError> {
+        self.facet_value(ctx, param, type_name, |v| match v {
+            XsdValue::Integer(i) => Some(i.to_bigint()),
+            _ => None,
+        })
+    }
+
+    fn decimal_facet(
+        &self,
+        ctx: &Context,
+        param: &types::Param,
+        type_name: &str,
     ) -> Result<bigdecimal::BigDecimal, FacetError> {
-        param
-            .value
-            .as_string_value()
-            .parse()
-            .map_err(|e: bigdecimal::ParseBigDecimalError| {
-                FacetError::InvalidInt(ctx.convert_span(&param.span), e.to_string())
-            })
+        self.facet_value(ctx, param, type_name, |v| match v {
+            XsdValue::Decimal(d) => Some(d),
+            _ => None,
+        })
+    }
+
+    /// `NaN` is not allowed as a bound, as it would make every value invalid
+    fn float_facet<T: FloatBound>(
+        &self,
+        ctx: &Context,
+        param: &types::Param,
+        type_name: &str,
+    ) -> Result<T, FacetError> {
+        self.facet_value(ctx, param, type_name, |v| match v {
+            XsdValue::Float(bits) => T::from_f32(f32::from_bits(bits)),
+            XsdValue::Double(bits) => T::from_f64(f64::from_bits(bits)),
+            _ => None,
+        })
     }
 
     fn usize(ctx: &Context, param: &types::Param) -> Result<usize, FacetError> {
@@ -3802,6 +3857,9 @@ mod test {
             ("decimal", "totalDigits", "1", "+01", true),
             ("decimal", "totalDigits", "2", "100", false),
             ("decimal", "fractionDigits", "1", "1.50", false),
+            ("byte", "maxInclusive", "+5", "5", true),
+            ("byte", "maxInclusive", " 5 ", "5", true),
+            ("float", "minInclusive", "INF", "INF", true),
             ("float", "maxInclusive", "1e2", "50", true),
             ("float", "minInclusive", "0", "NaN", false),
             ("int", "pattern", "0.*", " 05", true),
@@ -3811,6 +3869,38 @@ mod test {
                 compile_one_param(type_name, facet, facet_value).is_valid(text),
                 expected,
                 "xsd:{type_name} {{ {facet} = {facet_value:?} }} {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn facet_values_must_be_in_the_base_value_space() {
+        let mut map = CodeMap::new();
+        let file = map.add_file("test.rnc".to_string(), "test".to_string());
+        let ctx = Context::new(file);
+        let param = |name: &str, value: &str| types::Param {
+            span: 0..0,
+            annotations: None,
+            name: types::IdentifierOrKeyword::Identifier(types::Identifier(0..0, name.to_string())),
+            value: types::Literal(
+                0..0,
+                vec![types::LiteralSegment {
+                    body: value.to_string(),
+                }],
+            ),
+        };
+        for (type_name, facet, value) in [
+            ("decimal", "maxInclusive", "1e2"),
+            ("integer", "maxInclusive", "1.0"),
+            ("byte", "maxInclusive", "128"),
+            ("positiveInteger", "minInclusive", "0"),
+            ("float", "maxExclusive", "NaN"),
+            ("float", "maxExclusive", "inf"),
+        ] {
+            assert_matches!(
+                Compiler.compile(&ctx, &(0..0), type_name, &[param(facet, value)]),
+                Err(XsdDatatypeError::Facet { .. }),
+                "xsd:{type_name} {{ {facet} = {value:?} }}"
             );
         }
     }

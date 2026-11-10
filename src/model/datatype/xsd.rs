@@ -316,6 +316,16 @@ fn date_time_regex(body: &str) -> regex::Regex {
     regex::Regex::new(&format!("^{body}{TIMEZONE}$")).unwrap()
 }
 
+/// The `normalizedString` whiteSpace facet value `replace`: each tab, newline and carriage return
+/// becomes a space
+fn replace_xml_whitespace(s: &str) -> Cow<'_, str> {
+    if s.contains(['\t', '\r', '\n']) {
+        Cow::Owned(s.replace(['\t', '\r', '\n'], " "))
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
 /// The `xsd:decimal` lexical space, without normalizing, so that `1.50` has a scale of 2
 fn parse_decimal(s: &str) -> Option<bigdecimal::BigDecimal> {
     let caps = DECIMAL_RE.captures(s)?;
@@ -677,6 +687,7 @@ impl XsdDatatypes {
         // pattern / length facets all see the normalized value.
         let normalized = match self {
             XsdDatatypes::String(_) => Cow::Borrowed(text),
+            XsdDatatypes::NormalizedString(_) => replace_xml_whitespace(text),
             _ => collapse_xml_whitespace(text),
         };
         match normalized {
@@ -3608,6 +3619,7 @@ mod test {
             ("language", "en-GB", "en-gb", false),
             ("language", "en-GB", " en-GB ", true),
             ("normalizedString", "a b", "a\tb", true),
+            ("normalizedString", "a  b", "a b", false),
             ("anyURI", "http://x/%7e", "http://x/~", false),
             ("anyURI", " http://x/ ", "http://x/", true),
             ("NMTOKEN", "a", " a ", true),
@@ -3783,6 +3795,7 @@ mod test {
 
         // (type, facet, facet value, text, expected validity)
         let cases = [
+            ("normalizedString", "maxLength", "3", "a  b", false),
             ("normalizedString", "maxLength", "3", " a\t", true),
             ("normalizedString", "pattern", "a b", "a\tb", true),
             ("decimal", "totalDigits", "2", "1.50", false),

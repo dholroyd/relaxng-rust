@@ -215,17 +215,32 @@ impl XsdInteger {
         }
     }
 
-    fn from_i128(v: i128) -> Self {
-        match i64::try_from(v) {
-            Ok(small) => XsdInteger::Small(small),
-            Err(_) => XsdInteger::Big(v.into()),
-        }
-    }
-
     fn to_bigint(&self) -> num_bigint::BigInt {
         match self {
             XsdInteger::Small(v) => (*v).into(),
             XsdInteger::Big(v) => v.clone(),
+        }
+    }
+
+    fn sign(&self) -> std::cmp::Ordering {
+        match self {
+            XsdInteger::Small(v) => v.cmp(&0),
+            XsdInteger::Big(v) => match v.sign() {
+                num_bigint::Sign::Minus => std::cmp::Ordering::Less,
+                num_bigint::Sign::NoSign => std::cmp::Ordering::Equal,
+                num_bigint::Sign::Plus => std::cmp::Ordering::Greater,
+            },
+        }
+    }
+
+    /// Convert to a fixed-size integer type, or `None` if the value is out of its range
+    fn to_prim<T>(&self) -> Option<T>
+    where
+        T: TryFrom<i64> + for<'b> TryFrom<&'b num_bigint::BigInt>,
+    {
+        match self {
+            XsdInteger::Small(v) => T::try_from(*v).ok(),
+            XsdInteger::Big(v) => T::try_from(v).ok(),
         }
     }
 
@@ -738,27 +753,27 @@ impl XsdDatatypes {
         /// A fixed-size integer type, whose range comes from `T`
         fn sized<'a, T>(s: &str, min_max: &MinMaxFacet<T>) -> Option<XsdValue<'a>>
         where
-            T: PartialOrd + FromStr + Into<i128>,
+            T: PartialOrd + TryFrom<i64> + for<'b> TryFrom<&'b num_bigint::BigInt>,
         {
-            let v = T::from_str(s).ok()?;
-            min_max
-                .is_valid(&v)
-                .then(|| XsdValue::Integer(XsdInteger::from_i128(v.into())))
+            let i = XsdInteger::parse(s)?;
+            let v: T = i.to_prim()?;
+            min_max.is_valid(&v).then_some(XsdValue::Integer(i))
         }
-        /// An unbounded integer type, whose range is checked by `in_range`
-        fn unbounded<'a, T>(
+        /// An unbounded integer type, whose range is given by the allowed signs
+        fn unbounded<'a, T: PartialOrd>(
             s: &str,
+            signs: &[std::cmp::Ordering],
             min_max: &MinMaxFacet<T>,
-            in_range: impl FnOnce(&T) -> bool,
-        ) -> Option<XsdValue<'a>>
-        where
-            T: PartialOrd + FromStr + Into<num_bigint::BigInt>,
-        {
-            let v = T::from_str(s).ok()?;
-            (in_range(&v) && min_max.is_valid(&v))
-                .then(|| XsdValue::Integer(XsdInteger::from_bigint(v.into())))
+            convert: impl FnOnce(num_bigint::BigInt) -> Option<T>,
+        ) -> Option<XsdValue<'a>> {
+            let i = XsdInteger::parse(s)?;
+            if !signs.contains(&i.sign()) {
+                return None;
+            }
+            (!min_max.bounded() || min_max.is_valid(&convert(i.to_bigint())?))
+                .then_some(XsdValue::Integer(i))
         }
-        use num_bigint::{BigInt, BigUint};
+        use std::cmp::Ordering::{Equal, Greater, Less};
 
         if self.pattern().is_some_and(|p| !p.is_valid(s)) {
             return None;
@@ -788,18 +803,18 @@ impl XsdDatatypes {
             XsdDatatypes::UnsignedShort(min_max, _) => sized(s, min_max),
             XsdDatatypes::UnsignedInt(min_max, _) => sized(s, min_max),
             XsdDatatypes::UnsignedLong(min_max, _) => sized(s, min_max),
-            XsdDatatypes::Integer(min_max, _) => unbounded::<BigInt>(s, min_max, |_| true),
+            XsdDatatypes::Integer(min_max, _) => {
+                unbounded(s, &[Less, Equal, Greater], min_max, Some)
+            }
             XsdDatatypes::NonPositiveInteger(min_max, _) => {
-                unbounded::<BigInt>(s, min_max, |v| *v <= BigInt::ZERO)
+                unbounded(s, &[Less, Equal], min_max, Some)
             }
-            XsdDatatypes::NegativeInteger(min_max, _) => {
-                unbounded::<BigInt>(s, min_max, |v| *v < BigInt::ZERO)
-            }
+            XsdDatatypes::NegativeInteger(min_max, _) => unbounded(s, &[Less], min_max, Some),
             XsdDatatypes::NonNegativeInteger(min_max, _) => {
-                unbounded::<BigUint>(s, min_max, |_| true)
+                unbounded(s, &[Equal, Greater], min_max, |v| v.try_into().ok())
             }
             XsdDatatypes::PositiveInteger(min_max, _) => {
-                unbounded::<BigUint>(s, min_max, |v| *v != BigUint::ZERO)
+                unbounded(s, &[Greater], min_max, |v| v.try_into().ok())
             }
             XsdDatatypes::Decimal {
                 min_max,
@@ -3685,6 +3700,7 @@ mod test {
             ("unsignedByte", "-1"),
             ("positiveInteger", "0"),
             ("boolean", "yes"),
+            ("integer", "1_000"),
             ("decimal", "1e5"),
             ("hexBinary", "0"),
             ("date", "2001-02-29"),
@@ -3750,8 +3766,11 @@ mod test {
             ("gYear", "02000", false),
             ("gYearMonth", "2000-13", false),
             ("nonNegativeInteger", "+5", true),
+            ("nonNegativeInteger", "-0", true),
+            ("unsignedByte", "-0", true),
             ("positiveInteger", "+1", true),
             ("nonPositiveInteger", "+0", true),
+            ("integer", "1_000", false),
             ("hexBinary", "+a", false),
         ];
         for (type_name, text, expected) in cases {

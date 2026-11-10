@@ -807,13 +807,13 @@ impl XsdDatatypes {
                 fraction_digits,
                 total_digits,
             } => {
-                let v = bigdecimal::BigDecimal::from_str(s).ok()?;
+                let v = parse_decimal(s)?;
                 if !min_max.is_valid(&v) {
                     return None;
                 }
                 if let Some(td) = total_digits {
                     // totalDigits counts significant digits (ignoring sign, decimal point, leading zeros)
-                    let stripped = s.trim_start_matches('-').trim_start_matches('0');
+                    let stripped = s.trim_start_matches(['+', '-']).trim_start_matches('0');
                     let sig_digits = stripped.chars().filter(|c| c.is_ascii_digit()).count();
                     if sig_digits.max(1) > *td as usize {
                         return None;
@@ -3685,6 +3685,7 @@ mod test {
             ("unsignedByte", "-1"),
             ("positiveInteger", "0"),
             ("boolean", "yes"),
+            ("decimal", "1e5"),
             ("hexBinary", "0"),
             ("date", "2001-02-29"),
             ("gMonthDay", "--02-30"),
@@ -3716,6 +3717,7 @@ mod test {
             ("float", ".5", true),
             ("float", "+1.5E+3", true),
             ("float", ".", false),
+            ("decimal", "1e5", false),
             ("decimal", "+.5", true),
             ("decimal", "1.", true),
             ("decimal", ".", false),
@@ -3765,6 +3767,7 @@ mod test {
             ("normalizedString", "maxLength", "3", " a\t", true),
             ("normalizedString", "pattern", "a b", "a\tb", true),
             ("decimal", "totalDigits", "2", "1.50", false),
+            ("decimal", "totalDigits", "1", "+01", true),
             ("decimal", "totalDigits", "2", "100", false),
             ("decimal", "fractionDigits", "1", "1.50", false),
             ("float", "maxInclusive", "1e2", "50", true),

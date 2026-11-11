@@ -374,18 +374,23 @@ impl<'a> Context<'a> {
         Context::Attribute { parent: self, span }
     }
 
+    /// For an include-overrides block, the context of the file containing the `include`.
+    ///
+    /// The overriding definitions are written in the including file, so names, prefixes and
+    /// spans within them resolve against that file rather than against the included one.
+    fn includer(&self) -> &Context<'a> {
+        match self {
+            Context::IncludeOverrides {
+                parent: Context::Include { parent, .. },
+            } => parent,
+            _ => unreachable!("includer() is only valid on an IncludeOverrides context"),
+        }
+    }
+
     fn file(&self) -> Arc<codemap::File> {
         match self {
             Context::Root { file, .. } | Context::Include { file, .. } => file.clone(),
-            Context::IncludeOverrides { parent, .. } => {
-                if let Context::Include { parent, .. } = parent {
-                    parent.file()
-                } else {
-                    unreachable!(
-                        "Should not be possible for Context::IncludeOverrides to have parent other than Context::Include"
-                    )
-                }
-            }
+            Context::IncludeOverrides { .. } => self.includer().file(),
             Context::Grammar { parent, .. }
             | Context::Define { parent, .. }
             | Context::Element { parent }
@@ -408,8 +413,8 @@ impl<'a> Context<'a> {
             | Context::Include {
                 default_namespace, ..
             } => &default_namespace[..],
-            Context::IncludeOverrides { parent, .. }
-            | Context::Grammar { parent, .. }
+            Context::IncludeOverrides { .. } => self.includer().default_namespace_uri(),
+            Context::Grammar { parent, .. }
             | Context::Define { parent, .. }
             | Context::Element { parent }
             | Context::Attribute { parent, .. } => parent.default_namespace_uri(),
@@ -468,8 +473,10 @@ impl<'a> Context<'a> {
             Context::Root { namespaces, .. } | Context::Include { namespaces, .. } => {
                 namespaces.get(prefix).map(|s| &s[..])
             }
-            Context::IncludeOverrides { parent, .. }
-            | Context::Grammar { parent, .. }
+            Context::IncludeOverrides { .. } => {
+                self.includer().namespace_uri_for_prefix_str(prefix)
+            }
+            Context::Grammar { parent, .. }
             | Context::Define { parent, .. }
             | Context::Element { parent }
             | Context::Attribute { parent, .. } => parent.namespace_uri_for_prefix_str(prefix),
@@ -515,21 +522,13 @@ impl<'a> Context<'a> {
 
     fn datatype_uri_for_prefix(&self, prefix: &str) -> Option<&str> {
         match self {
-            Context::Root { datatypes, .. } => {
-                // TODO: return Option, and have caller work out RelaxError value
+            // datatype prefixes are scoped to the file that declares them, and are not visible
+            // to included files
+            Context::Root { datatypes, .. } | Context::Include { datatypes, .. } => {
                 datatypes.get(prefix).map(|s| &s[..])
             }
-            Context::Include {
-                parent, datatypes, ..
-            } => {
-                if let Some(uri) = datatypes.get(prefix).map(|s| &s[..]) {
-                    Some(uri)
-                } else {
-                    parent.datatype_uri_for_prefix(prefix)
-                }
-            }
-            Context::IncludeOverrides { parent }
-            | Context::Grammar { parent, .. }
+            Context::IncludeOverrides { .. } => self.includer().datatype_uri_for_prefix(prefix),
+            Context::Grammar { parent, .. }
             | Context::Define { parent, .. }
             | Context::Element { parent }
             | Context::Attribute { parent, .. } => parent.datatype_uri_for_prefix(prefix),
@@ -2591,6 +2590,133 @@ mod tests {
             };
             assert_eq!(namespace_uri, expected, "{main:?}");
         }
+    }
+
+    /// Compiles `main.rnc`, which includes `inc.rnc`, and returns the start rule, or the error
+    /// with any `IncludeError` wrappers removed
+    fn compile_include_case(
+        main: &'static str,
+        inc: &'static str,
+    ) -> Result<Rc<RefCell<Option<model::DefineRule>>>, RelaxError> {
+        let mut c = Compiler::new(
+            MemFiles(vec![("main.rnc", main), ("inc.rnc", inc)]),
+            Syntax::Compact,
+        );
+        match c.compile(Path::new("main.rnc")) {
+            Ok(s) => Ok(s.start),
+            Err(mut e) => {
+                while let RelaxError::IncludeError(_, inner) = e {
+                    e = *inner;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    #[test]
+    fn include_override_uses_includers_namespace_prefixes() {
+        // issue #49
+        let start = compile_include_case(
+            "namespace foo = \"urn:foo\"\n\
+             include \"inc.rnc\" {\n  start = element doc { attribute foo:a { text }? }\n}",
+            "start = element doc { empty }",
+        )
+        .unwrap_or_else(|e| panic!("failed to compile: {e:?}"));
+        let start = start.borrow();
+        let model::Pattern::Element(_, content, ..) = start.as_ref().unwrap().pattern() else {
+            panic!("expected element as start pattern");
+        };
+        let model::Pattern::Optional(ref attr, _) = **content else {
+            panic!("expected optional content, got {content:?}");
+        };
+        let model::Pattern::Attribute(
+            model::NameClass::Named {
+                ref namespace_uri, ..
+            },
+            ..,
+        ) = **attr
+        else {
+            panic!("expected named attribute, got {attr:?}");
+        };
+        assert_eq!(namespace_uri, "urn:foo");
+    }
+
+    #[test]
+    fn include_override_uses_includers_default_namespace() {
+        // the `inherit` namespace applies to the included file, not to the overrides
+        let start = compile_include_case(
+            "default namespace = \"urn:a\"\nnamespace b = \"urn:b\"\n\
+             include \"inc.rnc\" inherit = b {\n  start = element doc { empty }\n}",
+            "start = element doc { empty }",
+        )
+        .unwrap_or_else(|e| panic!("failed to compile: {e:?}"));
+        let start = start.borrow();
+        let model::Pattern::Element(model::NameClass::Named { namespace_uri, .. }, ..) =
+            start.as_ref().unwrap().pattern()
+        else {
+            panic!("expected named element as start pattern");
+        };
+        assert_eq!(namespace_uri, "urn:a");
+    }
+
+    #[test]
+    fn include_override_uses_includers_datatype_prefixes() {
+        let start = compile_include_case(
+            "datatypes x = \"http://www.w3.org/2001/XMLSchema-datatypes\"\n\
+             include \"inc.rnc\" {\n  start = element doc { x:int }\n}",
+            "start = element doc { empty }",
+        )
+        .unwrap_or_else(|e| panic!("failed to compile: {e:?}"));
+        let start = start.borrow();
+        let model::Pattern::Element(_, content, ..) = start.as_ref().unwrap().pattern() else {
+            panic!("expected element as start pattern");
+        };
+        assert_matches!(**content, model::Pattern::DatatypeName { .. });
+    }
+
+    #[test]
+    fn include_override_cannot_use_included_files_namespace_prefixes() {
+        let Err(err) = compile_include_case(
+            "include \"inc.rnc\" {\n  start = element bar:doc { empty }\n}",
+            "namespace bar = \"urn:bar\"\nstart = element bar:doc { empty }",
+        ) else {
+            panic!("override should not see the included file's prefix");
+        };
+        assert_matches!(err, RelaxError::UndefinedNamespacePrefix { ref prefix, .. } if prefix == "bar");
+    }
+
+    #[test]
+    fn included_file_cannot_use_includers_datatype_prefixes() {
+        let Err(err) = compile_include_case(
+            "datatypes x = \"http://www.w3.org/2001/XMLSchema-datatypes\"\n\
+             include \"inc.rnc\"",
+            "start = element doc { x:string }",
+        ) else {
+            panic!("included file should not see the includer's datatype prefix");
+        };
+        assert_matches!(err, RelaxError::UndefinedDatatypePrefix { ref prefix, .. } if prefix == "x");
+    }
+
+    #[test]
+    fn external_file_cannot_use_referencers_datatype_prefixes() {
+        let mut c = Compiler::new(
+            MemFiles(vec![
+                (
+                    "main.rnc",
+                    "datatypes x = \"http://www.w3.org/2001/XMLSchema-datatypes\"\n\
+                     start = external \"ext.rnc\"",
+                ),
+                ("ext.rnc", "element doc { x:string }"),
+            ]),
+            Syntax::Compact,
+        );
+        let Err(mut err) = c.compile(Path::new("main.rnc")) else {
+            panic!("external file should not see the referencer's datatype prefix");
+        };
+        while let RelaxError::IncludeError(_, inner) = err {
+            err = *inner;
+        }
+        assert_matches!(err, RelaxError::UndefinedDatatypePrefix { ref prefix, .. } if prefix == "x");
     }
 
     #[test]

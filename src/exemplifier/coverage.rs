@@ -407,8 +407,8 @@ fn generate_datatype_det(dt: &crate::model::datatype::Datatypes, idx: usize) -> 
             XsdDatatypes::Integer(_, _) | XsdDatatypes::Long(_, _) | XsdDatatypes::Int(_, _) => {
                 idx.to_string()
             }
-            XsdDatatypes::Date(_) => "2024-01-01".to_string(),
-            XsdDatatypes::Datetime(_) => "2024-01-01T00:00:00".to_string(),
+            XsdDatatypes::Date(..) => "2024-01-01".to_string(),
+            XsdDatatypes::Datetime(..) => "2024-01-01T00:00:00".to_string(),
             XsdDatatypes::AnyURI(_) => "http://example.com".to_string(),
             XsdDatatypes::Language(_) => "en".to_string(),
             _ => gen_ncname_det(idx),

@@ -126,13 +126,13 @@ fn generate_xsd_datatype(dt: &XsdDatatypes, u: &mut Unstructured) -> String {
             let n = u.int_in_range(1usize..=3usize).unwrap_or(1);
             (0..n).map(|_| gen_ncname(u)).collect::<Vec<_>>().join(" ")
         }
-        XsdDatatypes::Date(_) => {
+        XsdDatatypes::Date(..) => {
             let year = u.int_in_range(2000u32..=2030u32).unwrap_or(2024);
             let month = u.int_in_range(1u32..=12u32).unwrap_or(1);
             let day = u.int_in_range(1u32..=28u32).unwrap_or(1);
             format!("{:04}-{:02}-{:02}", year, month, day)
         }
-        XsdDatatypes::Datetime(_) => {
+        XsdDatatypes::Datetime(..) => {
             let year = u.int_in_range(2000u32..=2030u32).unwrap_or(2024);
             let month = u.int_in_range(1u32..=12u32).unwrap_or(1);
             let day = u.int_in_range(1u32..=28u32).unwrap_or(1);
@@ -144,7 +144,7 @@ fn generate_xsd_datatype(dt: &XsdDatatypes, u: &mut Unstructured) -> String {
                 year, month, day, hour, min, sec
             )
         }
-        XsdDatatypes::Duration(_) => "P1Y".to_string(),
+        XsdDatatypes::Duration(..) => "P1Y".to_string(),
         XsdDatatypes::AnyURI(_) => {
             const URIS: &[&str] = &[
                 "http://example.com",
@@ -189,31 +189,31 @@ fn generate_xsd_datatype(dt: &XsdDatatypes, u: &mut Unstructured) -> String {
             let v = u.int_in_range(-1000i32..=1000i32).unwrap_or(0);
             format!("{}.0", v)
         }
-        XsdDatatypes::Time(_) => {
+        XsdDatatypes::Time(..) => {
             let h = u.int_in_range(0u32..=23u32).unwrap_or(0);
             let m = u.int_in_range(0u32..=59u32).unwrap_or(0);
             let s = u.int_in_range(0u32..=59u32).unwrap_or(0);
             format!("{:02}:{:02}:{:02}", h, m, s)
         }
-        XsdDatatypes::GYear(_) => {
+        XsdDatatypes::GYear(..) => {
             let y = u.int_in_range(2000u32..=2030u32).unwrap_or(2024);
             format!("{:04}", y)
         }
-        XsdDatatypes::GYearMonth(_) => {
+        XsdDatatypes::GYearMonth(..) => {
             let y = u.int_in_range(2000u32..=2030u32).unwrap_or(2024);
             let m = u.int_in_range(1u32..=12u32).unwrap_or(1);
             format!("{:04}-{:02}", y, m)
         }
-        XsdDatatypes::GMonth(_) => {
+        XsdDatatypes::GMonth(..) => {
             let m = u.int_in_range(1u32..=12u32).unwrap_or(1);
             format!("--{:02}", m)
         }
-        XsdDatatypes::GMonthDay(_) => {
+        XsdDatatypes::GMonthDay(..) => {
             let m = u.int_in_range(1u32..=12u32).unwrap_or(1);
             let d = u.int_in_range(1u32..=28u32).unwrap_or(1);
             format!("--{:02}-{:02}", m, d)
         }
-        XsdDatatypes::GDay(_) => {
+        XsdDatatypes::GDay(..) => {
             let d = u.int_in_range(1u32..=28u32).unwrap_or(1);
             format!("---{:02}", d)
         }

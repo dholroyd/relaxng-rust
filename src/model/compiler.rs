@@ -1124,6 +1124,13 @@ impl<FS: Files> Compiler<FS> {
                                     label: Some(format!("Invalid facet for type: {name}")),
                                 })
                             }
+                            FacetError::InvalidValue(span, msg) => {
+                                labels.push(codemap_diagnostic::SpanLabel {
+                                    span: *span,
+                                    style: codemap_diagnostic::SpanStyle::Primary,
+                                    label: Some(format!("Invalid facet value: {msg}")),
+                                })
+                            }
                         }
                         codemap_diagnostic::Diagnostic {
                             level: codemap_diagnostic::Level::Error,

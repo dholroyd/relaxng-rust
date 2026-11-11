@@ -175,6 +175,9 @@ impl super::Datatype for XsdDatatypeValues {
 ///    around midnight, so `00:00:00Z` is not equal to `23:00:00-01:00`
 ///  - `language` and `anyURI` compare as strings, case-sensitively
 ///
+/// The order used by the min/max facets is consistent with this equality; see the `PartialOrd`
+/// impls of [`Duration`] and [`Instant`].
+///
 /// Values borrow from the text they were parsed from where they can, so that checking a value is
 /// valid doesn't allocate.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -214,17 +217,7 @@ impl XsdValue<'_> {
             XsdValue::Boolean(v) => XsdValue::Boolean(v),
             XsdValue::Binary(v) => XsdValue::Binary(v),
             XsdValue::Duration(v) => XsdValue::Duration(v),
-            XsdValue::Instant(Instant {
-                has_timezone,
-                year,
-                second,
-                fraction,
-            }) => XsdValue::Instant(Instant {
-                has_timezone,
-                year,
-                second,
-                fraction: owned(fraction),
-            }),
+            XsdValue::Instant(i) => XsdValue::Instant(i.into_owned()),
         }
     }
 }
@@ -300,8 +293,22 @@ impl XsdInteger {
     }
 }
 
+impl Ord for XsdInteger {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (XsdInteger::Small(a), XsdInteger::Small(b)) => a.cmp(b),
+            _ => self.to_bigint().cmp(&other.to_bigint()),
+        }
+    }
+}
+impl PartialOrd for XsdInteger {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub(crate) struct Duration {
+pub struct Duration {
     negative: bool,
     years: XsdInteger,
     months: XsdInteger,
@@ -316,13 +323,151 @@ pub(crate) struct Duration {
 /// `2000-01-01T00:00:00`, so that `--02-29` is a valid `gMonthDay`. When there is a timezone the
 /// point is normalized to UTC.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub(crate) struct Instant<'a> {
+pub struct Instant<'a> {
     has_timezone: bool,
     year: XsdInteger,
     /// Whole seconds since the start of `year`
     second: i64,
     /// Digits of the fractional second, without trailing zeros
     fraction: Cow<'a, str>,
+}
+
+impl Duration {
+    /// The year and month fields, as a signed number of months
+    fn total_months(&self) -> num_bigint::BigInt {
+        let months: num_bigint::BigInt = self.years.to_bigint() * 12 + self.months.to_bigint();
+        if self.negative { -months } else { months }
+    }
+
+    /// The day, hour, minute and second fields, as a signed number of seconds
+    fn total_seconds(&self) -> bigdecimal::BigDecimal {
+        let whole = ((self.days.to_bigint() * 24 + self.hours.to_bigint()) * 60
+            + self.minutes.to_bigint())
+            * 60;
+        let seconds = bigdecimal::BigDecimal::from(whole) + &self.seconds;
+        if self.negative { -seconds } else { seconds }
+    }
+}
+
+/// The partial order of XSD 1.0 Part 2 §3.2.6.2: one duration is less than another if it is less
+/// when both are added to each of four dateTimes, which between them start months of every
+/// length. Durations that fall in different orders, or end at the same time from all four (such
+/// as `P1Y` and `P12M`, which are not equal) are not ordered. This matches Jing.
+impl PartialOrd for Duration {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering::Equal;
+        const STARTS: [(i64, i64); 4] = [(1696, 9), (1697, 2), (1903, 3), (1903, 7)];
+
+        if self == other {
+            return Some(Equal);
+        }
+        let (months_a, months_b) = (self.total_months(), other.total_months());
+        let (seconds_a, seconds_b) = (self.total_seconds(), other.total_seconds());
+        // Shortcuts for when one part is the same, so the other decides it
+        if months_a == months_b {
+            return Some(seconds_a.cmp(&seconds_b)).filter(|o| *o != Equal);
+        }
+        if seconds_a == seconds_b {
+            return Some(months_a.cmp(&months_b));
+        }
+        let end = |year, month, months, seconds| {
+            bigdecimal::BigDecimal::from(days_spanned(year, month, months) * SECONDS_PER_DAY)
+                + seconds
+        };
+        let mut order = None;
+        for (year, month) in STARTS {
+            let o = end(year, month, &months_a, &seconds_a)
+                .cmp(&end(year, month, &months_b, &seconds_b));
+            if o == Equal || order.is_some_and(|prev| prev != o) {
+                return None;
+            }
+            order = Some(o);
+        }
+        order
+    }
+}
+
+/// The number of days from the first day of a month to the first day of the month `months`
+/// later, or earlier when `months` is negative
+fn days_spanned(year: i64, month: i64, months: &num_bigint::BigInt) -> num_bigint::BigInt {
+    let start = num_bigint::BigInt::from(year * 12 + month - 1);
+    days_before_month(&(&start + months)) - days_before_month(&start)
+}
+
+/// The number of days from the start of year 0 to the start of a month, given as
+/// `year * 12 + month - 1`, using the proleptic Gregorian calendar
+fn days_before_month(index: &num_bigint::BigInt) -> num_bigint::BigInt {
+    // The Gregorian calendar repeats every 400 years
+    const MONTHS_PER_CYCLE: i64 = 400 * 12;
+    const DAYS_PER_CYCLE: i64 = 400 * 365 + 97;
+    let cycle_len = num_bigint::BigInt::from(MONTHS_PER_CYCLE);
+    let rest = ((index % &cycle_len) + &cycle_len) % &cycle_len;
+    let cycles = (index - &rest) / &cycle_len;
+    let rest = i64::try_from(rest).expect("less than MONTHS_PER_CYCLE");
+    let (year, month) = (rest / 12, rest % 12);
+    let leap_years_before = (year + 3) / 4 - (year + 99) / 100 + (year + 399) / 400;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    cycles * DAYS_PER_CYCLE
+        + 365 * year
+        + leap_years_before
+        + DAYS_BEFORE_MONTH[month as usize]
+        + i64::from(leap && month > 1)
+}
+
+impl Instant<'_> {
+    fn into_owned(self) -> Instant<'static> {
+        Instant {
+            has_timezone: self.has_timezone,
+            year: self.year,
+            second: self.second,
+            fraction: Cow::Owned(self.fraction.into_owned()),
+        }
+    }
+
+    /// Compare positions on the timeline, after moving each by some number of seconds
+    fn cmp_shifted(&self, shift: i64, other: &Self, other_shift: i64) -> std::cmp::Ordering {
+        let a = carry_year(self.year.clone(), self.second + shift);
+        let b = carry_year(other.year.clone(), other.second + other_shift);
+        (a, &*self.fraction).cmp(&(b, &*other.fraction))
+    }
+}
+
+/// The partial order of XSD 1.0 Part 2 §3.2.7.4. Values that both have a timezone, or both don't,
+/// compare as points on the timeline. A value without a timezone could be at any time within 14
+/// hours either side of where it would be in UTC, so it is ordered against a value with a
+/// timezone only when the two are further apart than that. This matches Jing.
+impl PartialOrd for Instant<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering::{Greater, Less};
+        const MAX_OFFSET: i64 = 14 * 60 * 60;
+        match (self.has_timezone, other.has_timezone) {
+            (true, false) => {
+                if self.cmp_shifted(0, other, -MAX_OFFSET) == Less {
+                    Some(Less)
+                } else if self.cmp_shifted(0, other, MAX_OFFSET) == Greater {
+                    Some(Greater)
+                } else {
+                    None
+                }
+            }
+            (false, true) => other.partial_cmp(self).map(std::cmp::Ordering::reverse),
+            _ => Some(self.cmp_shifted(0, other, 0)),
+        }
+    }
+}
+
+/// Bring a number of seconds since the start of `year` into the range of that year, by moving
+/// to an earlier or later year
+fn carry_year(mut year: XsdInteger, mut second: i64) -> (XsdInteger, i64) {
+    while second < 0 {
+        year = year.step_year(false);
+        second += seconds_in_year(&year);
+    }
+    while second >= seconds_in_year(&year) {
+        second -= seconds_in_year(&year);
+        year = year.step_year(true);
+    }
+    (year, second)
 }
 
 lazy_static! {
@@ -520,7 +665,7 @@ fn parse_instant<'a>(re: &regex::Regex, s: &'a str) -> Option<Instant<'a>> {
         caps.name(name)
             .map_or(Some(default), |m| m.as_str().parse().ok())
     };
-    let mut year = match caps.name("y") {
+    let year = match caps.name("y") {
         Some(m) => {
             let digits = m.as_str().trim_start_matches('-');
             // More than four digits must not have leading zeros, and there is no year 0000
@@ -561,18 +706,11 @@ fn parse_instant<'a>(re: &regex::Regex, s: &'a str) -> Option<Instant<'a>> {
 
     let day_of_year =
         DAYS_BEFORE_MONTH[month as usize - 1] + i64::from(leap && month > 2) + day - 1;
-    let mut second = day_of_year * SECONDS_PER_DAY + hour * 3600 + minute * 60 + second
+    let second = day_of_year * SECONDS_PER_DAY + hour * 3600 + minute * 60 + second
         - timezone.unwrap_or(0) * 60;
     // the timezone adjustment, 24:00:00 and leap seconds can move the instant into the year
     // before or after
-    while second < 0 {
-        year = year.step_year(false);
-        second += seconds_in_year(&year);
-    }
-    while second >= seconds_in_year(&year) {
-        second -= seconds_in_year(&year);
-        year = year.step_year(true);
-    }
+    let (year, second) = carry_year(year, second);
 
     Some(Instant {
         has_timezone: timezone.is_some(),
@@ -633,15 +771,16 @@ pub enum XsdDatatypes {
     QName(StringFacets),
     Name(StringFacets),
     Token(StringFacets),
-    Duration(Option<PatternFacet>),
-    Date(Option<PatternFacet>),
-    Datetime(Option<PatternFacet>),
-    Time(Option<PatternFacet>),
-    GYearMonth(Option<PatternFacet>),
-    GYear(Option<PatternFacet>),
-    GMonthDay(Option<PatternFacet>),
-    GDay(Option<PatternFacet>),
-    GMonth(Option<PatternFacet>),
+    /// Boxed because a `Duration` bound is large
+    Duration(Box<MinMaxFacet<Duration>>, Option<PatternFacet>),
+    Date(MinMaxFacet<Instant<'static>>, Option<PatternFacet>),
+    Datetime(MinMaxFacet<Instant<'static>>, Option<PatternFacet>),
+    Time(MinMaxFacet<Instant<'static>>, Option<PatternFacet>),
+    GYearMonth(MinMaxFacet<Instant<'static>>, Option<PatternFacet>),
+    GYear(MinMaxFacet<Instant<'static>>, Option<PatternFacet>),
+    GMonthDay(MinMaxFacet<Instant<'static>>, Option<PatternFacet>),
+    GDay(MinMaxFacet<Instant<'static>>, Option<PatternFacet>),
+    GMonth(MinMaxFacet<Instant<'static>>, Option<PatternFacet>),
     HexBinary(LengthFacet, Option<PatternFacet>),
     Base64Binary(LengthFacet, Option<PatternFacet>),
     AnyURI(StringFacets),
@@ -681,15 +820,15 @@ impl XsdDatatypes {
             XsdDatatypes::NcName(_) => "NCName",
             XsdDatatypes::QName(_) => "QName",
             XsdDatatypes::Name(_) => "Name",
-            XsdDatatypes::Duration(_) => "duration",
-            XsdDatatypes::Date(_) => "date",
-            XsdDatatypes::Datetime(_) => "dateTime",
-            XsdDatatypes::Time(_) => "time",
-            XsdDatatypes::GYearMonth(_) => "gYearMonth",
-            XsdDatatypes::GYear(_) => "gYear",
-            XsdDatatypes::GMonthDay(_) => "gMonthDay",
-            XsdDatatypes::GDay(_) => "gDay",
-            XsdDatatypes::GMonth(_) => "gMonth",
+            XsdDatatypes::Duration(..) => "duration",
+            XsdDatatypes::Date(..) => "date",
+            XsdDatatypes::Datetime(..) => "dateTime",
+            XsdDatatypes::Time(..) => "time",
+            XsdDatatypes::GYearMonth(..) => "gYearMonth",
+            XsdDatatypes::GYear(..) => "gYear",
+            XsdDatatypes::GMonthDay(..) => "gMonthDay",
+            XsdDatatypes::GDay(..) => "gDay",
+            XsdDatatypes::GMonth(..) => "gMonth",
             XsdDatatypes::HexBinary(..) => "hexBinary",
             XsdDatatypes::Base64Binary(..) => "base64Binary",
             XsdDatatypes::AnyURI(_) => "anyURI",
@@ -775,15 +914,15 @@ impl XsdDatatypes {
             | XsdDatatypes::IdRefs(_, p)
             | XsdDatatypes::Entities(_, p)
             | XsdDatatypes::Decimal { pattern: p, .. }
-            | XsdDatatypes::Duration(p)
-            | XsdDatatypes::Date(p)
-            | XsdDatatypes::Datetime(p)
-            | XsdDatatypes::Time(p)
-            | XsdDatatypes::GYearMonth(p)
-            | XsdDatatypes::GYear(p)
-            | XsdDatatypes::GMonthDay(p)
-            | XsdDatatypes::GDay(p)
-            | XsdDatatypes::GMonth(p)
+            | XsdDatatypes::Duration(_, p)
+            | XsdDatatypes::Date(_, p)
+            | XsdDatatypes::Datetime(_, p)
+            | XsdDatatypes::Time(_, p)
+            | XsdDatatypes::GYearMonth(_, p)
+            | XsdDatatypes::GYear(_, p)
+            | XsdDatatypes::GMonthDay(_, p)
+            | XsdDatatypes::GDay(_, p)
+            | XsdDatatypes::GMonth(_, p)
             | XsdDatatypes::Boolean(p) => p.as_ref(),
         }
     }
@@ -827,6 +966,15 @@ impl XsdDatatypes {
             }
             (!min_max.bounded() || min_max.is_valid(&convert(i.to_bigint())?))
                 .then_some(XsdValue::Integer(i))
+        }
+        /// A date or time type, whose lexical form is matched by `re`
+        fn instant<'a>(
+            re: &regex::Regex,
+            s: &'a str,
+            min_max: &MinMaxFacet<Instant<'a>>,
+        ) -> Option<XsdValue<'a>> {
+            let v = parse_instant(re, s)?;
+            min_max.is_valid(&v).then_some(XsdValue::Instant(v))
         }
         use std::cmp::Ordering::{Equal, Greater, Less};
 
@@ -924,15 +1072,20 @@ impl XsdDatatypes {
                 len.is_valid_count(bytes.len())
                     .then_some(XsdValue::Binary(bytes))
             }
-            XsdDatatypes::Duration(_) => parse_duration(s).map(|d| XsdValue::Duration(Box::new(d))),
-            XsdDatatypes::Datetime(_) => parse_instant(&DATETIME_RE, s).map(XsdValue::Instant),
-            XsdDatatypes::Date(_) => parse_instant(&DATE_RE, s).map(XsdValue::Instant),
-            XsdDatatypes::Time(_) => parse_instant(&TIME_RE, s).map(XsdValue::Instant),
-            XsdDatatypes::GYearMonth(_) => parse_instant(&GYEARMONTH_RE, s).map(XsdValue::Instant),
-            XsdDatatypes::GYear(_) => parse_instant(&GYEAR_RE, s).map(XsdValue::Instant),
-            XsdDatatypes::GMonthDay(_) => parse_instant(&GMONTHDAY_RE, s).map(XsdValue::Instant),
-            XsdDatatypes::GDay(_) => parse_instant(&GDAY_RE, s).map(XsdValue::Instant),
-            XsdDatatypes::GMonth(_) => parse_instant(&GMONTH_RE, s).map(XsdValue::Instant),
+            XsdDatatypes::Duration(min_max, _) => {
+                let d = parse_duration(s)?;
+                min_max
+                    .is_valid(&d)
+                    .then(|| XsdValue::Duration(Box::new(d)))
+            }
+            XsdDatatypes::Datetime(min_max, _) => instant(&DATETIME_RE, s, min_max),
+            XsdDatatypes::Date(min_max, _) => instant(&DATE_RE, s, min_max),
+            XsdDatatypes::Time(min_max, _) => instant(&TIME_RE, s, min_max),
+            XsdDatatypes::GYearMonth(min_max, _) => instant(&GYEARMONTH_RE, s, min_max),
+            XsdDatatypes::GYear(min_max, _) => instant(&GYEAR_RE, s, min_max),
+            XsdDatatypes::GMonthDay(min_max, _) => instant(&GMONTHDAY_RE, s, min_max),
+            XsdDatatypes::GDay(min_max, _) => instant(&GDAY_RE, s, min_max),
+            XsdDatatypes::GMonth(min_max, _) => instant(&GMONTH_RE, s, min_max),
         }
     }
 }
@@ -1050,6 +1203,8 @@ pub enum FacetError {
     InvalidFloat(codemap::Span, String),
     InvalidPattern(codemap::Span, regex::Error),
     InvalidFacet(codemap::Span, String),
+    /// A facet value that is not a value of the type it restricts
+    InvalidValue(codemap::Span, String),
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -2147,46 +2302,54 @@ impl Compiler {
     }
 
     fn duration(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::Duration(pattern))
+        let (min_max, pattern) = self.ordered_facets(ctx, params, "duration", |v| match v {
+            XsdValue::Duration(d) => Some(*d),
+            _ => None,
+        })?;
+        Ok(XsdDatatypes::Duration(Box::new(min_max), pattern))
     }
 
     fn date(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::Date(pattern))
+        self.instant_type(ctx, params, "date", XsdDatatypes::Date)
     }
 
     fn datetime(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut pattern = None;
+        self.instant_type(ctx, params, "dateTime", XsdDatatypes::Datetime)
+    }
 
+    /// One of the date and time types, which all have the same facets
+    fn instant_type(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+        type_name: &str,
+        make: fn(MinMaxFacet<Instant<'static>>, Option<PatternFacet>) -> XsdDatatypes,
+    ) -> Result<XsdDatatypes, FacetError> {
+        let (min_max, pattern) = self.ordered_facets(ctx, params, type_name, |v| match v {
+            XsdValue::Instant(i) => Some(i.into_owned()),
+            _ => None,
+        })?;
+        Ok(make(min_max, pattern))
+    }
+
+    /// The four bounds facets and `pattern`, which are all that the date, time and duration
+    /// types allow. `bound` extracts a bound from a value of the type.
+    fn ordered_facets<T: PartialOrd>(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+        type_name: &str,
+        bound: impl Fn(XsdValue<'_>) -> Option<T>,
+    ) -> Result<(MinMaxFacet<T>, Option<PatternFacet>), FacetError> {
+        let mut min_max = MinMaxFacet::default();
+        let mut pattern = None;
         for param in params {
+            let value = || self.facet_value(ctx, param, type_name, &bound);
             match &param.name.to_string()[..] {
+                "minInclusive" => min_max.min_inclusive(value()?)?,
+                "minExclusive" => min_max.min_exclusive(value()?)?,
+                "maxInclusive" => min_max.max_inclusive(value()?)?,
+                "maxExclusive" => min_max.max_exclusive(value()?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2196,8 +2359,7 @@ impl Compiler {
                 }
             }
         }
-
-        Ok(XsdDatatypes::Datetime(pattern))
+        Ok((min_max, pattern))
     }
 
     fn any_uri(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2571,21 +2733,7 @@ impl Compiler {
     }
 
     fn time(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::Time(pattern))
+        self.instant_type(ctx, params, "time", XsdDatatypes::Time)
     }
 
     fn gyearmonth(
@@ -2593,39 +2741,11 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::GYearMonth(pattern))
+        self.instant_type(ctx, params, "gYearMonth", XsdDatatypes::GYearMonth)
     }
 
     fn gyear(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::GYear(pattern))
+        self.instant_type(ctx, params, "gYear", XsdDatatypes::GYear)
     }
 
     fn gmonthday(
@@ -2633,57 +2753,15 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::GMonthDay(pattern))
+        self.instant_type(ctx, params, "gMonthDay", XsdDatatypes::GMonthDay)
     }
 
     fn gday(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::GDay(pattern))
+        self.instant_type(ctx, params, "gDay", XsdDatatypes::GDay)
     }
 
     fn gmonth(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::GMonth(pattern))
+        self.instant_type(ctx, params, "gMonth", XsdDatatypes::GMonth)
     }
 
     fn hex_binary(
@@ -2856,6 +2934,15 @@ impl Compiler {
                 XsdDatatypes::Float(..) | XsdDatatypes::Double(..) => {
                     FacetError::InvalidFloat(span, msg)
                 }
+                XsdDatatypes::Duration(..)
+                | XsdDatatypes::Date(..)
+                | XsdDatatypes::Datetime(..)
+                | XsdDatatypes::Time(..)
+                | XsdDatatypes::GYearMonth(..)
+                | XsdDatatypes::GYear(..)
+                | XsdDatatypes::GMonthDay(..)
+                | XsdDatatypes::GDay(..)
+                | XsdDatatypes::GMonth(..) => FacetError::InvalidValue(span, msg),
                 _ => FacetError::InvalidInt(span, msg),
             }
         })
@@ -3924,6 +4011,10 @@ mod test {
             ("byte", "maxInclusive", "128"),
             ("positiveInteger", "minInclusive", "0"),
             ("float", "maxExclusive", "inf"),
+            ("date", "minInclusive", "2000-13-01"),
+            ("dateTime", "minInclusive", "2000-01-01"),
+            ("gYear", "maxExclusive", "2000-01"),
+            ("duration", "maxInclusive", "P1"),
         ] {
             assert_matches!(
                 Compiler.compile(&ctx, &(0..0), type_name, &[param(facet, value)]),
@@ -3931,5 +4022,192 @@ mod test {
                 "xsd:{type_name} {{ {facet} = {value:?} }}"
             );
         }
+    }
+
+    fn compile_params(
+        type_name: &str,
+        params: &[(&str, &str)],
+    ) -> Result<XsdDatatypes, XsdDatatypeError> {
+        let mut map = CodeMap::new();
+        let file = map.add_file("test.rnc".to_string(), "test".to_string());
+        let ctx = Context::new(file);
+        let params: Vec<_> = params
+            .iter()
+            .map(|(name, value)| types::Param {
+                span: 0..0,
+                annotations: None,
+                name: types::IdentifierOrKeyword::Identifier(types::Identifier(
+                    0..0,
+                    name.to_string(),
+                )),
+                value: types::Literal(
+                    0..0,
+                    vec![types::LiteralSegment {
+                        body: value.to_string(),
+                    }],
+                ),
+            })
+            .collect();
+        Compiler.compile(&ctx, &(0..0), type_name, &params)
+    }
+
+    #[test]
+    fn bounds_on_date_time_and_duration_types() {
+        for (type_name, facet, bound, value, valid) in [
+            ("date", "minInclusive", "2000-01-01", "2000-01-01", true),
+            ("date", "minExclusive", "2000-01-01", "2000-01-01", false),
+            ("date", "minExclusive", "2000-01-01", "2000-01-02", true),
+            ("date", "maxInclusive", "2000-01-01", "1999-12-31", true),
+            ("date", "maxExclusive", "2000-01-01", "2000-01-01", false),
+            ("gYear", "minInclusive", "-0005", "-0006", false),
+            (
+                "gYear",
+                "maxInclusive",
+                "99999999999999999999",
+                "100000000000000000000",
+                false,
+            ),
+            (
+                "gYear",
+                "maxInclusive",
+                "99999999999999999999",
+                "2000",
+                true,
+            ),
+            ("gYearMonth", "maxInclusive", "2000-02", "2000-02", true),
+            ("gMonth", "maxExclusive", "--06", "--05", true),
+            ("gDay", "minInclusive", "---15", "---14", false),
+            ("gMonthDay", "minInclusive", "--01-01", "--12-31", true),
+            // +14:00 moves the value into the previous reference year
+            (
+                "gMonthDay",
+                "minInclusive",
+                "--01-01Z",
+                "--01-01+14:00",
+                false,
+            ),
+            ("time", "maxInclusive", "12:00:00Z", "13:00:00+02:00", true),
+            // timezones are normalized to UTC
+            (
+                "dateTime",
+                "maxInclusive",
+                "2000-01-01T12:00:00Z",
+                "2000-01-01T13:00:00+01:00",
+                true,
+            ),
+            (
+                "dateTime",
+                "maxExclusive",
+                "2000-01-01T12:00:00Z",
+                "2000-01-01T13:00:00+01:00",
+                false,
+            ),
+            // fractional seconds compare numerically
+            (
+                "dateTime",
+                "maxExclusive",
+                "2000-01-01T00:00:00.5",
+                "2000-01-01T00:00:00.45",
+                true,
+            ),
+            (
+                "dateTime",
+                "maxExclusive",
+                "2000-01-01T00:00:00.5",
+                "2000-01-01T00:00:00.50",
+                false,
+            ),
+            // 24:00:00 is the first instant of the next day
+            (
+                "dateTime",
+                "minInclusive",
+                "2000-01-02T00:00:00",
+                "2000-01-01T24:00:00",
+                true,
+            ),
+            // with and without a timezone: ordered only when more than 14 hours apart
+            (
+                "dateTime",
+                "maxInclusive",
+                "2000-01-01T12:00:00Z",
+                "2000-01-01T00:00:00",
+                false,
+            ),
+            (
+                "dateTime",
+                "maxInclusive",
+                "2000-01-01T12:00:00Z",
+                "1999-12-31T21:59:59",
+                true,
+            ),
+            (
+                "dateTime",
+                "maxInclusive",
+                "2000-01-01T12:00:00Z",
+                "1999-12-31T22:00:00",
+                false,
+            ),
+            (
+                "dateTime",
+                "minInclusive",
+                "2000-01-01T12:00:00",
+                "2000-01-02T02:00:01Z",
+                true,
+            ),
+            (
+                "dateTime",
+                "minInclusive",
+                "2000-01-01T12:00:00",
+                "2000-01-02T02:00:00Z",
+                false,
+            ),
+            // a month is 28 to 31 days, depending on which
+            ("duration", "maxInclusive", "P1M", "P27D", true),
+            ("duration", "maxInclusive", "P1M", "P28D", false),
+            ("duration", "maxInclusive", "P1M", "P30D", false),
+            ("duration", "minExclusive", "P1M", "P32D", true),
+            ("duration", "minInclusive", "-P1M", "-P27D", true),
+            ("duration", "minInclusive", "-P1M", "-P32D", false),
+            // the same length but not equal, so not ordered
+            ("duration", "maxInclusive", "P12M", "P1Y", false),
+            ("duration", "maxInclusive", "PT1H", "PT3600S", false),
+            ("duration", "maxInclusive", "P400Y", "P146097D", false),
+            ("duration", "maxInclusive", "P400Y", "P146096D", true),
+            ("duration", "maxInclusive", "P1Y", "P1Y", true),
+            ("duration", "maxExclusive", "PT1H", "PT59M59.9S", true),
+            ("duration", "minInclusive", "-P1D", "-PT23H", true),
+        ] {
+            let dt = compile_params(type_name, &[(facet, bound)]).unwrap();
+            assert_eq!(
+                dt.is_valid(value),
+                valid,
+                "xsd:{type_name} {{ {facet} = {bound:?} }} with {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn date_time_bounds_must_not_conflict() {
+        assert_matches!(
+            compile_params(
+                "date",
+                &[
+                    ("minInclusive", "2000-01-02"),
+                    ("maxInclusive", "2000-01-01")
+                ]
+            ),
+            Err(XsdDatatypeError::Facet {
+                facet: FacetError::ConflictingFacet(_),
+                ..
+            })
+        );
+        assert_matches!(
+            compile_params(
+                "duration",
+                &[("minExclusive", "P1D"), ("maxExclusive", "PT24H")]
+            ),
+            Ok(_),
+            "P1D and PT24H are not ordered, so neither bound excludes the other"
+        );
     }
 }

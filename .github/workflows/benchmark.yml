@@ -38,7 +38,7 @@ jobs:
           --testbed ubuntu-24.04 \
           --threshold-measure instructions \
           --threshold-test percentage \
-          --threshold-max-sample-size 64 \
+          --threshold-max-sample-size 2 \
           --threshold-upper-boundary 0.02 \
           --thresholds-reset \
           --error-on-alert \

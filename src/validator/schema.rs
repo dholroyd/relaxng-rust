@@ -76,6 +76,8 @@ impl<T: Hash + Eq> Interner<T> {
 
 /// Properties of a composite pattern that follow from its operands, computed when it is built so
 /// that reading them costs nothing.  Leaf patterns need no flags, as their variant decides them.
+/// While a schema is being compiled the flags are left unset, and [`compute_flags`] fills them
+/// in once every pattern is known.
 ///
 /// Every flag is a function of the operands, so including the flags in a `Pat`'s equality and
 /// hash does not stop equal patterns from being shared.
@@ -631,6 +633,9 @@ impl Hash for DefineId {
 /// pattern representation.  Uses `Vec<Option<Pat>>` so that recursive `Ref`
 /// patterns can reserve a slot (`None`) before the referenced definition has
 /// been compiled.  After compilation, `finalize()` converts to `Vec<Pat>`.
+///
+/// Composite patterns are built with default flags, since an operand may be a slot not yet
+/// filled; `finalize()` computes them all once every slot is resolved.
 struct SchemaBuilder {
     memo: HashMap<Pat, PatId>,
     patterns: Vec<Option<Pat>>,
@@ -689,14 +694,6 @@ impl SchemaBuilder {
         self.patterns[id.0 as usize].as_ref()
     }
 
-    /// The flags of the pattern at `id`, or none if it is a `Ref` slot not yet resolved.
-    ///
-    /// A composite built over an unresolved slot can therefore get the wrong flags for now;
-    /// [`recompute_flags`] corrects them in `finalize()`, once every slot is resolved.
-    fn flags_id(&self, id: PatId) -> PatFlags {
-        self.try_patt(id).map(Pat::flags).unwrap_or_default()
-    }
-
     fn record_source_span(&mut self, id: PatId, span: codemap::Span) {
         self.span_map.entry(id.0).or_default().push(span);
     }
@@ -706,10 +703,7 @@ impl SchemaBuilder {
             (Some(Pat::NotAllowed), _) => right,
             (_, Some(Pat::NotAllowed)) => left,
             (Some(_), Some(_)) if left == right => left,
-            _ => {
-                let flags = PatFlags::choice(self.flags_id(left), self.flags_id(right));
-                self.push(Pat::Choice(left, right, flags))
-            }
+            _ => self.push(Pat::Choice(left, right, PatFlags::default())),
         }
     }
 
@@ -718,10 +712,7 @@ impl SchemaBuilder {
             (Some(Pat::NotAllowed), _) | (_, Some(Pat::NotAllowed)) => self.not_allowed(),
             (Some(Pat::Empty), _) => right,
             (_, Some(Pat::Empty)) => left,
-            _ => {
-                let flags = PatFlags::group(self.flags_id(left), self.flags_id(right));
-                self.push(Pat::Interleave(left, right, flags))
-            }
+            _ => self.push(Pat::Interleave(left, right, PatFlags::default())),
         }
     }
 
@@ -730,10 +721,7 @@ impl SchemaBuilder {
             (Some(Pat::NotAllowed), _) | (_, Some(Pat::NotAllowed)) => self.not_allowed(),
             (Some(Pat::Empty), _) => right,
             (_, Some(Pat::Empty)) => left,
-            _ => {
-                let flags = PatFlags::group(self.flags_id(left), self.flags_id(right));
-                self.push(Pat::Group(left, right, flags))
-            }
+            _ => self.push(Pat::Group(left, right, PatFlags::default())),
         }
     }
 
@@ -741,8 +729,7 @@ impl SchemaBuilder {
         if let Some(Pat::NotAllowed) = self.try_patt(pattern) {
             return self.not_allowed();
         }
-        let flags = self.flags_id(pattern);
-        self.push(Pat::OneOrMore(pattern, flags))
+        self.push(Pat::OneOrMore(pattern, PatFlags::default()))
     }
 
     fn mixed(&mut self, pattern: PatId) -> PatId {
@@ -864,10 +851,10 @@ impl SchemaBuilder {
             .enumerate()
             .map(|(i, p)| p.unwrap_or_else(|| panic!("unresolved slot at index {}", i)))
             .collect();
-        recompute_flags(&mut patterns);
-        // The flags are part of each key, so rekey the memo by the corrected patterns.  Each
-        // canonical id keeps its place; a resolved `Ref` slot (not itself in the memo) holds a
-        // copy of its target and so is corrected identically, keeping its lookup working.
+        compute_flags(&mut patterns);
+        // The flags are part of each key, so rekey the memo by the completed patterns.  Each
+        // id keeps its place; a resolved `Ref` slot (not itself in the memo) holds a copy of its
+        // target and so gets the same flags, keeping its lookup working.
         let memo = self
             .memo
             .into_values()
@@ -900,17 +887,17 @@ impl SchemaBuilder {
 
 /// Sets every composite pattern's flags from its operands' flags.
 ///
-/// The builder computes flags as it goes, but a pattern built over a `Ref` slot that was not
-/// yet resolved (a definition reached again from within its own body) got default flags for
-/// that operand, and so may be wrong.  Every slot is resolved by now, so recomputing here makes
-/// every pattern's flags right before any document is validated, and patterns derived later
-/// inherit correct flags from their operands.
+/// The builder cannot compute flags as it goes, since an operand may be a `Ref` slot not yet
+/// resolved (a definition reached again from within its own body), so it leaves them unset.
+/// Every slot is resolved by now, so computing them here makes every pattern's flags right
+/// before any document is validated, and patterns derived later inherit correct flags from
+/// their operands.
 ///
 /// Operands are visited before the patterns that use them.  The graph is acyclic apart from
 /// paths through `Element`, whose flags do not depend on its content, so flags are only read
 /// across `Element` boundaries without being followed.  An explicit stack keeps deep schemas
 /// from overflowing the call stack.
-fn recompute_flags(patterns: &mut [Pat]) {
+fn compute_flags(patterns: &mut [Pat]) {
     fn flag_operands(p: &Pat) -> (Option<PatId>, Option<PatId>) {
         match *p {
             Pat::Choice(a, b, _) | Pat::Interleave(a, b, _) | Pat::Group(a, b, _) => {

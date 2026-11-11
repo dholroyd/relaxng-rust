@@ -124,7 +124,8 @@ impl Syntax {
                     crate::syntax::xml::Error::Expected(span, _) => {
                         file.span.subspan(span.start as _, span.end as _)
                     }
-                    crate::syntax::xml::Error::Unexpected(span, _) => {
+                    crate::syntax::xml::Error::Unexpected(span, _)
+                    | crate::syntax::xml::Error::UnexpectedChar { span, .. } => {
                         file.span.subspan(span.start as _, span.end as _)
                     }
                     crate::syntax::xml::Error::Xml(span, _) => {
@@ -995,7 +996,24 @@ impl<FS: Files> Compiler<FS> {
                     };
                     codemap_diagnostic::Diagnostic {
                         level: codemap_diagnostic::Level::Error,
-                        message: format!("Unexpected {msg}"),
+                        message: msg.to_string(),
+                        code: None,
+                        spans: vec![label],
+                    }
+                }
+                crate::syntax::xml::Error::UnexpectedChar {
+                    ch, at_start, what, ..
+                } => {
+                    let label = codemap_diagnostic::SpanLabel {
+                        span: *span,
+                        style: codemap_diagnostic::SpanStyle::Primary,
+                        label: None,
+                    };
+                    codemap_diagnostic::Diagnostic {
+                        level: codemap_diagnostic::Level::Error,
+                        message: crate::syntax::xml::Error::unexpected_char_message(
+                            *ch, *at_start, what,
+                        ),
                         code: None,
                         spans: vec![label],
                     }

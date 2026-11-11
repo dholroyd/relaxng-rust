@@ -10,9 +10,36 @@ pub enum Error {
     Expected(Span, &'static str),
     /// An unexpected value was present in the input
     Unexpected(Span, &'static str),
+    /// A name contained a character that's not allowed at that position
+    UnexpectedChar {
+        span: Span,
+        ch: char,
+        /// whether `ch` is the first character of the name, where fewer characters are allowed
+        at_start: bool,
+        /// the kind of name, e.g. `"NCName"`
+        what: &'static str,
+    },
     Xml(Span, String),
     // TODO: remove this variant once all syntax is supported
     Todo(&'static str),
+}
+
+impl Error {
+    /// The message to report for an [`Error::UnexpectedChar`]
+    pub(crate) fn unexpected_char_message(ch: char, at_start: bool, what: &str) -> String {
+        let pos = if at_start { "at start of" } else { "in" };
+        // escape_debug() shows whitespace, controls and combining marks as escapes, which
+        // identify the character better than the character itself would
+        let quoted: String = ch.escape_debug().collect();
+        if ch.is_ascii() || quoted.len() != ch.len_utf8() {
+            format!("Unexpected character '{quoted}' {pos} {what}")
+        } else {
+            format!(
+                "Unexpected character '{ch}' (U+{:04X}) {pos} {what}",
+                ch as u32
+            )
+        }
+    }
 }
 
 pub fn parse(text: &str) -> Result<Schema> {
@@ -449,7 +476,7 @@ fn mixed(node: Node) -> Result<MixedPattern> {
 fn ref_patt(node: Node) -> Result<Identifier> {
     no_rng_element_children(node)?;
     if let Some(name) = node.attribute_node("name") {
-        attr_ncname(&name)
+        attr_ncname(node, &name)
     } else {
         Err(Error::Expected(node.range(), "name attribute"))
     }
@@ -458,7 +485,7 @@ fn ref_patt(node: Node) -> Result<Identifier> {
 fn parent_ref(node: Node) -> Result<Identifier> {
     no_rng_element_children(node)?;
     if let Some(name) = node.attribute_node("name") {
-        attr_ncname(&name)
+        attr_ncname(node, &name)
     } else {
         Err(Error::Expected(node.range(), "name attribute"))
     }
@@ -483,7 +510,7 @@ fn value(node: Node) -> Result<DatatypeValuePattern> {
     let datatype_ns = get_datatype_lib(node).unwrap_or(Literal::new(0..0, "".to_string()));
     let type_name = node
         .attribute_node("type")
-        .map(|attr| ncname(attr.range_value(), attr.value()))
+        .map(|attr| ncname(node, attr.range_value(), attr.value()))
         .transpose()?;
     let val = if let Some(child) = node.first_child() {
         let seg = LiteralSegment {
@@ -542,8 +569,8 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
     ) {
         ("", "string") => DatatypeName::String,
         ("", "token") => DatatypeName::Token,
-        (_, val) => {
-            let name = ncname(type_attr.range_value(), val)?;
+        _ => {
+            let name = ncname(node, type_attr.range_value(), type_attr.value())?;
             DatatypeName::NamespacedName(NamespacedName {
                 namespace_uri: datatype_ns,
                 localname: name,
@@ -617,7 +644,7 @@ fn param(node: Node) -> Result<Param> {
     let name = node
         .attribute_node("name")
         .ok_or(Error::Expected(node.range(), "name attribute"))?;
-    let name = attr_ncname(&name)?;
+    let name = attr_ncname(node, &name)?;
 
     let child = node
         .first_child()
@@ -754,7 +781,7 @@ fn define(node: Node) -> Result<Define> {
     let name = node
         .attribute_node("name")
         .ok_or(Error::Expected(node.range(), "name attribute"))?;
-    let name = attr_ncname(&name)?;
+    let name = attr_ncname(node, &name)?;
 
     let patt = single_pattern_or_group(
         first_rng_child(node).ok_or(Error::Expected(node.range(), "Child pattern element"))?,
@@ -782,12 +809,13 @@ fn div_grammar_content(node: Node) -> Result<GrammarContent> {
     }))
 }
 
-fn attr_ncname(attr: &Attribute) -> Result<Identifier> {
+fn attr_ncname(node: Node, attr: &Attribute) -> Result<Identifier> {
     // TODO: further checks
     if attr.value().contains(':') {
         Err(Error::Unexpected(attr.range_value(), "Colon in NCName"))
     } else {
-        ident(attr.range_value(), trim_xml_whitespace(attr.value()))
+        let val = check_ncname(node, &attr.range_value(), attr.value(), "identifier")?;
+        Ok(Identifier(attr.range_value(), val.to_string()))
     }
 }
 
@@ -891,13 +919,16 @@ fn div_include_content(node: Node) -> Result<IncludeContent> {
 fn qname_att(node: Node, name: &Attribute, inherit_ns: bool) -> Result<Name> {
     let val = name.value();
     if let Some(pos) = val.find(':') {
-        let start = name.range_value().start;
-        let end = name.range_value().end;
+        let range = name.range_value();
         let prefix = &val[0..pos];
-        let prefix_span = start..(start + pos);
+        let prefix_span = sub_span(node, &range, val, 0..pos);
         let namespace = lookup_namespace_def(node, Some(trim_xml_whitespace(prefix)))
             .ok_or_else(|| Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix"))?;
-        let localname = ncname(start + pos + 1..end, &val[pos + 1..])?;
+        let localname = ncname(
+            node,
+            sub_span(node, &range, val, pos + 1..val.len()),
+            &val[pos + 1..],
+        )?;
         let ns = Literal::new(prefix_span, namespace.to_string());
         Ok(Name::NamespacedName(NamespacedName {
             namespace_uri: ns,
@@ -913,7 +944,7 @@ fn qname_att(node: Node, name: &Attribute, inherit_ns: bool) -> Result<Name> {
                 .map(|a| Literal::new(a.range_value(), a.value().to_string()))
                 .unwrap_or(Literal::new(0..0, String::new()))
         };
-        let localname = ncname(name.range_value(), val)?;
+        let localname = ncname(node, name.range_value(), val)?;
         Ok(Name::NamespacedName(NamespacedName {
             namespace_uri: ns,
             localname,
@@ -926,15 +957,17 @@ fn qname_el(name: Node) -> Result<Name> {
     if let Some(val) = name.text() {
         if let Some(pos) = val.find(':') {
             let text_range = name.first_child().unwrap().range();
-            let start = text_range.start;
-            let end = text_range.end;
             let prefix = &val[0..pos];
-            let prefix_span = start..(start + pos);
+            let prefix_span = sub_span(name, &text_range, val, 0..pos);
             let namespace = lookup_namespace_def(name, Some(trim_xml_whitespace(prefix)))
                 .ok_or_else(|| {
                     Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix")
                 })?;
-            let localname = ncname(start + pos + 1..end, &val[pos + 1..])?;
+            let localname = ncname(
+                name,
+                sub_span(name, &text_range, val, pos + 1..val.len()),
+                &val[pos + 1..],
+            )?;
             let ns = Literal::new(prefix_span, namespace.to_string());
             Ok(Name::NamespacedName(NamespacedName {
                 namespace_uri: ns,
@@ -942,7 +975,7 @@ fn qname_el(name: Node) -> Result<Name> {
             }))
         } else {
             let ns = get_ns(name).unwrap_or(Literal::new(0..0, "".to_string())); // TODO allow None or something rather than inventing an 'empty' NcName
-            let localname = ncname(name.first_child().unwrap().range(), val)?;
+            let localname = ncname(name, name.first_child().unwrap().range(), val)?;
             Ok(Name::NamespacedName(NamespacedName {
                 namespace_uri: ns,
                 localname,
@@ -953,27 +986,55 @@ fn qname_el(name: Node) -> Result<Name> {
     }
 }
 
-fn ncname(range: Range<usize>, val: &str) -> Result<NcName> {
-    let val = trim_xml_whitespace(val);
-    if val.is_empty() {
-        return Err(Error::Expected(range, "Expected identifier"));
+fn ncname(node: Node, range: Span, val: &str) -> Result<NcName> {
+    let trimmed = check_ncname(node, &range, val, "NCName")?;
+    Ok(NcName(range, trimmed.to_string()))
+}
+
+/// Checks that `val`, ignoring surrounding whitespace, is an NCName, returning the trimmed value.
+///
+/// `range` is the span of the source text that `val` was decoded from, and `node` is any node of
+/// the same document.  On failure, the error's span is narrowed to the offending character where
+/// that's possible (see [`sub_span`]), and `what` names the kind of name in the message.
+fn check_ncname<'v>(node: Node, range: &Span, val: &'v str, what: &'static str) -> Result<&'v str> {
+    let trimmed = trim_xml_whitespace(val);
+    if trimmed.is_empty() {
+        return Err(Error::Expected(range.clone(), "Expected identifier"));
     }
-    for (i, c) in val.char_indices() {
-        if i == 0 {
-            if !is_nc_name_start_char(c) {
-                return Err(Error::Unexpected(
-                    range.start..range.start + 1,
-                    "Unexpected character for NcName",
-                ));
-            }
-        } else if !is_nc_name_char(c) {
-            return Err(Error::Unexpected(
-                range.start + i..range.start + i + 1,
-                "Unexpected character for NcName",
-            ));
+    // trimming only removes from the ends, so `trimmed` begins this far into `val`
+    let lead = val.find(trimmed).unwrap_or(0);
+    for (i, c) in trimmed.char_indices() {
+        let ok = if i == 0 {
+            is_nc_name_start_char(c)
+        } else {
+            is_nc_name_char(c)
+        };
+        if !ok {
+            let at = lead + i;
+            return Err(Error::UnexpectedChar {
+                span: sub_span(node, range, val, at..at + c.len_utf8()),
+                ch: c,
+                at_start: i == 0,
+                what,
+            });
         }
     }
-    Ok(NcName(range, val.to_string()))
+    Ok(trimmed)
+}
+
+/// Maps `sub`, a byte range within the decoded text `val`, to a span of the schema source, given
+/// that `range` is the span of the raw source text which decoded to `val`.
+///
+/// Character and entity references, CDATA sections and attribute-value normalisation can make the
+/// raw text differ from the decoded text, so that offsets within one don't locate anything in the
+/// other (and may not even fall on a character boundary).  Unless the raw text is identical to
+/// `val`, the whole of `range` is returned instead.
+fn sub_span(node: Node, range: &Span, val: &str, sub: Range<usize>) -> Span {
+    if node.document().input_text().get(range.clone()) == Some(val) {
+        range.start + sub.start..range.start + sub.end
+    } else {
+        range.clone()
+    }
 }
 
 fn lookup_namespace_def<'a, 'input: 'a>(
@@ -987,29 +1048,6 @@ fn lookup_namespace_def<'a, 'input: 'a>(
             .find(|ns| ns.name() == prefix)
             .map(|n| n.uri())
     }
-}
-
-fn ident(range: Range<usize>, val: &str) -> Result<Identifier> {
-    let val = trim_xml_whitespace(val);
-    if val.is_empty() {
-        return Err(Error::Expected(range, "Expected identifier"));
-    }
-    for (i, c) in val.char_indices() {
-        if i == 0 {
-            if !is_nc_name_start_char(c) {
-                return Err(Error::Unexpected(
-                    range.start..range.start + 1,
-                    "Unexpected character within identifier",
-                ));
-            }
-        } else if !is_nc_name_char(c) {
-            return Err(Error::Unexpected(
-                range.start + i..range.start + i + 1,
-                "Unexpected character within identifier",
-            ));
-        }
-    }
-    Ok(Identifier(range, val.to_string()))
 }
 
 /// XML 1.0 4th Edition BaseChar production (Appendix B)
@@ -1341,5 +1379,136 @@ mod tests {
             Err(super::Error::Unexpected(span, "Unknown namespace prefix"))
                 if span == (prefix_start..prefix_start + 2)
         )
+    }
+
+    /// Parses `xml` as a pattern, expecting it to fail with an `UnexpectedChar` error, and returns
+    /// the source text the error's span covers, along with the error's message.
+    fn unexpected_char(xml: &str) -> (&str, String) {
+        let doc = roxmltree::Document::parse(xml).expect("Parsing XML");
+        match super::pattern(doc.root_element()) {
+            Err(super::Error::UnexpectedChar {
+                span,
+                ch,
+                at_start,
+                what,
+            }) => (
+                xml.get(span.clone()).unwrap_or_else(|| {
+                    panic!("span {span:?} is not on char boundaries of {xml:?}")
+                }),
+                super::Error::unexpected_char_message(ch, at_start, what),
+            ),
+            other => panic!("Expected an UnexpectedChar error, got {other:?}"),
+        }
+    }
+
+    const RNG: &str = "xmlns=\"http://relaxng.org/ns/structure/1.0\"";
+
+    #[test]
+    fn ncname_error_spans_whole_multibyte_start_char() {
+        // U+0E35 is a combining mark, so a NameChar but not a NameStartChar
+        let xml = format!("<element {RNG} name=\"\u{e35}\"><empty/></element>");
+        assert_eq!(
+            unexpected_char(&xml),
+            (
+                "\u{e35}",
+                r"Unexpected character '\u{e35}' at start of NCName".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn ncname_error_spans_whole_multibyte_later_char() {
+        // U+0E00 is unassigned, so not a NameChar, and not printable either
+        let xml = format!("<element {RNG} name=\"a\u{e00}\"><empty/></element>");
+        assert_eq!(
+            unexpected_char(&xml),
+            (
+                "\u{e00}",
+                r"Unexpected character '\u{e00}' in NCName".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn ncname_error_gives_code_point_of_printable_non_ascii() {
+        // U+00D7 MULTIPLICATION SIGN is not a NameChar
+        let xml = format!("<element {RNG} name=\"a\u{d7}b\"><empty/></element>");
+        assert_eq!(
+            unexpected_char(&xml),
+            (
+                "\u{d7}",
+                "Unexpected character '\u{d7}' (U+00D7) in NCName".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn ncname_error_span_allows_for_leading_whitespace() {
+        let xml = format!("<element {RNG} name=\" \u{e35}\"><empty/></element>");
+        assert_eq!(unexpected_char(&xml).0, "\u{e35}");
+        let xml = format!("<element {RNG} name=\"   a@b\"><empty/></element>");
+        assert_eq!(
+            unexpected_char(&xml),
+            ("@", "Unexpected character '@' in NCName".to_string())
+        );
+    }
+
+    #[test]
+    fn ncname_error_quotes_whitespace_as_escape() {
+        let xml = format!("<element {RNG}><name>a\tb</name><empty/></element>");
+        assert_eq!(
+            unexpected_char(&xml),
+            ("\t", r"Unexpected character '\t' in NCName".to_string())
+        );
+    }
+
+    #[test]
+    fn ncname_error_span_in_prefixed_name() {
+        let xml =
+            format!("<element {RNG} xmlns:p=\"urn:p\" name=\"p:a\u{e00}\"><empty/></element>");
+        assert_eq!(unexpected_char(&xml).0, "\u{e00}");
+    }
+
+    #[test]
+    fn ncname_error_span_in_name_element() {
+        let xml = format!("<element {RNG}><name>a\u{e00}</name><empty/></element>");
+        assert_eq!(unexpected_char(&xml).0, "\u{e00}");
+    }
+
+    #[test]
+    fn ncname_error_spans_whole_value_after_char_reference() {
+        // the decoded value is shorter than the source text, so offsets within it would land
+        // inside one of the source's 'é' characters; the message still says which character
+        let xml = format!("<element {RNG} name=\"&#x101;ééééé@\"><empty/></element>");
+        assert_eq!(
+            unexpected_char(&xml),
+            (
+                "&#x101;ééééé@",
+                "Unexpected character '@' in NCName".to_string()
+            )
+        );
+        let xml =
+            format!("<element {RNG} xmlns:p=\"urn:p\" name=\"&#x70;:ééééé@\"><empty/></element>");
+        assert_eq!(unexpected_char(&xml).0, "&#x70;:ééééé@");
+    }
+
+    #[test]
+    fn ncname_error_spans_whole_name_element_with_cdata() {
+        let xml = format!("<element {RNG}><name><![CDATA[a\u{e00}]]></name><empty/></element>");
+        assert_eq!(unexpected_char(&xml).0, "<![CDATA[a\u{e00}]]>");
+    }
+
+    #[test]
+    fn identifier_error_spans_whole_multibyte_char() {
+        let xml = format!("<grammar {RNG}><start><ref name=\"\u{e35}\"/></start></grammar>");
+        assert_eq!(
+            unexpected_char(&xml),
+            (
+                "\u{e35}",
+                r"Unexpected character '\u{e35}' at start of identifier".to_string()
+            )
+        );
+        let xml = format!("<grammar {RNG}><start><ref name=\" a\u{e00}\"/></start></grammar>");
+        assert_eq!(unexpected_char(&xml).0, "\u{e00}");
     }
 }

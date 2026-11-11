@@ -1771,6 +1771,44 @@ mod tests {
         );
     }
 
+    const REPEATED_ATTR: &str =
+        "start = element foo { attribute a { text }+, element c { empty }? }";
+
+    #[test]
+    fn repeated_attribute_is_accepted() {
+        let f = Fixture::correct(REPEATED_ATTR);
+        f.valid(r#"<foo a="1"/>"#);
+        f.valid(r#"<foo a="1"><c/></foo>"#);
+    }
+
+    #[test]
+    fn missing_repeated_attribute_is_reported_at_the_start_tag() {
+        // startTagCloseDeriv(oneOrMore p) = oneOrMore(startTagCloseDeriv p), so an attribute
+        // still outstanding under a repeat makes the start tag fail to close.
+        let doc = "<foo></foo>";
+        let errs = validate_doc(REPEATED_ATTR, doc).unwrap_err();
+        assert_matches!(
+            &errs[..],
+            [super::ValidatorError::NotAllowed { kind: "element-end", span, .. }]
+                if span.start == 4 && span.end == 5,
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn missing_repeated_attribute_does_not_cascade_into_children() {
+        let errs = all_errors(REPEATED_ATTR, "<foo><c/></foo>");
+        assert_eq!(
+            errs.len(),
+            1,
+            "expected only the missing-attribute error, got {errs:?}"
+        );
+        assert_eq!(
+            errs[0].message, "element-end not expected here",
+            "got {errs:?}"
+        );
+    }
+
     #[test]
     fn wholly_missing_attribute_does_not_cascade_into_children() {
         let errs = all_errors(

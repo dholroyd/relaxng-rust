@@ -428,8 +428,10 @@ impl Schema {
         PAT_NOT_ALLOWED
     }
     pub(crate) fn one_or_more(&self, pattern: PatId) -> Result<PatId, Overflow> {
-        let p = self.patt(pattern);
-        self.push(Pat::OneOrMore(pattern, p.flags()))
+        match self.patt(pattern) {
+            Pat::NotAllowed => Ok(self.not_allowed()),
+            p => self.push(Pat::OneOrMore(pattern, p.flags())),
+        }
     }
     pub(crate) fn patt(&self, id: PatId) -> Pat {
         self.inner.borrow().patterns[id.0 as usize]
@@ -737,6 +739,9 @@ impl SchemaBuilder {
     }
 
     fn one_or_more(&mut self, pattern: PatId) -> PatId {
+        if let Some(Pat::NotAllowed) = self.try_patt(pattern) {
+            return self.not_allowed();
+        }
         let flags = self.flags_id(pattern);
         self.push(Pat::OneOrMore(pattern, flags))
     }

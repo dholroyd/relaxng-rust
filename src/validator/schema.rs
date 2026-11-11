@@ -691,9 +691,8 @@ impl SchemaBuilder {
 
     /// The flags of the pattern at `id`, or none if it is a `Ref` slot not yet resolved.
     ///
-    /// A composite built over an unresolved slot can therefore get the wrong flags.  Nothing
-    /// reads them before `start_tag_close_deriv` has rebuilt an element's content through
-    /// [`Schema`]'s constructors, which see the resolved operands.
+    /// A composite built over an unresolved slot can therefore get the wrong flags for now;
+    /// [`recompute_flags`] corrects them in `finalize()`, once every slot is resolved.
     fn flags_id(&self, id: PatId) -> PatFlags {
         self.try_patt(id).map(Pat::flags).unwrap_or_default()
     }
@@ -859,14 +858,23 @@ impl SchemaBuilder {
                 }
             });
         }
-        let patterns: Vec<Pat> = self
+        let mut patterns: Vec<Pat> = self
             .patterns
             .into_iter()
             .enumerate()
             .map(|(i, p)| p.unwrap_or_else(|| panic!("unresolved slot at index {}", i)))
             .collect();
+        recompute_flags(&mut patterns);
+        // The flags are part of each key, so rekey the memo by the corrected patterns.  Each
+        // canonical id keeps its place; a resolved `Ref` slot (not itself in the memo) holds a
+        // copy of its target and so is corrected identically, keeping its lookup working.
+        let memo = self
+            .memo
+            .into_values()
+            .map(|id| (patterns[id.0 as usize], id))
+            .collect();
         let inner = Inner {
-            memo: self.memo,
+            memo,
             compiled_len: patterns.len(),
             patterns,
             span_map: self.span_map,
@@ -886,6 +894,76 @@ impl SchemaBuilder {
             datatypes: self.datatypes.into_table(),
             datatype_values: self.datatype_values.into_table(),
             ..Default::default()
+        }
+    }
+}
+
+/// Sets every composite pattern's flags from its operands' flags.
+///
+/// The builder computes flags as it goes, but a pattern built over a `Ref` slot that was not
+/// yet resolved (a definition reached again from within its own body) got default flags for
+/// that operand, and so may be wrong.  Every slot is resolved by now, so recomputing here makes
+/// every pattern's flags right before any document is validated, and patterns derived later
+/// inherit correct flags from their operands.
+///
+/// Operands are visited before the patterns that use them.  The graph is acyclic apart from
+/// paths through `Element`, whose flags do not depend on its content, so flags are only read
+/// across `Element` boundaries without being followed.  An explicit stack keeps deep schemas
+/// from overflowing the call stack.
+fn recompute_flags(patterns: &mut [Pat]) {
+    fn flag_operands(p: &Pat) -> (Option<PatId>, Option<PatId>) {
+        match *p {
+            Pat::Choice(a, b, _) | Pat::Interleave(a, b, _) | Pat::Group(a, b, _) => {
+                (Some(a), Some(b))
+            }
+            Pat::OneOrMore(a, _) | Pat::After(a, _, _) => (Some(a), None),
+            _ => (None, None),
+        }
+    }
+
+    const UNVISITED: u8 = 0;
+    const VISITING: u8 = 1;
+    const DONE: u8 = 2;
+    let mut state = vec![UNVISITED; patterns.len()];
+    let mut stack = Vec::new();
+    for root in 0..patterns.len() {
+        if state[root] != UNVISITED {
+            continue;
+        }
+        stack.push(root);
+        while let Some(&i) = stack.last() {
+            match state[i] {
+                UNVISITED => {
+                    state[i] = VISITING;
+                    let (a, b) = flag_operands(&patterns[i]);
+                    for op in [a, b].into_iter().flatten() {
+                        if state[op.0 as usize] == UNVISITED {
+                            stack.push(op.0 as usize);
+                        }
+                    }
+                }
+                VISITING => {
+                    // All operands are now done (or, were there a cycle, still in progress
+                    // further down the stack and read as they stand).
+                    let f = |id: PatId| patterns[id.0 as usize].flags();
+                    patterns[i] = match patterns[i] {
+                        Pat::Choice(a, b, _) => Pat::Choice(a, b, PatFlags::choice(f(a), f(b))),
+                        Pat::Interleave(a, b, _) => {
+                            Pat::Interleave(a, b, PatFlags::group(f(a), f(b)))
+                        }
+                        Pat::Group(a, b, _) => Pat::Group(a, b, PatFlags::group(f(a), f(b))),
+                        Pat::OneOrMore(a, _) => Pat::OneOrMore(a, f(a)),
+                        Pat::After(a, b, _) => Pat::After(a, b, PatFlags::after(f(a))),
+                        p => p,
+                    };
+                    state[i] = DONE;
+                    stack.pop();
+                }
+                _ => {
+                    // Pushed again by another user before its first visit completed
+                    stack.pop();
+                }
+            }
         }
     }
 }

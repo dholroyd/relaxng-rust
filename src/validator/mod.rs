@@ -1809,6 +1809,48 @@ mod tests {
         );
     }
 
+    /// `inline` is still an unresolved slot while `b`'s content is compiled (it is reached from
+    /// inside `inline`'s own body), so patterns built over it there cannot see that it is
+    /// nullable when they are built.
+    const SELF_REFERENCING_NULLABLE: &str = r#"
+        start = element root { inline }
+        inline = (text | b)*
+        b = element b { ((inline, element foo { empty }?) & element bar { empty }?)+ }
+    "#;
+
+    #[test]
+    fn nullable_reference_under_repeat_compiled_before_resolution() {
+        let f = Fixture::correct(SELF_REFERENCING_NULLABLE);
+        f.valid("<root><b/></root>");
+        f.valid("<root><b></b></root>");
+        f.valid("<root><b>x<b/></b></root>");
+        f.valid("<root><b><foo/><foo/></b></root>");
+        f.valid("<root><b><bar/></b></root>");
+        f.valid("<root><b><foo/><bar/></b></root>");
+        f.invalid("<root><b><baz/></b></root>");
+    }
+
+    #[test]
+    fn compiled_flags_agree_with_operands() {
+        use super::schema::{Pat, PatFlags};
+        let f = Fixture::correct(SELF_REFERENCING_NULLABLE);
+        let c = Case::new(f.schema.clone());
+        let inner = c.engine.schema.inner.borrow();
+        let flags = |id: super::schema::PatId| inner.patterns[id.0 as usize].flags();
+        for (i, p) in inner.patterns.iter().enumerate() {
+            let expected = match *p {
+                Pat::Choice(a, b, _) => PatFlags::choice(flags(a), flags(b)),
+                Pat::Interleave(a, b, _) | Pat::Group(a, b, _) => {
+                    PatFlags::group(flags(a), flags(b))
+                }
+                Pat::OneOrMore(a, _) => flags(a),
+                Pat::After(a, _, _) => PatFlags::after(flags(a)),
+                _ => continue,
+            };
+            assert_eq!(p.flags(), expected, "pattern {i}: {p:?}");
+        }
+    }
+
     #[test]
     fn wholly_missing_attribute_does_not_cascade_into_children() {
         let errs = all_errors(

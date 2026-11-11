@@ -740,23 +740,30 @@ fn double_bits(v: f64) -> u64 {
     }
 }
 
+/// The digits counted by the totalDigits facet in a decimal or integer literal: all of them
+/// apart from leading zeros, but at least one
+fn significant_digits(s: &str) -> usize {
+    let stripped = s.trim_start_matches(['+', '-']).trim_start_matches('0');
+    stripped.bytes().filter(u8::is_ascii_digit).count().max(1)
+}
+
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub enum XsdDatatypes {
     NormalizedString(StringFacets),
     String(StringFacets),
-    Byte(MinMaxFacet<i8>, Option<PatternFacet>),
-    Short(MinMaxFacet<i16>, Option<PatternFacet>),
-    UnsignedByte(MinMaxFacet<u8>, Option<PatternFacet>),
-    UnsignedShort(MinMaxFacet<u16>, Option<PatternFacet>),
-    Long(MinMaxFacet<i64>, Option<PatternFacet>),
-    Int(MinMaxFacet<i32>, Option<PatternFacet>),
-    Integer(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
-    PositiveInteger(MinMaxFacet<num_bigint::BigUint>, Option<PatternFacet>),
-    NonNegativeInteger(MinMaxFacet<num_bigint::BigUint>, Option<PatternFacet>),
-    NonPositiveInteger(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
-    NegativeInteger(MinMaxFacet<num_bigint::BigInt>, Option<PatternFacet>),
-    UnsignedInt(MinMaxFacet<u32>, Option<PatternFacet>),
-    UnsignedLong(MinMaxFacet<u64>, Option<PatternFacet>),
+    Byte(MinMaxFacet<i8>, IntegerFacets),
+    Short(MinMaxFacet<i16>, IntegerFacets),
+    UnsignedByte(MinMaxFacet<u8>, IntegerFacets),
+    UnsignedShort(MinMaxFacet<u16>, IntegerFacets),
+    Long(MinMaxFacet<i64>, IntegerFacets),
+    Int(MinMaxFacet<i32>, IntegerFacets),
+    Integer(MinMaxFacet<num_bigint::BigInt>, IntegerFacets),
+    PositiveInteger(MinMaxFacet<num_bigint::BigUint>, IntegerFacets),
+    NonNegativeInteger(MinMaxFacet<num_bigint::BigUint>, IntegerFacets),
+    NonPositiveInteger(MinMaxFacet<num_bigint::BigInt>, IntegerFacets),
+    NegativeInteger(MinMaxFacet<num_bigint::BigInt>, IntegerFacets),
+    UnsignedInt(MinMaxFacet<u32>, IntegerFacets),
+    UnsignedLong(MinMaxFacet<u64>, IntegerFacets),
     Decimal {
         min_max: MinMaxFacet<bigdecimal::BigDecimal>,
         pattern: Option<PatternFacet>,
@@ -893,20 +900,20 @@ impl XsdDatatypes {
             | XsdDatatypes::Id(f)
             | XsdDatatypes::IdRef(f)
             | XsdDatatypes::Entity(f) => f.pattern.as_ref(),
-            XsdDatatypes::Byte(_, p)
-            | XsdDatatypes::Short(_, p)
-            | XsdDatatypes::UnsignedByte(_, p)
-            | XsdDatatypes::UnsignedShort(_, p)
-            | XsdDatatypes::Long(_, p)
-            | XsdDatatypes::Int(_, p)
-            | XsdDatatypes::Integer(_, p)
-            | XsdDatatypes::PositiveInteger(_, p)
-            | XsdDatatypes::NonNegativeInteger(_, p)
-            | XsdDatatypes::NonPositiveInteger(_, p)
-            | XsdDatatypes::NegativeInteger(_, p)
-            | XsdDatatypes::UnsignedInt(_, p)
-            | XsdDatatypes::UnsignedLong(_, p)
-            | XsdDatatypes::Float(_, p)
+            XsdDatatypes::Byte(_, f)
+            | XsdDatatypes::Short(_, f)
+            | XsdDatatypes::UnsignedByte(_, f)
+            | XsdDatatypes::UnsignedShort(_, f)
+            | XsdDatatypes::Long(_, f)
+            | XsdDatatypes::Int(_, f)
+            | XsdDatatypes::Integer(_, f)
+            | XsdDatatypes::PositiveInteger(_, f)
+            | XsdDatatypes::NonNegativeInteger(_, f)
+            | XsdDatatypes::NonPositiveInteger(_, f)
+            | XsdDatatypes::NegativeInteger(_, f)
+            | XsdDatatypes::UnsignedInt(_, f)
+            | XsdDatatypes::UnsignedLong(_, f) => f.pattern.as_ref(),
+            XsdDatatypes::Float(_, p)
             | XsdDatatypes::Double(_, p)
             | XsdDatatypes::NmTokens(_, p)
             | XsdDatatypes::HexBinary(_, p)
@@ -944,12 +951,24 @@ impl XsdDatatypes {
                 && len.is_valid_count(items.len()))
             .then_some(XsdValue::List(items))
         }
+        /// An integer in the lexical space, if it also satisfies the totalDigits facet
+        fn parse_integer(s: &str, facets: &IntegerFacets) -> Option<XsdInteger> {
+            let i = XsdInteger::parse(s)?;
+            facets
+                .total_digits
+                .is_none_or(|td| significant_digits(s) <= usize::from(td))
+                .then_some(i)
+        }
         /// A fixed-size integer type, whose range comes from `T`
-        fn sized<'a, T>(s: &str, min_max: &MinMaxFacet<T>) -> Option<XsdValue<'a>>
+        fn sized<'a, T>(
+            s: &str,
+            min_max: &MinMaxFacet<T>,
+            facets: &IntegerFacets,
+        ) -> Option<XsdValue<'a>>
         where
             T: PartialOrd + TryFrom<i64> + for<'b> TryFrom<&'b num_bigint::BigInt>,
         {
-            let i = XsdInteger::parse(s)?;
+            let i = parse_integer(s, facets)?;
             let v: T = i.to_prim()?;
             min_max.is_valid(&v).then_some(XsdValue::Integer(i))
         }
@@ -958,9 +977,10 @@ impl XsdDatatypes {
             s: &str,
             signs: &[std::cmp::Ordering],
             min_max: &MinMaxFacet<T>,
+            facets: &IntegerFacets,
             convert: impl FnOnce(num_bigint::BigInt) -> Option<T>,
         ) -> Option<XsdValue<'a>> {
-            let i = XsdInteger::parse(s)?;
+            let i = parse_integer(s, facets)?;
             if !signs.contains(&i.sign()) {
                 return None;
             }
@@ -998,26 +1018,26 @@ impl XsdDatatypes {
             XsdDatatypes::IdRefs(len, _) | XsdDatatypes::Entities(len, _) => {
                 list(s, is_valid_ncname, len)
             }
-            XsdDatatypes::Byte(min_max, _) => sized(s, min_max),
-            XsdDatatypes::Short(min_max, _) => sized(s, min_max),
-            XsdDatatypes::Int(min_max, _) => sized(s, min_max),
-            XsdDatatypes::Long(min_max, _) => sized(s, min_max),
-            XsdDatatypes::UnsignedByte(min_max, _) => sized(s, min_max),
-            XsdDatatypes::UnsignedShort(min_max, _) => sized(s, min_max),
-            XsdDatatypes::UnsignedInt(min_max, _) => sized(s, min_max),
-            XsdDatatypes::UnsignedLong(min_max, _) => sized(s, min_max),
-            XsdDatatypes::Integer(min_max, _) => {
-                unbounded(s, &[Less, Equal, Greater], min_max, Some)
+            XsdDatatypes::Byte(min_max, f) => sized(s, min_max, f),
+            XsdDatatypes::Short(min_max, f) => sized(s, min_max, f),
+            XsdDatatypes::Int(min_max, f) => sized(s, min_max, f),
+            XsdDatatypes::Long(min_max, f) => sized(s, min_max, f),
+            XsdDatatypes::UnsignedByte(min_max, f) => sized(s, min_max, f),
+            XsdDatatypes::UnsignedShort(min_max, f) => sized(s, min_max, f),
+            XsdDatatypes::UnsignedInt(min_max, f) => sized(s, min_max, f),
+            XsdDatatypes::UnsignedLong(min_max, f) => sized(s, min_max, f),
+            XsdDatatypes::Integer(min_max, f) => {
+                unbounded(s, &[Less, Equal, Greater], min_max, f, Some)
             }
-            XsdDatatypes::NonPositiveInteger(min_max, _) => {
-                unbounded(s, &[Less, Equal], min_max, Some)
+            XsdDatatypes::NonPositiveInteger(min_max, f) => {
+                unbounded(s, &[Less, Equal], min_max, f, Some)
             }
-            XsdDatatypes::NegativeInteger(min_max, _) => unbounded(s, &[Less], min_max, Some),
-            XsdDatatypes::NonNegativeInteger(min_max, _) => {
-                unbounded(s, &[Equal, Greater], min_max, |v| v.try_into().ok())
+            XsdDatatypes::NegativeInteger(min_max, f) => unbounded(s, &[Less], min_max, f, Some),
+            XsdDatatypes::NonNegativeInteger(min_max, f) => {
+                unbounded(s, &[Equal, Greater], min_max, f, |v| v.try_into().ok())
             }
-            XsdDatatypes::PositiveInteger(min_max, _) => {
-                unbounded(s, &[Greater], min_max, |v| v.try_into().ok())
+            XsdDatatypes::PositiveInteger(min_max, f) => {
+                unbounded(s, &[Greater], min_max, f, |v| v.try_into().ok())
             }
             XsdDatatypes::Decimal {
                 min_max,
@@ -1029,13 +1049,8 @@ impl XsdDatatypes {
                 if !min_max.is_valid(&v) {
                     return None;
                 }
-                if let Some(td) = total_digits {
-                    // totalDigits counts significant digits (ignoring sign, decimal point, leading zeros)
-                    let stripped = s.trim_start_matches(['+', '-']).trim_start_matches('0');
-                    let sig_digits = stripped.chars().filter(|c| c.is_ascii_digit()).count();
-                    if sig_digits.max(1) > *td as usize {
-                        return None;
-                    }
+                if total_digits.is_some_and(|td| significant_digits(s) > usize::from(td)) {
+                    return None;
                 }
                 if let Some(fd) = fraction_digits {
                     let (_digits, scale) = v.as_bigint_and_exponent();
@@ -1144,6 +1159,13 @@ fn parse_qname(text: &str) -> Option<(Option<&str>, &str)> {
         None if is_valid_ncname(text) => Some((None, text)),
         None => None,
     }
+}
+
+/// Facets other than the range facets, for `integer` and the types derived from it
+#[derive(PartialEq, Eq, Hash, Clone, Debug, Default)]
+pub struct IntegerFacets {
+    pattern: Option<PatternFacet>,
+    total_digits: Option<u16>,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -1953,34 +1975,9 @@ impl Compiler {
     }
 
     fn short(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.integer_facet(ctx, param, "short")?)?
-                }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.integer_facet(ctx, param, "short")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.integer_facet(ctx, param, "short")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.integer_facet(ctx, param, "short")?)?
-                }
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::Short(min_max, pattern))
+        let (min_max, facets) =
+            self.integer_type(ctx, params, |param| self.integer_facet(ctx, param, "short"))?;
+        Ok(XsdDatatypes::Short(min_max, facets))
     }
 
     fn unsigned_short(
@@ -1988,110 +1985,28 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.integer_facet(ctx, param, "unsignedShort")?)?
-                }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.integer_facet(ctx, param, "unsignedShort")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.integer_facet(ctx, param, "unsignedShort")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.integer_facet(ctx, param, "unsignedShort")?)?
-                }
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::UnsignedShort(min_max, pattern))
+        let (min_max, facets) = self.integer_type(ctx, params, |param| {
+            self.integer_facet(ctx, param, "unsignedShort")
+        })?;
+        Ok(XsdDatatypes::UnsignedShort(min_max, facets))
     }
 
     fn long(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(self.integer_facet(ctx, param, "long")?)?,
-                "minExclusive" => min_max.min_exclusive(self.integer_facet(ctx, param, "long")?)?,
-                "maxInclusive" => min_max.max_inclusive(self.integer_facet(ctx, param, "long")?)?,
-                "maxExclusive" => min_max.max_exclusive(self.integer_facet(ctx, param, "long")?)?,
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::Long(min_max, pattern))
+        let (min_max, facets) =
+            self.integer_type(ctx, params, |param| self.integer_facet(ctx, param, "long"))?;
+        Ok(XsdDatatypes::Long(min_max, facets))
     }
 
     fn int(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(self.integer_facet(ctx, param, "int")?)?,
-                "minExclusive" => min_max.min_exclusive(self.integer_facet(ctx, param, "int")?)?,
-                "maxInclusive" => min_max.max_inclusive(self.integer_facet(ctx, param, "int")?)?,
-                "maxExclusive" => min_max.max_exclusive(self.integer_facet(ctx, param, "int")?)?,
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::Int(min_max, pattern))
+        let (min_max, facets) =
+            self.integer_type(ctx, params, |param| self.integer_facet(ctx, param, "int"))?;
+        Ok(XsdDatatypes::Int(min_max, facets))
     }
     fn integer(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.bigint_facet(ctx, param, "integer")?)?
-                }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.bigint_facet(ctx, param, "integer")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.bigint_facet(ctx, param, "integer")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.bigint_facet(ctx, param, "integer")?)?
-                }
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::Integer(min_max, pattern))
+        let (min_max, facets) = self.integer_type(ctx, params, |param| {
+            self.bigint_facet(ctx, param, "integer")
+        })?;
+        Ok(XsdDatatypes::Integer(min_max, facets))
     }
 
     fn positive_integer(
@@ -2099,24 +2014,40 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
+        let (min_max, facets) = self.integer_type(ctx, params, |param| {
+            self.integer_facet(ctx, param, "positiveInteger")
+        })?;
+        Ok(XsdDatatypes::PositiveInteger(min_max, facets))
+    }
+
+    /// Facets common to `integer` and the types derived from it.  `bound` parses the value of a
+    /// range facet.
+    fn integer_type<T: PartialOrd>(
+        &self,
+        ctx: &Context,
+        params: &[types::Param],
+        bound: impl Fn(&types::Param) -> Result<T, FacetError>,
+    ) -> Result<(MinMaxFacet<T>, IntegerFacets), FacetError> {
         let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
+        let mut facets = IntegerFacets::default();
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.integer_facet(ctx, param, "positiveInteger")?)?
+                "minInclusive" => min_max.min_inclusive(bound(param)?)?,
+                "minExclusive" => min_max.min_exclusive(bound(param)?)?,
+                "maxInclusive" => min_max.max_inclusive(bound(param)?)?,
+                "maxExclusive" => min_max.max_exclusive(bound(param)?)?,
+                "pattern" => facets.pattern = Some(self.pattern(ctx, param)?),
+                "totalDigits" => facets.total_digits = Some(Self::total_digits(ctx, param)?),
+                // `integer` fixes fractionDigits at 0, so only that value may be given
+                "fractionDigits" => {
+                    if Self::u16(ctx, param)? != 0 {
+                        return Err(FacetError::InvalidValue(
+                            ctx.convert_span(&param.span),
+                            "fractionDigits is fixed at 0 for integer types".to_string(),
+                        ));
+                    }
                 }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.integer_facet(ctx, param, "positiveInteger")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.integer_facet(ctx, param, "positiveInteger")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.integer_facet(ctx, param, "positiveInteger")?)?
-                }
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -2126,7 +2057,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::PositiveInteger(min_max, pattern))
+        Ok((min_max, facets))
     }
 
     fn decimal(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2151,7 +2082,7 @@ impl Compiler {
                 }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 "fractionDigits" => fraction_digits = Some(Self::u16(ctx, param)?),
-                "totalDigits" => total_digits = Some(Self::u16(ctx, param)?),
+                "totalDigits" => total_digits = Some(Self::total_digits(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
                         ctx.convert_span(&param.span),
@@ -2429,34 +2360,10 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.integer_facet(ctx, param, "unsignedInt")?)?
-                }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.integer_facet(ctx, param, "unsignedInt")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.integer_facet(ctx, param, "unsignedInt")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.integer_facet(ctx, param, "unsignedInt")?)?
-                }
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::UnsignedInt(min_max, pattern))
+        let (min_max, facets) = self.integer_type(ctx, params, |param| {
+            self.integer_facet(ctx, param, "unsignedInt")
+        })?;
+        Ok(XsdDatatypes::UnsignedInt(min_max, facets))
     }
 
     fn unsigned_long(
@@ -2464,34 +2371,10 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.integer_facet(ctx, param, "unsignedLong")?)?
-                }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.integer_facet(ctx, param, "unsignedLong")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.integer_facet(ctx, param, "unsignedLong")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.integer_facet(ctx, param, "unsignedLong")?)?
-                }
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::UnsignedLong(min_max, pattern))
+        let (min_max, facets) = self.integer_type(ctx, params, |param| {
+            self.integer_facet(ctx, param, "unsignedLong")
+        })?;
+        Ok(XsdDatatypes::UnsignedLong(min_max, facets))
     }
 
     fn id(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2539,26 +2422,9 @@ impl Compiler {
     }
 
     fn byte(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(self.integer_facet(ctx, param, "byte")?)?,
-                "minExclusive" => min_max.min_exclusive(self.integer_facet(ctx, param, "byte")?)?,
-                "maxInclusive" => min_max.max_inclusive(self.integer_facet(ctx, param, "byte")?)?,
-                "maxExclusive" => min_max.max_exclusive(self.integer_facet(ctx, param, "byte")?)?,
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::Byte(min_max, pattern))
+        let (min_max, facets) =
+            self.integer_type(ctx, params, |param| self.integer_facet(ctx, param, "byte"))?;
+        Ok(XsdDatatypes::Byte(min_max, facets))
     }
 
     fn unsigned_byte(
@@ -2566,34 +2432,10 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.integer_facet(ctx, param, "unsignedByte")?)?
-                }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.integer_facet(ctx, param, "unsignedByte")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.integer_facet(ctx, param, "unsignedByte")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.integer_facet(ctx, param, "unsignedByte")?)?
-                }
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::UnsignedByte(min_max, pattern))
+        let (min_max, facets) = self.integer_type(ctx, params, |param| {
+            self.integer_facet(ctx, param, "unsignedByte")
+        })?;
+        Ok(XsdDatatypes::UnsignedByte(min_max, facets))
     }
 
     fn float(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2624,42 +2466,10 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(self.integer_facet(
-                    ctx,
-                    param,
-                    "nonNegativeInteger",
-                )?)?,
-                "minExclusive" => min_max.min_exclusive(self.integer_facet(
-                    ctx,
-                    param,
-                    "nonNegativeInteger",
-                )?)?,
-                "maxInclusive" => min_max.max_inclusive(self.integer_facet(
-                    ctx,
-                    param,
-                    "nonNegativeInteger",
-                )?)?,
-                "maxExclusive" => min_max.max_exclusive(self.integer_facet(
-                    ctx,
-                    param,
-                    "nonNegativeInteger",
-                )?)?,
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::NonNegativeInteger(min_max, pattern))
+        let (min_max, facets) = self.integer_type(ctx, params, |param| {
+            self.integer_facet(ctx, param, "nonNegativeInteger")
+        })?;
+        Ok(XsdDatatypes::NonNegativeInteger(min_max, facets))
     }
 
     fn non_positive_integer(
@@ -2667,34 +2477,10 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.bigint_facet(ctx, param, "nonPositiveInteger")?)?
-                }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.bigint_facet(ctx, param, "nonPositiveInteger")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.bigint_facet(ctx, param, "nonPositiveInteger")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.bigint_facet(ctx, param, "nonPositiveInteger")?)?
-                }
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::NonPositiveInteger(min_max, pattern))
+        let (min_max, facets) = self.integer_type(ctx, params, |param| {
+            self.bigint_facet(ctx, param, "nonPositiveInteger")
+        })?;
+        Ok(XsdDatatypes::NonPositiveInteger(min_max, facets))
     }
 
     fn negative_integer(
@@ -2702,34 +2488,10 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
-        let mut pattern = None;
-
-        for param in params {
-            match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.bigint_facet(ctx, param, "negativeInteger")?)?
-                }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.bigint_facet(ctx, param, "negativeInteger")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.bigint_facet(ctx, param, "negativeInteger")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.bigint_facet(ctx, param, "negativeInteger")?)?
-                }
-                "pattern" => pattern = Some(self.pattern(ctx, param)?),
-                _ => {
-                    return Err(FacetError::InvalidFacet(
-                        ctx.convert_span(&param.span),
-                        param.name.to_string(),
-                    ));
-                }
-            }
-        }
-
-        Ok(XsdDatatypes::NegativeInteger(min_max, pattern))
+        let (min_max, facets) = self.integer_type(ctx, params, |param| {
+            self.bigint_facet(ctx, param, "negativeInteger")
+        })?;
+        Ok(XsdDatatypes::NegativeInteger(min_max, facets))
     }
 
     fn time(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2902,6 +2664,17 @@ impl Compiler {
         }
 
         Ok(XsdDatatypes::Entities(len, pattern))
+    }
+
+    /// The value of a totalDigits facet, which must be a positive integer
+    fn total_digits(ctx: &Context, param: &types::Param) -> Result<u16, FacetError> {
+        match Self::u16(ctx, param)? {
+            0 => Err(FacetError::InvalidValue(
+                ctx.convert_span(&param.span),
+                "totalDigits must be greater than zero".to_string(),
+            )),
+            n => Ok(n),
+        }
     }
 
     fn u16(ctx: &Context, param: &types::Param) -> Result<u16, FacetError> {
@@ -4020,6 +3793,89 @@ mod test {
                 Compiler.compile(&ctx, &(0..0), type_name, &[param(facet, value)]),
                 Err(XsdDatatypeError::Facet { .. }),
                 "xsd:{type_name} {{ {facet} = {value:?} }}"
+            );
+        }
+    }
+
+    const INTEGER_TYPES: [&str; 13] = [
+        "integer",
+        "nonPositiveInteger",
+        "negativeInteger",
+        "long",
+        "int",
+        "short",
+        "byte",
+        "nonNegativeInteger",
+        "unsignedLong",
+        "unsignedInt",
+        "unsignedShort",
+        "unsignedByte",
+        "positiveInteger",
+    ];
+
+    fn is_non_positive(type_name: &str) -> bool {
+        matches!(type_name, "nonPositiveInteger" | "negativeInteger")
+    }
+
+    #[test]
+    fn total_digits_on_integer_types() {
+        for type_name in INTEGER_TYPES {
+            let dt = compile_one_param(type_name, "totalDigits", "2");
+            let sample = if is_non_positive(type_name) {
+                ["-99", "-0099", "-100"]
+            } else {
+                ["99", "+0099", "100"]
+            };
+            assert!(dt.is_valid(sample[0]), "xsd:{type_name} {:?}", sample[0]);
+            // leading zeros and the sign are not counted
+            assert!(dt.is_valid(sample[1]), "xsd:{type_name} {:?}", sample[1]);
+            assert!(!dt.is_valid(sample[2]), "xsd:{type_name} {:?}", sample[2]);
+        }
+        // zero has one digit
+        let dt = compile_one_param("integer", "totalDigits", "1");
+        assert!(dt.is_valid("000"));
+        // combines with the range facets
+        let dt = compile_params("int", &[("totalDigits", "3"), ("minInclusive", "500")]).unwrap();
+        assert!(dt.is_valid("999"));
+        assert!(!dt.is_valid("499"));
+        assert!(!dt.is_valid("1000"));
+    }
+
+    #[test]
+    fn total_digits_must_be_positive() {
+        for type_name in ["integer", "unsignedByte", "decimal"] {
+            assert!(
+                matches!(
+                    compile_params(type_name, &[("totalDigits", "0")]),
+                    Err(XsdDatatypeError::Facet {
+                        facet: FacetError::InvalidValue(..),
+                        ..
+                    })
+                ),
+                "xsd:{type_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn fraction_digits_is_fixed_at_zero_on_integer_types() {
+        for type_name in INTEGER_TYPES {
+            let dt = compile_one_param(type_name, "fractionDigits", "0");
+            let one = if is_non_positive(type_name) {
+                "-1"
+            } else {
+                "1"
+            };
+            assert!(dt.is_valid(one), "xsd:{type_name}");
+            assert!(
+                matches!(
+                    compile_params(type_name, &[("fractionDigits", "1")]),
+                    Err(XsdDatatypeError::Facet {
+                        facet: FacetError::InvalidValue(..),
+                        ..
+                    })
+                ),
+                "xsd:{type_name}"
             );
         }
     }

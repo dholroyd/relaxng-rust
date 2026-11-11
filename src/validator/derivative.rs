@@ -555,8 +555,8 @@ impl Schema {
                 self.interleave(c1, c2)?
             }
             Pat::OneOrMore(p, _) => {
-                let _o = self.start_tag_close_deriv(p)?;
-                self.one_or_more(p)?
+                let o = self.start_tag_close_deriv(p)?;
+                self.one_or_more(o)?
             }
             Pat::Attribute(_, _) => self.not_allowed(),
             _ => pid,
@@ -613,9 +613,10 @@ impl Schema {
                 let c2 = self.force_start_tag_close_deriv_memo(p2, memo)?;
                 self.interleave(c1, c2)?
             }
-            // Mirrors `start_tag_close_deriv`, which likewise leaves the body untouched; an
-            // attribute nested under a repeat is therefore not force-matched here either.
-            Pat::OneOrMore(p, _) => self.one_or_more(p)?,
+            Pat::OneOrMore(p, _) => {
+                let o = self.force_start_tag_close_deriv_memo(p, memo)?;
+                self.one_or_more(o)?
+            }
             Pat::Attribute(_, _) => self.empty(),
             _ => pid,
         };

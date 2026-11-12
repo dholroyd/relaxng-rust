@@ -239,12 +239,19 @@ pub enum RelaxError {
     Input(codemap::Span, compact::InputError),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum NamespaceBinding {
+    Uri(String),
+    Inherit,
+}
+
 pub(crate) enum Context<'a> {
     Root {
         file: Arc<codemap::File>,
         refs: RefCell<HashMap<RefKey, Rc<RefCell<Option<model::DefineRule>>>>>,
-        namespaces: HashMap<String, String>,
+        namespaces: HashMap<String, NamespaceBinding>,
         default_namespace: String,
+        inherited_namespace: String,
         datatypes: HashMap<String, String>,
         //start: Option<DefineRule>,
     },
@@ -255,8 +262,9 @@ pub(crate) enum Context<'a> {
         // grammar actually had such a definition (it is an error to provide an override for
         // a name that's not defined in the include)
         overrides: RefCell<HashMap<RefKey, (codemap::Span, bool)>>,
-        namespaces: HashMap<String, String>,
+        namespaces: HashMap<String, NamespaceBinding>,
         default_namespace: String,
+        inherited_namespace: String,
         datatypes: HashMap<String, String>,
     },
     IncludeOverrides {
@@ -290,7 +298,7 @@ impl<'a> Context<'a> {
         let mut namespaces = HashMap::new();
         namespaces.insert(
             "xml".to_string(),
-            "http://www.w3.org/XML/1998/namespace".to_string(),
+            NamespaceBinding::Uri("http://www.w3.org/XML/1998/namespace".to_string()),
         );
         let mut datatypes = HashMap::new();
         datatypes.insert(
@@ -302,6 +310,7 @@ impl<'a> Context<'a> {
             refs: RefCell::new(HashMap::new()),
             namespaces,
             default_namespace: "".to_string(),
+            inherited_namespace: "".to_string(),
             datatypes,
             //start: None,
         }
@@ -318,7 +327,7 @@ impl<'a> Context<'a> {
         let mut namespaces = HashMap::new();
         namespaces.insert(
             "xml".to_string(),
-            "http://www.w3.org/XML/1998/namespace".to_string(),
+            NamespaceBinding::Uri("http://www.w3.org/XML/1998/namespace".to_string()),
         );
         let mut datatypes = HashMap::new();
         datatypes.insert(
@@ -331,6 +340,7 @@ impl<'a> Context<'a> {
             overrides: RefCell::new(HashMap::new()),
             namespaces,
             default_namespace: ns.unwrap_or("").to_string(),
+            inherited_namespace: ns.unwrap_or("").to_string(),
             datatypes,
         })
     }
@@ -437,14 +447,36 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn declare_namespace(&mut self, prefix: String, uri: String) -> Result<(), RelaxError> {
+    fn inherited_namespace_uri(&self) -> &str {
+        match self {
+            Context::Root {
+                inherited_namespace,
+                ..
+            }
+            | Context::Include {
+                inherited_namespace,
+                ..
+            } => &inherited_namespace[..],
+            Context::IncludeOverrides { .. } => self.includer().inherited_namespace_uri(),
+            Context::Grammar { parent, .. }
+            | Context::Define { parent, .. }
+            | Context::Element { parent }
+            | Context::Attribute { parent, .. } => parent.inherited_namespace_uri(),
+        }
+    }
+
+    fn declare_namespace(
+        &mut self,
+        prefix: String,
+        binding: NamespaceBinding,
+    ) -> Result<(), RelaxError> {
         match self {
             Context::Root { namespaces, .. } | Context::Include { namespaces, .. } => {
                 if let Some(_old_uri) = namespaces.get(&prefix) {
                     //Err(RelaxError::NamespacePrefixAlreadyDefined { span: self.convert_span(), prefix })
                     Ok(())
                 } else {
-                    namespaces.insert(prefix, uri);
+                    namespaces.insert(prefix, binding);
                     Ok(())
                 }
             }
@@ -470,9 +502,19 @@ impl<'a> Context<'a> {
     }
     pub(super) fn namespace_uri_for_prefix_str(&self, prefix: &str) -> Option<&str> {
         match self {
-            Context::Root { namespaces, .. } | Context::Include { namespaces, .. } => {
-                namespaces.get(prefix).map(|s| &s[..])
+            Context::Root {
+                namespaces,
+                inherited_namespace,
+                ..
             }
+            | Context::Include {
+                namespaces,
+                inherited_namespace,
+                ..
+            } => namespaces.get(prefix).map(|binding| match binding {
+                NamespaceBinding::Uri(uri) => &uri[..],
+                NamespaceBinding::Inherit => &inherited_namespace[..],
+            }),
             Context::IncludeOverrides { .. } => {
                 self.includer().namespace_uri_for_prefix_str(prefix)
             }
@@ -2145,28 +2187,30 @@ impl<FS: Files> Compiler<FS> {
     ) -> Result<(), RelaxError> {
         match dec {
             types::Decl::DefaultNamespace(types::DefaultNamespaceDeclaration { prefix, uri }) => {
-                match uri {
-                    NamespaceUriLiteral::Inherit => {
-                        panic!("Can't inherit namespace {prefix:?} at top level, I think?")
-                    }
+                let (default, binding) = match uri {
+                    NamespaceUriLiteral::Inherit => (
+                        ctx.inherited_namespace_uri().to_string(),
+                        NamespaceBinding::Inherit,
+                    ),
                     NamespaceUriLiteral::Uri(uri) => {
-                        ctx.set_default_namespace(uri.as_string_value());
-                        if let Some(p) = prefix {
-                            ctx.declare_namespace(p.clone(), uri.as_string_value())
-                        } else {
-                            Ok(())
-                        }
+                        let uri = uri.as_string_value();
+                        (uri.clone(), NamespaceBinding::Uri(uri))
                     }
+                };
+                ctx.set_default_namespace(default);
+                if let Some(p) = prefix {
+                    ctx.declare_namespace(p.clone(), binding)
+                } else {
+                    Ok(())
                 }
             }
-            types::Decl::Namespace(types::NamespaceDeclaration { prefix, uri }) => match uri {
-                NamespaceUriLiteral::Inherit => {
-                    panic!("Can't inherit namespace {prefix:?} at top level, I think?")
-                }
-                NamespaceUriLiteral::Uri(uri) => {
-                    ctx.declare_namespace(prefix.clone(), uri.as_string_value())
-                }
-            },
+            types::Decl::Namespace(types::NamespaceDeclaration { prefix, uri }) => {
+                let binding = match uri {
+                    NamespaceUriLiteral::Inherit => NamespaceBinding::Inherit,
+                    NamespaceUriLiteral::Uri(uri) => NamespaceBinding::Uri(uri.as_string_value()),
+                };
+                ctx.declare_namespace(prefix.clone(), binding)
+            }
             types::Decl::Datatypes(types::DatatypesDeclaration { prefix, uri }) => {
                 let span = ctx.convert_span(&uri.0);
                 ctx.declare_datatype(prefix.clone(), uri.as_string_value(), span)
@@ -2596,6 +2640,44 @@ mod tests {
                 panic!("{main:?}: expected named element as start pattern");
             };
             assert_eq!(namespace_uri, expected, "{main:?}");
+        }
+    }
+
+    #[test]
+    fn namespace_declared_as_inherit() {
+        for (main, inc, expected) in [
+            ("namespace f = inherit\nelement f:x { empty }", "", ""),
+            ("default namespace = inherit\nelement x { empty }", "", ""),
+            (
+                "default namespace = \"urn:a\"\ninclude \"inc.rnc\"",
+                "default namespace = \"urn:d\"\nnamespace f = inherit\nstart = element f:x { empty }",
+                "urn:a",
+            ),
+            (
+                "default namespace = \"urn:a\"\ninclude \"inc.rnc\"",
+                "default namespace = inherit\nnamespace g = \"urn:g\"\nstart = element x { empty }",
+                "urn:a",
+            ),
+            (
+                "namespace b = \"urn:b\"\ninclude \"inc.rnc\" inherit = b",
+                "default namespace f = inherit\nstart = element f:x { empty }",
+                "urn:b",
+            ),
+            (
+                "default namespace = \"urn:a\"\nnamespace f = inherit\ninclude \"inc.rnc\" inherit = f",
+                "start = element x { empty }",
+                "",
+            ),
+        ] {
+            let start = compile_include_case(main, inc)
+                .unwrap_or_else(|e| panic!("{main:?} / {inc:?} failed to compile: {e:?}"));
+            let start = start.borrow();
+            let Some(model::Pattern::Element(model::NameClass::Named { namespace_uri, .. }, ..)) =
+                start.as_ref().map(|d| d.pattern())
+            else {
+                panic!("{main:?} / {inc:?}: expected named element as start pattern");
+            };
+            assert_eq!(namespace_uri, expected, "{main:?} / {inc:?}");
         }
     }
 

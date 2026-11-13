@@ -42,6 +42,15 @@ pub(crate) enum Error {
     InvalidOrUnclosedEntity {
         span: Range<u64>,
     },
+    IllegalChar {
+        span: Range<u64>,
+        code_point: u32,
+        kind: &'static str,
+    },
+    IllegalCharRef {
+        span: Range<u64>,
+        code_point: u32,
+    },
     /// An element or attribute name is not a valid XML Name.
     InvalidName {
         span: Range<u64>,
@@ -658,14 +667,93 @@ fn undefined_or_invalid_prefix(p: &[u8], name_span: Span) -> Error {
     }
 }
 
-fn decode_char_ref(value: &[u8]) -> Result<char, ()> {
+fn decode_char_ref(value: &[u8]) -> Result<u32, ()> {
     let s = std::str::from_utf8(value).map_err(|_| ())?;
-    let n = if let Some(hex) = s.strip_prefix('x') {
-        u32::from_str_radix(hex, 16).map_err(|_| ())?
+    if let Some(hex) = s.strip_prefix('x') {
+        u32::from_str_radix(hex, 16).map_err(|_| ())
     } else {
-        s.parse::<u32>().map_err(|_| ())?
+        s.parse::<u32>().map_err(|_| ())
+    }
+}
+
+fn is_xml_char(c: u32) -> bool {
+    matches!(c, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
+}
+
+// Checks that bytes found at span are UTF-8, and only legal XML characters.
+// Combining the UTF-8 and xml-char checks into one loop is faster than std::str::from_utf8() +
+// a separate xml-char check.
+fn check_utf8_chars<'a, E>(
+    bytes: &'a [u8],
+    span: Span,
+    kind: &'static str,
+) -> Result<&'a str, Failure<E>> {
+    const OK: u8 = 0;
+    const ILLEGAL: u8 = 1;
+    const MULTI: u8 = 2;
+    static CLASS: [u8; 256] = {
+        let mut t = [OK; 256];
+        let mut b = 0;
+        while b < 256 {
+            t[b] = if b >= 0x80 {
+                MULTI
+            } else if b < 0x20 && !matches!(b as u8, b'\t' | b'\n' | b'\r') {
+                ILLEGAL
+            } else {
+                OK
+            };
+            b += 1;
+        }
+        t
     };
-    char::from_u32(n).ok_or(())
+    let invalid_utf8 = || {
+        Failure::Infoset(Error::InvalidUtf8 {
+            span: span.start..span.end,
+            kind,
+        })
+    };
+    let illegal = |i: usize, code_point: u32, len: u64| {
+        let start = span.start + i as u64;
+        Failure::Infoset(Error::IllegalChar {
+            span: start..start + len,
+            code_point,
+            kind,
+        })
+    };
+    let cont = |i: usize| bytes.get(i).is_some_and(|&b| b & 0xC0 == 0x80);
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        let b = bytes[i];
+        match CLASS[b as usize] {
+            OK => i += 1,
+            ILLEGAL => return Err(illegal(i, u32::from(b), 1)),
+            _ => {
+                // The same rules as std::str::from_utf8: no overlong forms, surrogates or
+                // code points beyond U+10FFFF
+                let b1 = *bytes.get(i + 1).ok_or_else(invalid_utf8)?;
+                let len = match b {
+                    0xC2..=0xDF if b1 & 0xC0 == 0x80 => 2,
+                    0xE0 if (0xA0..=0xBF).contains(&b1) => 3,
+                    0xE1..=0xEC | 0xEE | 0xEF if b1 & 0xC0 == 0x80 => 3,
+                    0xED if (0x80..=0x9F).contains(&b1) => 3,
+                    0xF0 if (0x90..=0xBF).contains(&b1) => 4,
+                    0xF1..=0xF3 if b1 & 0xC0 == 0x80 => 4,
+                    0xF4 if (0x80..=0x8F).contains(&b1) => 4,
+                    _ => return Err(invalid_utf8()),
+                };
+                if len >= 3 && !cont(i + 2) || len == 4 && !cont(i + 3) {
+                    return Err(invalid_utf8());
+                }
+                if b == 0xEF && b1 == 0xBF && bytes[i + 2] >= 0xBE {
+                    return Err(illegal(i, 0xFFFE + u32::from(bytes[i + 2] - 0xBE), 3));
+                }
+                i += len;
+            }
+        }
+    }
+    // SAFETY: every byte was checked above as valid UTF-8
+    Ok(unsafe { std::str::from_utf8_unchecked(bytes) })
 }
 
 /// Document state, kept apart from the handler so that events can borrow it while the handler
@@ -763,19 +851,15 @@ impl<'s, 'h, H: Handler> Driver<'s, 'h, H> {
             .map_err(Failure::Handler)
     }
 
-    /// Checks that `bytes` are UTF-8 and passes them on as text.
+    /// Checks that `bytes` are UTF-8 holding only legal XML characters, and passes them on as
+    /// text.
     fn text_bytes(
         &mut self,
         bytes: &[u8],
         span: Span,
         kind: &'static str,
     ) -> Result<(), Failure<H::Error>> {
-        let s = std::str::from_utf8(bytes).map_err(|_| {
-            Failure::Infoset(Error::InvalidUtf8 {
-                span: span.start..span.end,
-                kind,
-            })
-        })?;
+        let s = check_utf8_chars(bytes, span, kind)?;
         self.text(s, span)
     }
 
@@ -879,11 +963,18 @@ fn entity_text<E>(name: &[u8], span: Span) -> Result<&'static str, Failure<E>> {
 }
 
 fn char_ref<E>(value: &[u8], span: Span) -> Result<char, Failure<E>> {
-    decode_char_ref(value).map_err(|()| {
+    let code_point = decode_char_ref(value).map_err(|()| {
         Failure::Infoset(Error::InvalidOrUnclosedEntity {
             span: span.start..span.end,
         })
-    })
+    })?;
+    if !is_xml_char(code_point) {
+        return Err(Failure::Infoset(Error::IllegalCharRef {
+            span: span.start..span.end,
+            code_point,
+        }));
+    }
+    Ok(char::from_u32(code_point).expect("every XML Char is a Unicode scalar value"))
 }
 
 impl<H: Handler> Visitor for Driver<'_, '_, H> {
@@ -909,12 +1000,7 @@ impl<H: Handler> Visitor for Driver<'_, '_, H> {
     fn attribute_value(&mut self, value: &[u8], span: Span) -> Result<(), Self::Error> {
         // Validate UTF-8 at the boundary so the arena's invariant holds:
         // every byte in an attribute-value range is valid UTF-8.
-        std::str::from_utf8(value).map_err(|_| {
-            Failure::Infoset(Error::InvalidUtf8 {
-                span: span.start..span.end,
-                kind: "attribute value",
-            })
-        })?;
+        check_utf8_chars::<H::Error>(value, span, "attribute value")?;
         self.state.push_attribute_value(value)
     }
 
@@ -1049,6 +1135,16 @@ impl<H: Handler> Visitor for Driver<'_, '_, H> {
         self.text_bytes(text, span, "CDATA content")
     }
 
+    fn comment_content(&mut self, text: &[u8], span: Span) -> Result<(), Self::Error> {
+        check_utf8_chars::<H::Error>(text, span, "comment")?;
+        Ok(())
+    }
+
+    fn pi_content(&mut self, data: &[u8], span: Span) -> Result<(), Self::Error> {
+        check_utf8_chars::<H::Error>(data, span, "processing instruction")?;
+        Ok(())
+    }
+
     fn end_document(&mut self) -> Result<(), Self::Error> {
         if let Some(scope) = self.state.stack.scopes.last() {
             let span = scope.name_span;
@@ -1060,5 +1156,60 @@ impl<H: Handler> Visitor for Driver<'_, '_, H> {
             return Err(Failure::Infoset(Error::MissingRootElement));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `check_utf8_chars` accepts exactly what `std::str::from_utf8` does, less the characters
+    /// XML excludes.
+    #[test]
+    fn check_utf8_chars_agrees_with_std() {
+        // Every sequence of up to two bytes, and every one that a third byte could make a
+        // character of; then four-byte ones, with each kind of third byte
+        let check = |buf: &[u8]| {
+            let ours = check_utf8_chars::<()>(buf, Span::new(0, buf.len() as u64), "t");
+            let std = std::str::from_utf8(buf);
+            let expected = match std {
+                Err(_) => "utf8",
+                Ok(s) if s.chars().all(|c| is_xml_char(u32::from(c))) => "ok",
+                Ok(_) => "char",
+            };
+            let got = match ours {
+                Ok(_) => "ok",
+                Err(Failure::Infoset(Error::InvalidUtf8 { .. })) => "utf8",
+                Err(Failure::Infoset(Error::IllegalChar { .. })) => "char",
+                Err(_) => "other",
+            };
+            // An illegal character before invalid UTF-8 may be reported first
+            assert!(
+                got == expected || (got == "char" && expected == "utf8"),
+                "{buf:x?}"
+            );
+        };
+        for a in 0..=255u8 {
+            check(&[a]);
+            for b in 0..=255u8 {
+                check(&[a, b]);
+            }
+        }
+        for a in 0xE0..=0xEFu8 {
+            for b in 0..=255u8 {
+                for c in 0..=255u8 {
+                    check(&[a, b, c]);
+                }
+            }
+        }
+        for a in 0xF0..=0xF4u8 {
+            for b in 0x80..=0xBFu8 {
+                for c in [0x7F, 0x80, 0xBF, 0xC0] {
+                    for d in 0..=255u8 {
+                        check(&[a, b, c, d]);
+                    }
+                }
+            }
+        }
     }
 }

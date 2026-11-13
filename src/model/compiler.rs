@@ -237,6 +237,61 @@ pub enum RelaxError {
     },
     /// The compact-syntax source text was rejected before tokenisation
     Input(codemap::Span, compact::InputError),
+    InvalidAnnotationName {
+        span: codemap::Span,
+        reason: AnnotationNameError,
+        declaration: Option<codemap::Span>,
+    },
+    DuplicateAnnotationAttribute {
+        duplicate: codemap::Span,
+        original: codemap::Span,
+        namespace_uri: String,
+        local_name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnnotationNameError {
+    UnqualifiedAttribute,
+    RelaxNgNamespace,
+    XmlnsNamespace,
+    XmlnsName,
+    InheritedNamespace { prefix: String },
+}
+
+impl AnnotationNameError {
+    fn declaration_label(&self) -> &'static str {
+        match self {
+            AnnotationNameError::UnqualifiedAttribute => "prefix bound to no namespace here",
+            AnnotationNameError::RelaxNgNamespace => "prefix bound to the RELAX NG namespace here",
+            AnnotationNameError::XmlnsNamespace => "prefix bound to the xmlns namespace here",
+            AnnotationNameError::XmlnsName => "attribute named `xmlns` here",
+            AnnotationNameError::InheritedNamespace { .. } => "prefix declared as `inherit` here",
+        }
+    }
+}
+
+impl std::fmt::Display for AnnotationNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AnnotationNameError::UnqualifiedAttribute => {
+                write!(f, "An annotation attribute must be in a namespace")
+            }
+            AnnotationNameError::RelaxNgNamespace => {
+                write!(f, "An annotation can't be in the RELAX NG namespace")
+            }
+            AnnotationNameError::XmlnsNamespace => {
+                write!(f, "An annotation attribute can't be in the xmlns namespace")
+            }
+            AnnotationNameError::XmlnsName => {
+                write!(f, "An annotation attribute can't be named `xmlns`")
+            }
+            AnnotationNameError::InheritedNamespace { prefix } => write!(
+                f,
+                "Prefix {prefix:?} is declared as `inherit`, which an annotation can't use"
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -245,11 +300,19 @@ pub(crate) enum NamespaceBinding {
     Inherit,
 }
 
+/// A namespace prefix's binding, and where it was declared
+#[derive(Clone, Debug)]
+pub(crate) struct NamespaceDecl {
+    binding: NamespaceBinding,
+    /// The `namespace` declaration; `None` for the predeclared `xml` prefix
+    span: Option<codemap::Span>,
+}
+
 pub(crate) enum Context<'a> {
     Root {
         file: Arc<codemap::File>,
         refs: RefCell<HashMap<RefKey, Rc<RefCell<Option<model::DefineRule>>>>>,
-        namespaces: HashMap<String, NamespaceBinding>,
+        namespaces: HashMap<String, NamespaceDecl>,
         default_namespace: String,
         inherited_namespace: String,
         datatypes: HashMap<String, String>,
@@ -262,7 +325,7 @@ pub(crate) enum Context<'a> {
         // grammar actually had such a definition (it is an error to provide an override for
         // a name that's not defined in the include)
         overrides: RefCell<HashMap<RefKey, (codemap::Span, bool)>>,
-        namespaces: HashMap<String, NamespaceBinding>,
+        namespaces: HashMap<String, NamespaceDecl>,
         default_namespace: String,
         inherited_namespace: String,
         datatypes: HashMap<String, String>,
@@ -298,7 +361,10 @@ impl<'a> Context<'a> {
         let mut namespaces = HashMap::new();
         namespaces.insert(
             "xml".to_string(),
-            NamespaceBinding::Uri("http://www.w3.org/XML/1998/namespace".to_string()),
+            NamespaceDecl {
+                binding: NamespaceBinding::Uri("http://www.w3.org/XML/1998/namespace".to_string()),
+                span: None,
+            },
         );
         let mut datatypes = HashMap::new();
         datatypes.insert(
@@ -327,7 +393,10 @@ impl<'a> Context<'a> {
         let mut namespaces = HashMap::new();
         namespaces.insert(
             "xml".to_string(),
-            NamespaceBinding::Uri("http://www.w3.org/XML/1998/namespace".to_string()),
+            NamespaceDecl {
+                binding: NamespaceBinding::Uri("http://www.w3.org/XML/1998/namespace".to_string()),
+                span: None,
+            },
         );
         let mut datatypes = HashMap::new();
         datatypes.insert(
@@ -469,6 +538,7 @@ impl<'a> Context<'a> {
         &mut self,
         prefix: String,
         binding: NamespaceBinding,
+        span: codemap::Span,
     ) -> Result<(), RelaxError> {
         match self {
             Context::Root { namespaces, .. } | Context::Include { namespaces, .. } => {
@@ -476,7 +546,13 @@ impl<'a> Context<'a> {
                     //Err(RelaxError::NamespacePrefixAlreadyDefined { span: self.convert_span(), prefix })
                     Ok(())
                 } else {
-                    namespaces.insert(prefix, binding);
+                    namespaces.insert(
+                        prefix,
+                        NamespaceDecl {
+                            binding,
+                            span: Some(span),
+                        },
+                    );
                     Ok(())
                 }
             }
@@ -501,27 +577,22 @@ impl<'a> Context<'a> {
         }
     }
     pub(super) fn namespace_uri_for_prefix_str(&self, prefix: &str) -> Option<&str> {
+        self.namespace_decl(prefix).map(|decl| match &decl.binding {
+            NamespaceBinding::Uri(uri) => &uri[..],
+            NamespaceBinding::Inherit => self.inherited_namespace_uri(),
+        })
+    }
+
+    fn namespace_decl(&self, prefix: &str) -> Option<&NamespaceDecl> {
         match self {
-            Context::Root {
-                namespaces,
-                inherited_namespace,
-                ..
+            Context::Root { namespaces, .. } | Context::Include { namespaces, .. } => {
+                namespaces.get(prefix)
             }
-            | Context::Include {
-                namespaces,
-                inherited_namespace,
-                ..
-            } => namespaces.get(prefix).map(|binding| match binding {
-                NamespaceBinding::Uri(uri) => &uri[..],
-                NamespaceBinding::Inherit => &inherited_namespace[..],
-            }),
-            Context::IncludeOverrides { .. } => {
-                self.includer().namespace_uri_for_prefix_str(prefix)
-            }
+            Context::IncludeOverrides { .. } => self.includer().namespace_decl(prefix),
             Context::Grammar { parent, .. }
             | Context::Define { parent, .. }
             | Context::Element { parent }
-            | Context::Attribute { parent, .. } => parent.namespace_uri_for_prefix_str(prefix),
+            | Context::Attribute { parent, .. } => parent.namespace_decl(prefix),
         }
     }
 
@@ -1074,6 +1145,58 @@ impl<FS: Files> Compiler<FS> {
                 }
                 _ => panic!("{err:?}"),
             },
+            RelaxError::InvalidAnnotationName {
+                span,
+                reason,
+                declaration,
+            } => {
+                let mut spans = vec![codemap_diagnostic::SpanLabel {
+                    span: *span,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                    label: None,
+                }];
+                if let Some(declaration) = declaration {
+                    spans.push(codemap_diagnostic::SpanLabel {
+                        span: *declaration,
+                        style: codemap_diagnostic::SpanStyle::Secondary,
+                        label: Some(reason.declaration_label().to_string()),
+                    });
+                }
+                codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: reason.to_string(),
+                    code: None,
+                    spans,
+                }
+            }
+            RelaxError::DuplicateAnnotationAttribute {
+                duplicate,
+                original,
+                namespace_uri,
+                local_name,
+            } => codemap_diagnostic::Diagnostic {
+                level: codemap_diagnostic::Level::Error,
+                message: if namespace_uri.is_empty() {
+                    format!("Duplicate annotation attribute {local_name:?}")
+                } else {
+                    format!(
+                        "Duplicate annotation attribute {local_name:?} in namespace {namespace_uri:?}"
+                    )
+                },
+                code: None,
+                spans: vec![
+                    codemap_diagnostic::SpanLabel {
+                        span: *duplicate,
+                        style: codemap_diagnostic::SpanStyle::Primary,
+                        label: Some("duplicate".to_string()),
+                    },
+                    codemap_diagnostic::SpanLabel {
+                        span: *original,
+                        style: codemap_diagnostic::SpanStyle::Secondary,
+                        label: Some("first given here".to_string()),
+                    },
+                ],
+            },
             RelaxError::UndefinedNamespacePrefix { span, prefix } => {
                 let label = codemap_diagnostic::SpanLabel {
                     span: *span,
@@ -1505,7 +1628,8 @@ impl<FS: Files> Compiler<FS> {
                 if let Context::Include { .. } = ctx {
                     // look through leading annotations, as in `[ xml:lang = "en" ] grammar { … }`
                     let mut unannotated = p;
-                    while let types::Pattern::Annotated(_, inner) = unannotated {
+                    while let types::Pattern::Annotated(annos, inner) = unannotated {
+                        Self::check_annotations(ctx, Some(annos))?;
                         unannotated = inner;
                     }
                     match unannotated {
@@ -1568,6 +1692,7 @@ impl<FS: Files> Compiler<FS> {
         ctx: &mut Context,
         define: &types::Define,
     ) -> Result<(), RelaxError> {
+        Self::check_annotations(ctx, define.annotations.as_ref())?;
         let id = RefKey::from(&define.name);
         let mut def_ctx = ctx.new_define(id.clone());
         let rule = self.compile_pattern(&mut def_ctx, &define.pattern)?;
@@ -1603,8 +1728,13 @@ impl<FS: Files> Compiler<FS> {
         for item in content {
             match item {
                 types::IncludeContent::Define(d) => self.compile_define(ctx, d)?,
-                types::IncludeContent::Div(d) => self.compile_include_overrides(ctx, &d.content)?,
-                types::IncludeContent::Annotation(_) => (),
+                types::IncludeContent::Div(d) => {
+                    Self::check_annotations(ctx, d.annotations.as_ref())?;
+                    self.compile_include_overrides(ctx, &d.content)?
+                }
+                types::IncludeContent::Annotation(e) => {
+                    Self::compile_annotation_element(ctx, AnnotationNameRole::ForeignElement, e)?;
+                }
             }
         }
         Ok(())
@@ -1614,6 +1744,7 @@ impl<FS: Files> Compiler<FS> {
         ctx: &mut Context,
         inc: &types::Include,
     ) -> Result<(), RelaxError> {
+        Self::check_annotations(ctx, inc.annotations.as_ref())?;
         let file = ctx.file();
         let parent_dir = Path::new(file.name()).parent().unwrap_or(Path::new("."));
         let path = parent_dir.join(inc.uri.as_string_value());
@@ -1845,7 +1976,7 @@ impl<FS: Files> Compiler<FS> {
             types::Pattern::DatatypeValue(d) => self.compile_datatype_value_pattern(ctx, d),
             types::Pattern::DatatypeName(d) => self.compile_datatype_name_pattern(ctx, d),
             types::Pattern::Annotated(annos, inner) => {
-                let compiled_annos = Self::compile_annotations(ctx, annos);
+                let compiled_annos = Self::compile_annotations(ctx, annos)?;
                 let mut result = self.compile_pattern(ctx, inner)?;
                 // Attach annotations to Element/Attribute patterns if possible
                 match &mut result {
@@ -2028,9 +2159,15 @@ impl<FS: Files> Compiler<FS> {
     ) -> Result<(), RelaxError> {
         match g {
             types::GrammarContent::Define(d) => self.compile_define(child_ctx, d),
-            types::GrammarContent::Div(d) => self.compile_grammar_div(child_ctx, &d.content),
+            types::GrammarContent::Div(d) => {
+                Self::check_annotations(child_ctx, d.annotations.as_ref())?;
+                self.compile_grammar_div(child_ctx, &d.content)
+            }
             types::GrammarContent::Include(i) => self.compile_include(child_ctx, i),
-            types::GrammarContent::Annotation(_) => Ok(()),
+            types::GrammarContent::Annotation(e) => {
+                Self::compile_annotation_element(child_ctx, AnnotationNameRole::ForeignElement, e)
+                    .map(|_| ())
+            }
         }
     }
 
@@ -2146,6 +2283,9 @@ impl<FS: Files> Compiler<FS> {
         } else {
             &tmp
         };
+        for param in params {
+            Self::check_annotations(ctx, param.annotations.as_ref())?;
+        }
         let name = match &datatype_name.1 {
             DatatypeName::String => DatatypeName::String,
             DatatypeName::Token => DatatypeName::Token,
@@ -2186,7 +2326,11 @@ impl<FS: Files> Compiler<FS> {
         dec: &types::Decl,
     ) -> Result<(), RelaxError> {
         match dec {
-            types::Decl::DefaultNamespace(types::DefaultNamespaceDeclaration { prefix, uri }) => {
+            types::Decl::DefaultNamespace(types::DefaultNamespaceDeclaration {
+                span,
+                prefix,
+                uri,
+            }) => {
                 let (default, binding) = match uri {
                     NamespaceUriLiteral::Inherit => (
                         ctx.inherited_namespace_uri().to_string(),
@@ -2199,17 +2343,19 @@ impl<FS: Files> Compiler<FS> {
                 };
                 ctx.set_default_namespace(default);
                 if let Some(p) = prefix {
-                    ctx.declare_namespace(p.clone(), binding)
+                    let span = ctx.convert_span(span);
+                    ctx.declare_namespace(p.clone(), binding, span)
                 } else {
                     Ok(())
                 }
             }
-            types::Decl::Namespace(types::NamespaceDeclaration { prefix, uri }) => {
+            types::Decl::Namespace(types::NamespaceDeclaration { span, prefix, uri }) => {
                 let binding = match uri {
                     NamespaceUriLiteral::Inherit => NamespaceBinding::Inherit,
                     NamespaceUriLiteral::Uri(uri) => NamespaceBinding::Uri(uri.as_string_value()),
                 };
-                ctx.declare_namespace(prefix.clone(), binding)
+                let span = ctx.convert_span(span);
+                ctx.declare_namespace(prefix.clone(), binding, span)
             }
             types::Decl::Datatypes(types::DatatypesDeclaration { prefix, uri }) => {
                 let span = ctx.convert_span(&uri.0);
@@ -2287,18 +2433,29 @@ impl<FS: Files> Compiler<FS> {
             types::NameClass::Paren(types::ParenName(n)) => {
                 self.compile_nameclass(ctx, elem_attr, n)
             }
-            types::NameClass::Annotated(_annos, inner) => {
+            types::NameClass::Annotated(annos, inner) => {
                 // Annotations on name classes are metadata-only; compile the inner name class
+                Self::check_annotations(ctx, Some(annos))?;
                 self.compile_nameclass(ctx, elem_attr, inner)
             }
         }?;
         Ok(result)
     }
 
+    fn check_annotations(
+        ctx: &Context,
+        annos: Option<&types::Annotations>,
+    ) -> Result<(), RelaxError> {
+        if let Some(annos) = annos {
+            Self::compile_annotations(ctx, annos)?;
+        }
+        Ok(())
+    }
+
     fn compile_annotations(
         ctx: &Context,
-        annos: &crate::syntax::types::Annotations,
-    ) -> model::Annotation {
+        annos: &types::Annotations,
+    ) -> Result<model::Annotation, RelaxError> {
         let documentation = annos
             .documentation
             .iter()
@@ -2308,93 +2465,153 @@ impl<FS: Files> Compiler<FS> {
             })
             .collect();
 
-        let attributes = if let Some(ref initial) = annos.initial {
-            initial
-                .attribute_annotations
-                .iter()
-                .filter_map(|a| {
-                    Self::compile_annotation_name(ctx, &a.name).map(|(ns, local)| {
-                        model::AnnotationAttribute {
-                            namespace_uri: ns,
-                            local_name: local,
-                            value: a.value.as_string_value(),
-                            span: Some(ctx.convert_span(&a.span)),
-                        }
+        let (attributes, mut elements) = match annos.initial {
+            Some(ref initial) => (
+                Self::compile_annotation_attributes(
+                    ctx,
+                    AnnotationNameRole::ForeignAttribute,
+                    &initial.attribute_annotations,
+                )?,
+                initial
+                    .element_annotations
+                    .iter()
+                    .map(|e| {
+                        Self::compile_annotation_element(ctx, AnnotationNameRole::ForeignElement, e)
                     })
-                })
-                .collect()
-        } else {
-            vec![]
-        };
-
-        let mut elements: Vec<model::AnnotationElement> = if let Some(ref initial) = annos.initial {
-            initial
-                .element_annotations
-                .iter()
-                .filter_map(|e| Self::compile_annotation_element(ctx, e))
-                .collect()
-        } else {
-            vec![]
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            None => (vec![], vec![]),
         };
 
         for e in &annos.follow_elements {
-            if let Some(compiled) = Self::compile_annotation_element(ctx, e) {
-                elements.push(compiled);
-            }
+            elements.push(Self::compile_annotation_element(
+                ctx,
+                AnnotationNameRole::ForeignElement,
+                e,
+            )?);
         }
 
-        model::Annotation {
+        Ok(model::Annotation {
             documentation,
             attributes,
             elements,
+        })
+    }
+
+    fn compile_annotation_name(
+        ctx: &Context,
+        role: AnnotationNameRole,
+        name: &types::Name,
+    ) -> Result<(String, String), RelaxError> {
+        let span = ctx.convert_span(&name.span());
+        let (ns, local, declaration) = match name {
+            types::Name::CName(QName(prefix, local)) => {
+                let decl = ctx.namespace_decl(&prefix.1);
+                let declaration = decl.and_then(|d| d.span);
+                if decl.is_some_and(|d| d.binding == NamespaceBinding::Inherit) {
+                    return Err(RelaxError::InvalidAnnotationName {
+                        span,
+                        reason: AnnotationNameError::InheritedNamespace {
+                            prefix: prefix.1.clone(),
+                        },
+                        declaration,
+                    });
+                }
+                let ns = ctx.namespace_uri_for_prefix(prefix)?;
+                (ns.to_string(), local.1.clone(), declaration)
+            }
+            types::Name::Identifier(id) => ("".to_string(), id.to_string(), None),
+            types::Name::NamespacedName(nn) => (
+                nn.namespace_uri.as_string_value(),
+                nn.localname.1.clone(),
+                None,
+            ),
+        };
+        let reason = match role {
+            AnnotationNameRole::ForeignAttribute if ns.is_empty() => {
+                Some(AnnotationNameError::UnqualifiedAttribute)
+            }
+            AnnotationNameRole::ForeignAttribute | AnnotationNameRole::ForeignElement
+                if ns == RELAXNG_NS =>
+            {
+                Some(AnnotationNameError::RelaxNgNamespace)
+            }
+            AnnotationNameRole::ForeignAttribute | AnnotationNameRole::AnyAttribute
+                if XMLNS_NS.contains(&&ns[..]) =>
+            {
+                Some(AnnotationNameError::XmlnsNamespace)
+            }
+            AnnotationNameRole::AnyAttribute if ns.is_empty() && local == "xmlns" => {
+                Some(AnnotationNameError::XmlnsName)
+            }
+            _ => None,
+        };
+        match reason {
+            Some(reason) => Err(RelaxError::InvalidAnnotationName {
+                span,
+                reason,
+                declaration,
+            }),
+            None => Ok((ns, local)),
         }
     }
 
-    fn compile_annotation_name(ctx: &Context, name: &types::Name) -> Option<(String, String)> {
-        match name {
-            types::Name::CName(cname) => {
-                let ns = ctx.namespace_uri_for_prefix_str(&cname.0.1)?;
-                Some((ns.to_string(), cname.1.1.clone()))
+    fn compile_annotation_attributes(
+        ctx: &Context,
+        role: AnnotationNameRole,
+        attrs: &[types::AnnotationAttribute],
+    ) -> Result<Vec<model::AnnotationAttribute>, RelaxError> {
+        let mut result: Vec<model::AnnotationAttribute> = Vec::with_capacity(attrs.len());
+        for a in attrs {
+            let (ns, local) = Self::compile_annotation_name(ctx, role, &a.name)?;
+            let span = ctx.convert_span(&a.span);
+            if let Some(original) = result
+                .iter()
+                .find(|o| o.namespace_uri == ns && o.local_name == local)
+            {
+                return Err(RelaxError::DuplicateAnnotationAttribute {
+                    duplicate: span,
+                    original: original.span.expect("always set when pushed"),
+                    namespace_uri: ns,
+                    local_name: local,
+                });
             }
-            types::Name::Identifier(id) => Some(("".to_string(), id.to_string())),
-            types::Name::NamespacedName(nn) => {
-                Some((nn.namespace_uri.as_string_value(), nn.localname.1.clone()))
-            }
+            result.push(model::AnnotationAttribute {
+                namespace_uri: ns,
+                local_name: local,
+                value: a.value.as_string_value(),
+                span: Some(span),
+            });
         }
+        Ok(result)
     }
 
     fn compile_annotation_element(
         ctx: &Context,
+        role: AnnotationNameRole,
         elem: &types::AnnotationElement,
-    ) -> Option<model::AnnotationElement> {
-        let (ns, local) = Self::compile_annotation_name(ctx, &elem.name)?;
-        let attributes = elem
-            .annotation_attributes
-            .iter()
-            .filter_map(|a| {
-                Self::compile_annotation_name(ctx, &a.name).map(|(ns, local)| {
-                    model::AnnotationAttribute {
-                        namespace_uri: ns,
-                        local_name: local,
-                        value: a.value.as_string_value(),
-                        span: Some(ctx.convert_span(&a.span)),
-                    }
-                })
-            })
-            .collect();
+    ) -> Result<model::AnnotationElement, RelaxError> {
+        let (ns, local) = Self::compile_annotation_name(ctx, role, &elem.name)?;
+        let attributes = Self::compile_annotation_attributes(
+            ctx,
+            AnnotationNameRole::AnyAttribute,
+            &elem.annotation_attributes,
+        )?;
         let children = elem
             .annotation_elements_or_literals
             .iter()
-            .filter_map(|c| match c {
+            .map(|c| match c {
                 types::AnnotationElementOrLiteral::Element(e) => {
-                    Self::compile_annotation_element(ctx, e).map(model::AnnotationContent::Element)
+                    Ok(model::AnnotationContent::Element(
+                        Self::compile_annotation_element(ctx, AnnotationNameRole::AnyElement, e)?,
+                    ))
                 }
                 types::AnnotationElementOrLiteral::Literal(l) => {
-                    Some(model::AnnotationContent::Text(l.as_string_value()))
+                    Ok(model::AnnotationContent::Text(l.as_string_value()))
                 }
             })
-            .collect();
-        Some(model::AnnotationElement {
+            .collect::<Result<_, RelaxError>>()?;
+        Ok(model::AnnotationElement {
             namespace_uri: ns,
             local_name: local,
             attributes,
@@ -2402,6 +2619,22 @@ impl<FS: Files> Compiler<FS> {
             span: Some(ctx.convert_span(&elem.span)),
         })
     }
+}
+
+const RELAXNG_NS: &str = "http://relaxng.org/ns/structure/1.0";
+/// The namespace of `xmlns` attributes.  The compact syntax spec gives it without the trailing
+/// `/`, but the namespace's real name has one, so both are rejected.
+const XMLNS_NS: [&str; 2] = [
+    "http://www.w3.org/2000/xmlns/",
+    "http://www.w3.org/2000/xmlns",
+];
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum AnnotationNameRole {
+    ForeignElement,
+    ForeignAttribute,
+    AnyElement,
+    AnyAttribute,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -2679,6 +2912,120 @@ mod tests {
             };
             assert_eq!(namespace_uri, expected, "{main:?} / {inc:?}");
         }
+    }
+
+    fn compile_compact(schema: &'static str) -> Result<CompileResult, RelaxError> {
+        Compiler::new(MemFiles(vec![("main.rnc", schema)]), Syntax::Compact)
+            .compile(Path::new("main.rnc"))
+    }
+
+    #[test]
+    fn annotation_name_constraints() {
+        const DECLS: &str = "namespace f = \"urn:f\"\n\
+            namespace g = \"urn:f\"\n\
+            namespace e = \"\"\n\
+            namespace r = \"http://relaxng.org/ns/structure/1.0\"\n\
+            namespace n = \"http://www.w3.org/2000/xmlns/\"\n\
+            namespace i = inherit\n";
+        let invalid = |reason| move |e: &RelaxError| matches!(e, RelaxError::InvalidAnnotationName { reason: r, .. } if *r == reason);
+        let inherited = invalid(AnnotationNameError::InheritedNamespace {
+            prefix: "i".to_string(),
+        });
+        let rng = invalid(AnnotationNameError::RelaxNgNamespace);
+        let xmlns = invalid(AnnotationNameError::XmlnsNamespace);
+        let xmlns_name = invalid(AnnotationNameError::XmlnsName);
+        let unqualified = invalid(AnnotationNameError::UnqualifiedAttribute);
+        let duplicate =
+            |e: &RelaxError| matches!(e, RelaxError::DuplicateAnnotationAttribute { .. });
+        let undefined = |e: &RelaxError| matches!(e, RelaxError::UndefinedNamespacePrefix { .. });
+        type Check<'a> = &'a dyn Fn(&RelaxError) -> bool;
+        let cases: &[(&str, Check)] = &[
+            ("element x { [ e:a = \"1\" ] empty }", &unqualified),
+            ("element x { [ r:a = \"1\" ] empty }", &rng),
+            ("element x { [ r:e [] ] empty }", &rng),
+            ("element x { empty >> r:e [] }", &rng),
+            ("element [ r:a = \"1\" ] x { empty }", &rng),
+            ("[ r:a = \"1\" ] start = element x { empty }", &rng),
+            ("start = element x { empty }\nr:e []", &rng),
+            ("element x { [ n:a = \"1\" ] empty }", &xmlns),
+            ("element x { [ f:e [ n:a = \"1\" ] ] empty }", &xmlns),
+            ("element x { [ f:e [ xmlns = \"1\" ] ] empty }", &xmlns_name),
+            (
+                "element x { [ f:e [ \\xmlns = \"1\" ] ] empty }",
+                &xmlns_name,
+            ),
+            (
+                "element x { [ f:a = \"1\" f:a = \"2\" ] empty }",
+                &duplicate,
+            ),
+            (
+                "element x { [ f:a = \"1\" g:a = \"2\" ] empty }",
+                &duplicate,
+            ),
+            (
+                "element x { [ f:e [ a = \"1\" a = \"2\" ] ] empty }",
+                &duplicate,
+            ),
+            (
+                "[ f:a = \"1\" f:a = \"2\" ] div { start = element x { empty } }",
+                &duplicate,
+            ),
+            ("element x { [ i:a = \"1\" ] empty }", &inherited),
+            ("element x { [ i:e [] ] empty }", &inherited),
+            ("element x { [ f:e [ i:a = \"1\" ] ] empty }", &inherited),
+            ("element x { [ q:a = \"1\" ] empty }", &undefined),
+            ("element x { [ q:e [] ] empty }", &undefined),
+            (
+                "element x { [ f:e [ q:a = \"1\" q:e [] ] ] empty }",
+                &undefined,
+            ),
+            (
+                "element x { xsd:string { [ q:a = \"1\" ] length = \"1\" } }",
+                &undefined,
+            ),
+        ];
+        for (body, expected) in cases {
+            let schema: &'static str = format!("{DECLS}{body}").leak();
+            match compile_compact(schema) {
+                Ok(_) => panic!("{body:?} should not compile"),
+                Err(e) => assert!(expected(&e), "{body:?}: unexpected {e:?}"),
+            }
+        }
+
+        for body in [
+            "element x { [ f:a = \"1\" f:b = \"1\" g:c = \"1\" ] empty }",
+            "element x { [ f:e [ a = \"1\" f:a = \"2\" r:b = \"3\" r:c [] d [] ] ] empty >> f:z [] }",
+            "default namespace = \"http://relaxng.org/ns/structure/1.0\"\n\
+             element x { [ e [] ] empty }",
+            "element i:x { attribute i:a { text } }",
+        ] {
+            let schema: &'static str = format!("{DECLS}{body}").leak();
+            if let Err(e) = compile_compact(schema) {
+                panic!("{body:?} failed to compile: {e:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn annotation_name_error_points_at_namespace_declaration() {
+        const SCHEMA: &str = "namespace f = \"urn:f\"\n\
+            namespace r = \"http://relaxng.org/ns/structure/1.0\"\n\
+            element x { [ r:a = \"1\" ] empty }";
+        let mut c = Compiler::new(MemFiles(vec![("main.rnc", SCHEMA)]), Syntax::Compact);
+        let Err(RelaxError::InvalidAnnotationName {
+            declaration: Some(declaration),
+            ..
+        }) = c.compile(Path::new("main.rnc"))
+        else {
+            panic!("expected an annotation name error with a declaration span");
+        };
+        assert_eq!(
+            c.code_map()
+                .look_up_span(declaration)
+                .file
+                .source_slice(declaration),
+            "namespace r = \"http://relaxng.org/ns/structure/1.0\""
+        );
     }
 
     /// Compiles `main.rnc`, which includes `inc.rnc`, and returns the start rule, or the error

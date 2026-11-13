@@ -486,7 +486,7 @@ fn decl(input: Span) -> IResult<Span, Decl> {
     .parse(input)
 }
 fn decl_namespace(input: Span) -> IResult<Span, NamespaceDeclaration> {
-    let (input, (_keyword, _, prefix, _, _, _, uri)) = (
+    let (input, (keyword, _, prefix, _, _, _, uri, end)) = (
         tag("namespace"),
         after_keyword,
         identifier_or_keyword,
@@ -494,18 +494,20 @@ fn decl_namespace(input: Span) -> IResult<Span, NamespaceDeclaration> {
         tag("="),
         space_comment0,
         namespace_uri_literal,
+        position,
     )
         .parse(input)?;
     IResult::Ok((
         input,
         NamespaceDeclaration {
+            span: span(keyword, end),
             prefix: prefix.to_string(),
             uri,
         },
     ))
 }
 fn decl_default_namespace(input: Span) -> IResult<Span, DefaultNamespaceDeclaration> {
-    let (input, (_keyword, _, _, _, prefix, _, _, _, uri)) = (
+    let (input, (keyword, _, _, _, prefix, _, _, _, uri, end)) = (
         tag("default"),
         after_keyword,
         tag("namespace"),
@@ -515,11 +517,13 @@ fn decl_default_namespace(input: Span) -> IResult<Span, DefaultNamespaceDeclarat
         tag("="),
         space_comment0,
         namespace_uri_literal,
+        position,
     )
         .parse(input)?;
     IResult::Ok((
         input,
         DefaultNamespaceDeclaration {
+            span: span(keyword, end),
             prefix: prefix.map(|v| v.to_string()),
             uri,
         },
@@ -1927,6 +1931,7 @@ mod test {
             decl_namespace,
             "namespace rng = \"http://relaxng.org/ns/structure/1.0\"",
             NamespaceDeclaration {
+                span: 0..53,
                 prefix: "rng".to_string(),
                 uri: NamespaceUriLiteral::Uri(Literal(
                     16..53,
@@ -1944,6 +1949,7 @@ mod test {
             decl_default_namespace,
             "default namespace rng = \"http://relaxng.org/ns/structure/1.0\"",
             DefaultNamespaceDeclaration {
+                span: 0..61,
                 prefix: Some("rng".to_string()),
                 uri: NamespaceUriLiteral::Uri(Literal(
                     24..61,

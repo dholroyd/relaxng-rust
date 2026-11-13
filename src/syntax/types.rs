@@ -17,12 +17,14 @@ pub enum Decl {
 
 #[derive(Debug, PartialEq)]
 pub struct NamespaceDeclaration {
+    pub span: Span,
     pub prefix: String,
     pub uri: NamespaceUriLiteral,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct DefaultNamespaceDeclaration {
+    pub span: Span,
     pub prefix: Option<String>,
     pub uri: NamespaceUriLiteral,
 }

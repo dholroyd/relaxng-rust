@@ -11,7 +11,10 @@ pub mod ambiguity;
 pub mod datatype;
 pub mod lint;
 
-pub use compiler::{CompileResult, Compiler, DefinitionInfo, Files, FsFiles, RelaxError, Syntax};
+pub use compiler::{
+    AnnotationNameError, CompileResult, Compiler, DefinitionInfo, Files, FsFiles, RelaxError,
+    Syntax,
+};
 pub use pattern::{
     Annotation, AnnotationAttribute, AnnotationContent, AnnotationDocumentation, AnnotationElement,
     CombineRule, DefineRule, NameClass, Param, PatRef, Pattern,

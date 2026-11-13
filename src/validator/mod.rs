@@ -49,6 +49,17 @@ pub enum ValidatorError {
     InvalidOrUnclosedEntity {
         span: Range<u64>,
     },
+    /// A character that XML does not allow appears literally in content.
+    IllegalChar {
+        span: Range<u64>,
+        code_point: u32,
+        kind: &'static str,
+    },
+    /// A character reference to a code point that XML does not allow, such as `&#0;`.
+    IllegalCharRef {
+        span: Range<u64>,
+        code_point: u32,
+    },
     /// An element or attribute name is not a valid XML Name.
     InvalidName {
         span: Range<u64>,
@@ -192,6 +203,20 @@ impl std::fmt::Display for ValidatorError {
             ValidatorError::InvalidOrUnclosedEntity { .. } => {
                 write!(f, "Invalid or unclosed entity reference")
             }
+            ValidatorError::IllegalChar {
+                code_point, kind, ..
+            } => {
+                write!(
+                    f,
+                    "{kind} contains U+{code_point:04X}, which is not a legal XML character"
+                )
+            }
+            ValidatorError::IllegalCharRef { code_point, .. } => {
+                write!(
+                    f,
+                    "character reference to U+{code_point:04X}, which is not a legal XML character"
+                )
+            }
             ValidatorError::InvalidName { kind, .. } => {
                 write!(f, "{kind} name is not a valid XML Name")
             }
@@ -268,6 +293,18 @@ impl From<infoset::Error> for ValidatorError {
             }
             infoset::Error::InvalidOrUnclosedEntity { span } => {
                 ValidatorError::InvalidOrUnclosedEntity { span }
+            }
+            infoset::Error::IllegalChar {
+                span,
+                code_point,
+                kind,
+            } => ValidatorError::IllegalChar {
+                span,
+                code_point,
+                kind,
+            },
+            infoset::Error::IllegalCharRef { span, code_point } => {
+                ValidatorError::IllegalCharRef { span, code_point }
             }
             infoset::Error::InvalidName { span, kind } => {
                 ValidatorError::InvalidName { span, kind }
@@ -1134,6 +1171,20 @@ impl Explainer<'_> {
                     spans: vec![label],
                 });
             }
+            ValidatorError::IllegalChar { span, .. }
+            | ValidatorError::IllegalCharRef { span, .. } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: file.span.subspan(span.start as _, span.end as _),
+                    label: Some("not a legal XML character".to_string()),
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                };
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: err.to_string(),
+                    code: None,
+                    spans: vec![label],
+                });
+            }
             ValidatorError::InvalidName { span, kind } => {
                 let label = codemap_diagnostic::SpanLabel {
                     span: file.span.subspan(span.start as _, span.end as _),
@@ -1413,7 +1464,7 @@ impl<S: Sink> Handler for Engine<S> {
 mod tests {
     use crate::model::DefineRule;
     use crate::model::{Compiler, Files, RelaxError, Syntax};
-    use crate::validator::{Explainer, Validator};
+    use crate::validator::{Explainer, Validator, ValidatorError};
     use assert_matches::assert_matches;
     use std::cell::RefCell;
     use std::io;
@@ -2893,6 +2944,67 @@ mod tests {
                 ..
             }
         );
+    }
+
+    fn first_error(doc: &[u8]) -> super::ValidatorError {
+        let f = Fixture::correct("start = element a { attribute * { text }*, text }");
+        let mut v = Case::new(f.schema.clone());
+        v.validate_all(doc).unwrap_err().remove(0)
+    }
+
+    #[test]
+    fn illegal_chars_rejected() {
+        let cases: &[(&[u8], &str, u32, u64)] = &[
+            (b"<a>x\x00y</a>", "text", 0, 4),
+            (b"<a>\x01</a>", "text", 1, 3),
+            (b"<a>\x1F</a>", "text", 0x1F, 3),
+            (b"<a>\x0B</a>", "text", 0xB, 3),
+            (b"<a>\xEF\xBF\xBE</a>", "text", 0xFFFE, 3),
+            (b"<a>\xEF\xBF\xBF</a>", "text", 0xFFFF, 3),
+            (b"<a><![CDATA[\x00]]></a>", "CDATA content", 0, 12),
+            (b"<a x='\x07'/>", "attribute value", 7, 6),
+            (b"<a><!--\x00--></a>", "comment", 0, 7),
+            (b"<!--\x0C--><a/>", "comment", 0xC, 4),
+            (b"<a/><!--\xEF\xBF\xBF-->", "comment", 0xFFFF, 8),
+            (b"<a><?pi \x00?></a>", "processing instruction", 0, 8),
+        ];
+        for &(doc, kind, code_point, offset) in cases {
+            let err = first_error(doc);
+            let ValidatorError::IllegalChar {
+                span,
+                code_point: cp,
+                kind: k,
+            } = &err
+            else {
+                panic!("{doc:?}: expected IllegalChar, got {err:?}");
+            };
+            assert_eq!((*k, *cp, span.start), (kind, code_point, offset), "{doc:?}");
+        }
+    }
+
+    #[test]
+    fn illegal_char_refs_rejected() {
+        let cases = [
+            ("<a>&#0;</a>", 0),
+            ("<a>&#x0;</a>", 0),
+            ("<a>&#8;</a>", 8),
+            ("<a>&#x1F;</a>", 0x1F),
+            ("<a>&#xD800;</a>", 0xD800),
+            ("<a>&#xDFFF;</a>", 0xDFFF),
+            ("<a>&#xFFFE;</a>", 0xFFFE),
+            ("<a>&#xFFFF;</a>", 0xFFFF),
+            ("<a>&#x110000;</a>", 0x110000),
+            ("<a x='&#0;'/>", 0),
+            ("<a x='&#xFFFF;'/>", 0xFFFF),
+        ];
+        for (doc, code_point) in cases {
+            let err = first_error(doc.as_bytes());
+            assert_matches!(
+                err,
+                ValidatorError::IllegalCharRef { code_point: cp, .. } if cp == code_point,
+                "{doc}"
+            );
+        }
     }
 
     #[test]

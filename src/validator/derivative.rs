@@ -624,6 +624,63 @@ impl Schema {
         Ok(result)
     }
 
+    /// As [`Self::text_deriv`], but treats text that a datatype, value or list pattern rejected
+    /// as having matched it.  Keep the composite arms in step with `text_deriv_uncached`.
+    pub(crate) fn force_text_deriv(&mut self, pid: PatId) -> Result<PatId, Overflow> {
+        self.force_text_deriv_memo(pid, &mut HashMap::new())
+    }
+
+    fn force_text_deriv_memo(
+        &mut self,
+        pid: PatId,
+        memo: &mut HashMap<PatId, PatId>,
+    ) -> Result<PatId, Overflow> {
+        if let Some(&cached) = memo.get(&pid) {
+            return Ok(cached);
+        }
+        let result = match self.patt(pid) {
+            Pat::Choice(p1, p2, _) => {
+                let a = self.force_text_deriv_memo(p1, memo)?;
+                let b = self.force_text_deriv_memo(p2, memo)?;
+                self.choice(a, b)?
+            }
+            Pat::Interleave(p1, p2, _) => {
+                let d1 = self.force_text_deriv_memo(p1, memo)?;
+                let d2 = self.force_text_deriv_memo(p2, memo)?;
+                let a = self.interleave(d1, p2)?;
+                let b = self.interleave(p1, d2)?;
+                self.choice(a, b)?
+            }
+            Pat::Group(p1, p2, _) => {
+                let d1 = self.force_text_deriv_memo(p1, memo)?;
+                let p = self.group(d1, p2)?;
+                if self.patt(p1).is_nullable() {
+                    let d2 = self.force_text_deriv_memo(p2, memo)?;
+                    self.choice(p, d2)?
+                } else {
+                    p
+                }
+            }
+            Pat::After(p1, p2, _) => {
+                let d = self.force_text_deriv_memo(p1, memo)?;
+                self.after(d, p2)?
+            }
+            Pat::OneOrMore(p, _) => {
+                let d = self.force_text_deriv_memo(p, memo)?;
+                self.repeat_rest(d, p)?
+            }
+            Pat::Text => pid,
+            Pat::Datatype(_) | Pat::DatatypeValue(_) | Pat::DatatypeExcept(_, _) | Pat::List(_) => {
+                self.empty()
+            }
+            Pat::Empty | Pat::NotAllowed | Pat::Attribute(_, _) | Pat::Element(_, _) => {
+                self.not_allowed()
+            }
+        };
+        memo.insert(pid, result);
+        Ok(result)
+    }
+
     // Note: the spec lists endTagDeriv as efficiently memoizable, but benchmarking showed
     // that both HashMap and Vec caches regressed performance by 7-15%. The function body
     // is only ~3 ops (RefCell borrow + array index + match), so the RefCell borrow overhead

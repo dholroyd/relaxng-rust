@@ -631,7 +631,8 @@ impl<S: Sink> Engine<S> {
 
     /// Checks the buffered typed text, just before the end tag of the element it is the whole
     /// content of, by applying `text_deriv`. On `NotAllowed`, reports a `text` error tagged with
-    /// the buffered run's span and carries on as though the text were absent.
+    /// the buffered run's span and carries on as though the text had matched, so that the end
+    /// tag does not report the same content again as missing.
     fn flush_typed_text(&mut self, ns: &NamespaceScope<'_>) -> Result<(), ValidatorError> {
         if self.text_buffer.is_empty() {
             return Ok(());
@@ -643,6 +644,11 @@ impl<S: Sink> Engine<S> {
         self.text_buffer.clear();
         if matches!(self.schema.patt(next_id), Pat::NotAllowed) {
             self.report_text_not_allowed(buf_span.unwrap_or(Span::new(0, 0)));
+            // If even that finds no sound position, carry on as though the text were absent.
+            let forced = self.schema.force_text_deriv(self.current_step)?;
+            if !matches!(self.schema.patt(forced), Pat::NotAllowed) {
+                self.current_step = forced;
+            }
             return Ok(());
         }
         self.current_step = next_id;
@@ -1932,6 +1938,22 @@ mod tests {
         assert_eq!(errs.len(), 2, "got {errs:?}");
         assert_eq!(errs[0].source, "oops");
         assert_eq!(errs[1].source, "again");
+    }
+
+    #[test]
+    fn invalid_typed_text_is_reported_once() {
+        // The end tag must not be reported as well, as though the bad value were missing
+        let errs = all_errors(
+            r#"start = element root {
+                element a { xsd:string { minLength = "3" } },
+                element b { "A" | "B" },
+                element c { list { xsd:int+ } },
+                element d { xsd:int - "0" }
+            }"#,
+            r#"<root><a>na</a><b>C</b><c>1 x</c><d>0</d></root>"#,
+        );
+        let sources: Vec<_> = errs.iter().map(|e| e.source.as_str()).collect();
+        assert_eq!(sources, ["na", "C", "1 x", "0"], "got {errs:?}");
     }
 
     #[test]

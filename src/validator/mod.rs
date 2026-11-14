@@ -88,6 +88,26 @@ pub enum ValidatorError {
         span: Range<u64>,
         kind: &'static str,
     },
+    /// The XML declaration names a version other than 1.x. `span` is that of the declaration.
+    UnsupportedXmlVersion {
+        version: String,
+        span: Range<u64>,
+    },
+    /// An XML declaration that is not at the very start of the document.
+    MisplacedXmlDeclaration {
+        span: Range<u64>,
+    },
+    /// A second DOCTYPE declaration. `span` runs from its `<!` to the end of its root element
+    /// name, and `first` likewise for the first DOCTYPE declaration.
+    DuplicateDoctype {
+        span: Range<u64>,
+        first: Range<u64>,
+    },
+    /// A DOCTYPE declaration within or after the root element. `span` runs from its `<!` to the
+    /// end of its root element name.
+    MisplacedDoctype {
+        span: Range<u64>,
+    },
     /// Too many attributes on a single element.
     TooManyAttributes {
         span: Range<u64>,
@@ -238,6 +258,21 @@ impl std::fmt::Display for ValidatorError {
             ValidatorError::OutsideRootElement { kind, .. } => {
                 write!(f, "{kind} not allowed outside the root element")
             }
+            ValidatorError::UnsupportedXmlVersion { version, .. } => {
+                write!(f, "unsupported XML version {version:?}")
+            }
+            ValidatorError::MisplacedXmlDeclaration { .. } => {
+                write!(
+                    f,
+                    "XML declaration is only allowed at the start of the document"
+                )
+            }
+            ValidatorError::DuplicateDoctype { .. } => {
+                write!(f, "only one DOCTYPE declaration is allowed")
+            }
+            ValidatorError::MisplacedDoctype { .. } => {
+                write!(f, "DOCTYPE declaration must come before the root element")
+            }
             ValidatorError::TooManyAttributes { .. } => {
                 write!(f, "too many attributes on element (limit: 256)")
             }
@@ -320,6 +355,16 @@ impl From<infoset::Error> for ValidatorError {
             infoset::Error::OutsideRootElement { span, kind } => {
                 ValidatorError::OutsideRootElement { span, kind }
             }
+            infoset::Error::UnsupportedXmlVersion { version, span } => {
+                ValidatorError::UnsupportedXmlVersion { version, span }
+            }
+            infoset::Error::MisplacedXmlDeclaration { span } => {
+                ValidatorError::MisplacedXmlDeclaration { span }
+            }
+            infoset::Error::DuplicateDoctype { span, first } => {
+                ValidatorError::DuplicateDoctype { span, first }
+            }
+            infoset::Error::MisplacedDoctype { span } => ValidatorError::MisplacedDoctype { span },
             infoset::Error::TooManyAttributes { span } => {
                 ValidatorError::TooManyAttributes { span }
             }
@@ -1272,6 +1317,41 @@ impl Explainer<'_> {
                     message: format!("{kind} not allowed outside the root element"),
                     code: None,
                     spans: vec![label],
+                });
+            }
+            ValidatorError::UnsupportedXmlVersion { span, .. }
+            | ValidatorError::MisplacedXmlDeclaration { span }
+            | ValidatorError::MisplacedDoctype { span } => {
+                let label = codemap_diagnostic::SpanLabel {
+                    span: file.span.subspan(span.start as _, span.end as _),
+                    label: None,
+                    style: codemap_diagnostic::SpanStyle::Primary,
+                };
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: err.to_string(),
+                    code: None,
+                    spans: vec![label],
+                });
+            }
+            ValidatorError::DuplicateDoctype { span, first } => {
+                let spans = vec![
+                    codemap_diagnostic::SpanLabel {
+                        span: file.span.subspan(span.start as _, span.end as _),
+                        label: None,
+                        style: codemap_diagnostic::SpanStyle::Primary,
+                    },
+                    codemap_diagnostic::SpanLabel {
+                        span: file.span.subspan(first.start as _, first.end as _),
+                        label: Some("first DOCTYPE here".to_string()),
+                        style: codemap_diagnostic::SpanStyle::Secondary,
+                    },
+                ];
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: err.to_string(),
+                    code: None,
+                    spans,
                 });
             }
             ValidatorError::TooManyAttributes { span } => {
@@ -2918,6 +2998,60 @@ mod tests {
         let mut v = Case::new(f.schema.clone());
         v.validate_all(b"<?xml version=\"1.0\"?>\n<!-- c --> <?pi?>\r\n<a/>\t<!-- c --><?pi?>\n")
             .unwrap();
+    }
+
+    #[test]
+    fn invalid_prolog_rejected() {
+        let f = Fixture::correct("start = element a { element b { empty }? }");
+        let cases = [
+            ("<?xml version=\"9.9\"?><a/>", "version", 0..21),
+            ("<?xml version=\"1.\"?><a/>", "version", 0..20),
+            ("<?xml version=\"1.0a\"?><a/>", "version", 0..22),
+            (" <?xml version=\"1.0\"?><a/>", "xml decl", 1..22),
+            ("\n<?xml version=\"1.0\"?><a/>", "xml decl", 1..22),
+            ("<!DOCTYPE a><!DOCTYPE a><a/>", "duplicate doctype", 12..23),
+            ("<a/><!DOCTYPE  a>", "misplaced doctype", 4..16),
+            ("<a><!DOCTYPE a></a>", "misplaced doctype", 3..14),
+            ("<a><b/><!DOCTYPE a></a>", "misplaced doctype", 7..18),
+        ];
+        for (doc, expected, expected_span) in cases {
+            let mut v = Case::new(f.schema.clone());
+            let err = v.validate_all(doc.as_bytes()).unwrap_err().remove(0);
+            let (kind, span) = match &err {
+                ValidatorError::UnsupportedXmlVersion { span, .. } => ("version", span),
+                ValidatorError::MisplacedXmlDeclaration { span } => ("xml decl", span),
+                ValidatorError::DuplicateDoctype { span, first } => {
+                    assert_eq!(*first, 0..11, "{doc:?}");
+                    ("duplicate doctype", span)
+                }
+                ValidatorError::MisplacedDoctype { span } => ("misplaced doctype", span),
+                _ => panic!("{doc:?}: unexpected {err:?}"),
+            };
+            assert_eq!((kind, span.clone()), (expected, expected_span), "{doc:?}");
+        }
+        let mut v = Case::new(f.schema.clone());
+        let err = v
+            .validate_all(b"<?xml version='9.9'?><a/>")
+            .unwrap_err()
+            .remove(0);
+        assert_eq!(err.to_string(), "unsupported XML version \"9.9\"");
+    }
+
+    #[test]
+    fn valid_prolog_accepted() {
+        let f = Fixture::correct("start = element a { empty }");
+        for doc in [
+            "<?xml version=\"1.0\"?><a/>",
+            "<?xml version='1.1'?><a/>",
+            "<?xml version=\"1.10\"?><a/>",
+            "\u{FEFF}<?xml version=\"1.0\"?><a/>",
+            "<?xml version=\"1.0\"?>\n<!-- c -->\n<!DOCTYPE a>\n<?pi?>\n<a/>",
+            "<!DOCTYPE a [ <!ELEMENT a EMPTY> ]><a/>",
+        ] {
+            let mut v = Case::new(f.schema.clone());
+            v.validate_all(doc.as_bytes())
+                .unwrap_or_else(|e| panic!("{doc:?}: {e:?}"));
+        }
     }
 
     #[test]

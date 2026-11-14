@@ -78,6 +78,26 @@ pub(crate) enum Error {
         span: Range<u64>,
         kind: &'static str,
     },
+    /// The XML declaration names a version other than 1.x. `span` is that of the declaration.
+    UnsupportedXmlVersion {
+        version: String,
+        span: Range<u64>,
+    },
+    /// An XML declaration that is not at the very start of the document.
+    MisplacedXmlDeclaration {
+        span: Range<u64>,
+    },
+    /// A second DOCTYPE declaration. `span` runs from its `<!` to the end of its root element
+    /// name, and `first` likewise for the first DOCTYPE declaration.
+    DuplicateDoctype {
+        span: Range<u64>,
+        first: Range<u64>,
+    },
+    /// A DOCTYPE declaration within or after the root element. `span` runs from its `<!` to the
+    /// end of its root element name.
+    MisplacedDoctype {
+        span: Range<u64>,
+    },
     /// More than [`MAX_ATTRIBUTES`] attributes (including namespace declarations) on one element.
     TooManyAttributes {
         span: Range<u64>,
@@ -284,6 +304,7 @@ impl PushParser {
             }
             skipped = check_initial_encoding(buf)?;
             self.encoding_checked = true;
+            self.state.doc_start = skipped as u64;
         }
         let mut driver = Driver::new(&mut self.state, handler);
         let consumed = self
@@ -667,6 +688,14 @@ fn undefined_or_invalid_prefix(p: &[u8], name_span: Span) -> Error {
     }
 }
 
+/// Whether `version` matches XML 1.0's `VersionNum ::= '1.' [0-9]+`. A 1.0 processor reads a
+/// document declaring any such version as XML 1.0 (XML 1.0 5th edition, section 2.8).
+fn is_supported_xml_version(version: &[u8]) -> bool {
+    version
+        .strip_prefix(b"1.")
+        .is_some_and(|minor| !minor.is_empty() && minor.iter().all(u8::is_ascii_digit))
+}
+
 fn decode_char_ref(value: &[u8]) -> Result<u32, ()> {
     let s = std::str::from_utf8(value).map_err(|_| ())?;
     if let Some(hex) = s.strip_prefix('x') {
@@ -772,6 +801,10 @@ struct State {
     in_text: bool,
     /// Whether the root element has been closed.
     root_closed: bool,
+    /// Where the document proper starts, after any byte order mark.
+    doc_start: u64,
+    /// The span of the DOCTYPE declaration, if one has been seen.
+    doctype: Option<Span>,
 }
 
 impl State {
@@ -786,6 +819,8 @@ impl State {
             current_attr_value_start: 0,
             in_text: false,
             root_closed: false,
+            doc_start: 0,
+            doctype: None,
         }
     }
 
@@ -796,6 +831,8 @@ impl State {
         self.attrs.clear();
         self.in_text = false;
         self.root_closed = false;
+        self.doc_start = 0;
+        self.doctype = None;
     }
 
     fn push_attribute_value<E>(&mut self, data: &[u8]) -> Result<(), Failure<E>> {
@@ -979,6 +1016,52 @@ fn char_ref<E>(value: &[u8], span: Span) -> Result<char, Failure<E>> {
 
 impl<H: Handler> Visitor for Driver<'_, '_, H> {
     type Error = Failure<H::Error>;
+
+    fn xml_declaration(
+        &mut self,
+        version: &[u8],
+        _encoding: Option<&[u8]>,
+        _standalone: Option<bool>,
+        span: Span,
+    ) -> Result<(), Self::Error> {
+        // The tokenizer only rejects a declaration that follows markup, not one that follows
+        // whitespace
+        if span.start != self.state.doc_start {
+            return Err(Failure::Infoset(Error::MisplacedXmlDeclaration {
+                span: span.start..span.end,
+            }));
+        }
+        if !is_supported_xml_version(version) {
+            return Err(Failure::Infoset(Error::UnsupportedXmlVersion {
+                version: String::from_utf8_lossy(version).into_owned(),
+                span: span.start..span.end,
+            }));
+        }
+        Ok(())
+    }
+
+    fn doctype_start(
+        &mut self,
+        keyword_span: Span,
+        _name: &[u8],
+        name_span: Span,
+    ) -> Result<(), Self::Error> {
+        // From the `<!` preceding the keyword, to the end of the name
+        let span = Span::new(keyword_span.start - b"<!".len() as u64, name_span.end);
+        if !self.outside_root() || self.state.root_closed {
+            return Err(Failure::Infoset(Error::MisplacedDoctype {
+                span: span.start..span.end,
+            }));
+        }
+        if let Some(first) = self.state.doctype {
+            return Err(Failure::Infoset(Error::DuplicateDoctype {
+                span: span.start..span.end,
+                first: first.start..first.end,
+            }));
+        }
+        self.state.doctype = Some(span);
+        Ok(())
+    }
 
     fn start_tag_open(&mut self, name: QName<'_>) -> Result<(), Self::Error> {
         if self.state.root_closed && self.outside_root() {

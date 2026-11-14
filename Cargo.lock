@@ -1398,9 +1398,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "xml-syntax-reader"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89f6af27e52384cd7ce70982f6a738d8c94d0746add3bc34fb741bacefdfc091"
+checksum = "f1b95383cfaee2a4291359db4b37706355acf2261279c51e89ea115ca936b016"
 dependencies = [
  "memchr",
 ]

@@ -32,7 +32,7 @@ lazy_static = "1.5.0"
 uriparse = "0.6.3"
 
 # validator
-xml-syntax-reader = { version = "0.4", optional = true }
+xml-syntax-reader = { version = "0.5", optional = true }
 fnv = { version = "1.0.7", optional = true }
 
 # exemplifier

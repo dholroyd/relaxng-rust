@@ -4,7 +4,9 @@ use super::{LengthFacet, PatternFacet};
 #[cfg(feature = "validator")]
 use super::{XsdDatatypes, parse_qname};
 #[cfg(feature = "validator")]
-use crate::model::datatype::reason::{DIGIT_COUNT, FRACTION_DIGIT_COUNT, Reason, quote, shorten};
+use crate::model::datatype::reason::{
+    DIGIT_COUNT, DIGIT_LIMIT, FRACTION_DIGIT_COUNT, Reason, quote, shorten,
+};
 
 /// Heads for the length of a value, in each unit, as given in [`Violation::Length`].  The unit
 /// is a noun before the number, so that nothing need agree with the number in being singular or
@@ -44,6 +46,9 @@ pub(crate) enum Violation<'s> {
     FractionDigits {
         max: u16,
         actual: u64,
+    },
+    DigitLimit {
+        actual: usize,
     },
 }
 
@@ -99,6 +104,9 @@ impl XsdDatatypes {
             }
             Violation::FractionDigits { max, actual } => {
                 Reason::new(FRACTION_DIGIT_COUNT, format!("at most {max}")).noting(has(&actual))
+            }
+            Violation::DigitLimit { actual } => {
+                Reason::new(DIGIT_LIMIT, super::MAX_DIGITS.to_string()).noting(has(&actual))
             }
         }
     }

@@ -33,6 +33,8 @@ pub(crate) struct Reason {
 /// before the number.
 pub(crate) const DIGIT_COUNT: &str = "must have a digit count of";
 pub(crate) const FRACTION_DIGIT_COUNT: &str = "must have a fraction digit count of";
+pub(crate) const DIGIT_LIMIT: &str =
+    "must have a significant digit count within this validator's limit of";
 
 impl Reason {
     /// A reason that can be combined with others of the same `head`, which must be a fixed

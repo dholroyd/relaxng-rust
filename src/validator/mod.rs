@@ -2413,6 +2413,22 @@ mod tests {
     }
 
     #[test]
+    fn invalid_value_names_the_digit_limit() {
+        let value = "1".repeat(crate::model::datatype::xsd::MAX_DIGITS + 1);
+        let got = explained_strs(
+            "element a { xsd:integer }",
+            &format!("<r><a>{value}</a></r>"),
+        );
+        let reasons: Vec<_> = got.iter().map(|(_, reason)| reason.as_str()).collect();
+        assert_eq!(
+            reasons,
+            [
+                "must have a significant digit count within this validator's limit of 100 (it has 101)"
+            ]
+        );
+    }
+
+    #[test]
     fn invalid_value_explains_list_at_the_failing_item() {
         // Several lists, as a schema allowing tokens in any order might have: the reason comes
         // from what is allowed after the items that matched, in the lists that matched most

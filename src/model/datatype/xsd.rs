@@ -234,16 +234,18 @@ pub(crate) enum XsdInteger {
 }
 impl XsdInteger {
     /// The `xsd:integer` lexical space: an optional sign, then one or more ASCII digits
-    fn parse(s: &str) -> Option<Self> {
+    fn parse(s: &str) -> Result<Self, Violation<'static>> {
         let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
+            return Err(Violation::Lexical);
         }
+        check_digit_limit(digits.trim_start_matches('0').len())?;
         // `i64::from_str` fails only on overflow here, since the syntax has been checked
-        Some(match i64::from_str(s) {
+        Ok(match i64::from_str(s) {
             Ok(v) => XsdInteger::Small(v),
             Err(_) => XsdInteger::Big(
-                num_bigint::BigInt::from_str(s.strip_prefix('+').unwrap_or(s)).ok()?,
+                num_bigint::BigInt::from_str(s.strip_prefix('+').unwrap_or(s))
+                    .map_err(|_| Violation::Lexical)?,
             ),
         })
     }
@@ -518,18 +520,39 @@ fn replace_xml_whitespace(s: &str) -> Cow<'_, str> {
     }
 }
 
-/// The `xsd:decimal` lexical space, without normalizing, so that `1.50` has a scale of 2
-fn parse_decimal(s: &str) -> Option<bigdecimal::BigDecimal> {
-    let caps = DECIMAL_RE.captures(s)?;
+/// The most significant digits allowed in a value of decimal, integer, the types
+/// derived from them, or in the integer fields of dates, times and durations.  Converting decimal
+/// takes O(N^2) time, so without a limit, a document could make validation very slow.  The XSD
+/// spec requires at least 18 digits.
+pub(crate) const MAX_DIGITS: usize = 100;
+
+fn check_digit_limit(actual: usize) -> Result<(), Violation<'static>> {
+    if actual > MAX_DIGITS {
+        Err(Violation::DigitLimit { actual })
+    } else {
+        Ok(())
+    }
+}
+
+/// A value in the `xsd:decimal` lexical space, normalized, with the number of digits written
+/// after its decimal point, so that `1.50` has 2, which is what the fractionDigits facet counts
+fn parse_decimal(s: &str) -> Result<(bigdecimal::BigDecimal, usize), Violation<'static>> {
+    let caps = DECIMAL_RE.captures(s).ok_or(Violation::Lexical)?;
     let int = caps.get(2).map_or("", |m| m.as_str());
     let frac = caps.get(3).map_or("", |m| m.as_str());
     if int.is_empty() && frac.is_empty() {
-        return None;
+        return Err(Violation::Lexical);
     }
-    let digits = num_bigint::BigInt::from_str(&format!("{}0{int}{frac}", &caps[1])).ok()?;
-    Some(bigdecimal::BigDecimal::new(
-        digits,
-        i64::try_from(frac.len()).ok()?,
+    let int_trimmed = int.trim_start_matches('0');
+    let frac_trimmed = frac.trim_end_matches('0');
+    check_digit_limit(int_trimmed.len() + frac_trimmed.len())?;
+    let digits = num_bigint::BigInt::from_str(&format!("{}0{int_trimmed}{frac_trimmed}", &caps[1]))
+        .map_err(|_| Violation::Lexical)?;
+    // the scale is at most `MAX_DIGITS`, so it fits
+    let scale = i64::try_from(frac_trimmed.len()).unwrap();
+    Ok((
+        bigdecimal::BigDecimal::new(digits, scale).normalized(),
+        frac.len(),
     ))
 }
 
@@ -586,18 +609,18 @@ fn parse_base64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn parse_duration(s: &str) -> Option<Duration> {
+fn parse_duration(s: &str) -> Result<Duration, Violation<'static>> {
     // The regex allows every field to be absent, and allows a `T` with no time fields after it
     if s.ends_with('P') || s.ends_with('T') {
-        return None;
+        return Err(Violation::Lexical);
     }
-    let caps = DURATION_RE.captures(s)?;
+    let caps = DURATION_RE.captures(s).ok_or(Violation::Lexical)?;
     let int = |i| match caps.get(i) {
         Some(m) => XsdInteger::parse(m.as_str()),
-        None => Some(XsdInteger::Small(0)),
+        None => Ok(XsdInteger::Small(0)),
     };
     let seconds = match caps.get(7) {
-        Some(m) => parse_decimal(m.as_str())?.normalized(),
+        Some(m) => parse_decimal(m.as_str())?.0,
         None => bigdecimal::BigDecimal::from(0),
     };
     let mut d = Duration {
@@ -617,7 +640,7 @@ fn parse_duration(s: &str) -> Option<Duration> {
     {
         d.negative = false;
     }
-    Some(d)
+    Ok(d)
 }
 
 const REFERENCE_YEAR: i64 = 2000;
@@ -661,19 +684,20 @@ fn parse_timezone(tz: &str) -> Option<i64> {
     Some(if tz.starts_with('-') { -offset } else { offset })
 }
 
-fn parse_instant<'a>(re: &regex::Regex, s: &'a str) -> Option<Instant<'a>> {
-    let caps = re.captures(s)?;
+fn parse_instant<'a>(re: &regex::Regex, s: &'a str) -> Result<Instant<'a>, Violation<'static>> {
+    let caps = re.captures(s).ok_or(Violation::Lexical)?;
     // Every numeric group except the year is exactly two ASCII digits
     let num = |name, default: i64| {
         caps.name(name)
             .map_or(Some(default), |m| m.as_str().parse().ok())
+            .ok_or(Violation::Lexical)
     };
     let year = match caps.name("y") {
         Some(m) => {
             let digits = m.as_str().trim_start_matches('-');
             // More than four digits must not have leading zeros, and there is no year 0000
             if (digits.len() > 4 && digits.starts_with('0')) || digits == "0000" {
-                return None;
+                return Err(Violation::Lexical);
             }
             XsdInteger::parse(m.as_str())?
         }
@@ -688,13 +712,13 @@ fn parse_instant<'a>(re: &regex::Regex, s: &'a str) -> Option<Instant<'a>> {
         .name("f")
         .map_or("", |m| m.as_str().trim_end_matches('0'));
     let timezone = match caps.name("tz") {
-        Some(m) => Some(parse_timezone(m.as_str())?),
+        Some(m) => Some(parse_timezone(m.as_str()).ok_or(Violation::Lexical)?),
         None => None,
     };
 
     let leap = is_leap_year(&year);
     if !(1..=12).contains(&month) || day < 1 || day > days_in_month(month, leap) {
-        return None;
+        return Err(Violation::Lexical);
     }
     // Hour 24 is allowed only as 24:00:00, meaning the first instant of the following day.
     // Seconds may be 60 to allow for leap seconds.
@@ -704,7 +728,7 @@ fn parse_instant<'a>(re: &regex::Regex, s: &'a str) -> Option<Instant<'a>> {
         hour < 24 && minute < 60 && second <= 60
     };
     if !time_ok {
-        return None;
+        return Err(Violation::Lexical);
     }
 
     let day_of_year =
@@ -715,7 +739,7 @@ fn parse_instant<'a>(re: &regex::Regex, s: &'a str) -> Option<Instant<'a>> {
     // before or after
     let (year, second) = carry_year(year, second);
 
-    Some(Instant {
+    Ok(Instant {
         has_timezone: timezone.is_some(),
         year,
         second,
@@ -972,7 +996,7 @@ impl XsdDatatypes {
             s: &str,
             facets: &IntegerFacets,
         ) -> Result<XsdInteger, Violation<'static>> {
-            let i = XsdInteger::parse(s).ok_or(Violation::Lexical)?;
+            let i = XsdInteger::parse(s)?;
             check_total_digits(s, facets.total_digits)?;
             Ok(i)
         }
@@ -1013,7 +1037,7 @@ impl XsdDatatypes {
             s: &'a str,
             min_max: &'s MinMaxFacet<Instant<'static>>,
         ) -> Result<XsdValue<'a>, Violation<'s>> {
-            let v = parse_instant(re, s).ok_or(Violation::Lexical)?;
+            let v = parse_instant(re, s)?;
             // Compared as bounds for an `Instant<'a>`, but described from the facet as it is,
             // since the description must outlive `s`
             let as_bounds: &MinMaxFacet<Instant<'a>> = min_max;
@@ -1073,19 +1097,18 @@ impl XsdDatatypes {
                 fraction_digits,
                 total_digits,
             } => {
-                let v = parse_decimal(s).ok_or(Violation::Lexical)?;
+                let (v, written_fraction_digits) = parse_decimal(s)?;
                 min_max.check(&v)?;
                 check_total_digits(s, *total_digits)?;
-                if let Some(fd) = fraction_digits {
-                    let (_digits, scale) = v.as_bigint_and_exponent();
-                    if scale > i64::from(*fd) {
-                        return Err(Violation::FractionDigits {
-                            max: *fd,
-                            actual: scale.unsigned_abs(),
-                        });
-                    }
+                if let Some(fd) = fraction_digits
+                    && written_fraction_digits > usize::from(*fd)
+                {
+                    return Err(Violation::FractionDigits {
+                        max: *fd,
+                        actual: written_fraction_digits as u64,
+                    });
                 }
-                Ok(XsdValue::Decimal(v.normalized()))
+                Ok(XsdValue::Decimal(v))
             }
             XsdDatatypes::Float(min_max, _) => {
                 let v: f32 = parse_float(s).ok_or(Violation::Lexical)?;
@@ -1113,7 +1136,7 @@ impl XsdDatatypes {
                 Ok(XsdValue::Binary(bytes))
             }
             XsdDatatypes::Duration(min_max, _) => {
-                let d = parse_duration(s).ok_or(Violation::Lexical)?;
+                let d = parse_duration(s)?;
                 min_max.check(&d)?;
                 Ok(XsdValue::Duration(Box::new(d)))
             }
@@ -4167,5 +4190,100 @@ mod test {
             Ok(_),
             "P1D and PT24H are not ordered, so neither bound excludes the other"
         );
+    }
+
+    #[test]
+    fn integer_digits_are_limited() {
+        let max = "9".repeat(MAX_DIGITS);
+        let over = "1".repeat(MAX_DIGITS + 1);
+        for type_name in ["integer", "nonNegativeInteger", "long"] {
+            let dt = compile_no_params(type_name);
+            assert_matches!(
+                dt.parse_value(&over),
+                Err(Violation::DigitLimit { actual }) if actual == MAX_DIGITS + 1,
+                "xsd:{type_name}"
+            );
+            // leading zeros are not significant
+            assert!(
+                dt.is_valid(&format!("+{}1", "0".repeat(1000))),
+                "xsd:{type_name}"
+            );
+        }
+        let dt = compile_no_params("integer");
+        assert!(dt.is_valid(&max));
+        assert!(dt.is_valid(&format!("-{max}")));
+        assert_matches!(
+            dt.parse_value(&format!("-{over}")),
+            Err(Violation::DigitLimit { .. })
+        );
+        // a lexical error is reported as such, however long the value
+        assert_matches!(dt.parse_value(&format!("{over}x")), Err(Violation::Lexical));
+    }
+
+    #[test]
+    fn decimal_digits_are_limited() {
+        let dt = compile_no_params("decimal");
+        let zeros = "0".repeat(1000);
+        // digits either side of the point count together
+        let half = "9".repeat(MAX_DIGITS / 2);
+        assert!(dt.is_valid(&format!("{half}.{half}")));
+        assert_matches!(
+            dt.parse_value(&format!("{half}1.{half}")),
+            Err(Violation::DigitLimit { actual }) if actual == MAX_DIGITS + 1
+        );
+        // zeros between the point and the first significant digit count
+        let small = format!("0.{}1", "0".repeat(MAX_DIGITS - 1));
+        assert!(dt.is_valid(&small));
+        assert_matches!(
+            dt.parse_value(&format!("-.0{}", &small[2..])),
+            Err(Violation::DigitLimit { .. })
+        );
+        // as do trailing zeros of the integer part
+        assert!(dt.is_valid(&format!("1{}", "0".repeat(MAX_DIGITS - 1))));
+        assert_matches!(
+            dt.parse_value(&format!("1{}", "0".repeat(MAX_DIGITS))),
+            Err(Violation::DigitLimit { .. })
+        );
+        // but leading zeros, and trailing zeros of the fraction, don't
+        assert!(dt.is_valid(&format!("{zeros}1.5{zeros}")));
+        assert!(dt.is_valid(&format!("{zeros}.{zeros}")));
+        // and they don't change the value
+        let dt = compile_params("decimal", &[("maxInclusive", "1.5")]).unwrap();
+        assert!(dt.is_valid(&format!("{zeros}1.5{zeros}")));
+        assert!(!dt.is_valid(&format!("{zeros}1.5{zeros}1")));
+        // fractionDigits still counts the digits as written
+        let dt = compile_one_param("decimal", "fractionDigits", "1");
+        assert_matches!(
+            dt.parse_value("1.50"),
+            Err(Violation::FractionDigits { max: 1, actual: 2 })
+        );
+    }
+
+    #[test]
+    fn date_and_duration_digits_are_limited() {
+        let max = format!("1{}", "0".repeat(MAX_DIGITS - 1));
+        let over = format!("1{}", "0".repeat(MAX_DIGITS));
+        let date = compile_no_params("date");
+        assert!(date.is_valid(&format!("{max}-02-29")));
+        assert_matches!(
+            date.parse_value(&format!("-{over}-01-01")),
+            Err(Violation::DigitLimit { .. })
+        );
+        let gyear = compile_no_params("gYear");
+        assert_matches!(gyear.parse_value(&over), Err(Violation::DigitLimit { .. }));
+        let duration = compile_no_params("duration");
+        assert!(duration.is_valid(&format!("P{max}Y{max}DT{max}M{max}S")));
+        for value in [
+            format!("P{over}Y"),
+            format!("PT{over}M"),
+            format!("PT{over}S"),
+            format!("PT0.{}S", "1".repeat(MAX_DIGITS + 1)),
+        ] {
+            assert_matches!(
+                duration.parse_value(&value),
+                Err(Violation::DigitLimit { .. }),
+                "{value}"
+            );
+        }
     }
 }

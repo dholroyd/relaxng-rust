@@ -4,13 +4,14 @@
 
 mod coverage;
 mod derivative;
+mod explain;
 mod infoset;
 mod nameclass;
 mod schema;
 
 use crate::model;
 use crate::xml_whitespace::is_all_xml_whitespace;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ops::Range;
 use std::rc::Rc;
@@ -24,6 +25,13 @@ use infoset::{Failure, Handler, NamespaceScope, StartElement};
 use nameclass::*;
 use schema::*;
 
+/// `kind` of a [`ValidatorError::InvalidValue`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    Text,
+    Attribute,
+}
+
 #[derive(Debug)]
 pub enum ValidatorError {
     /// XML well-formedness error from the parser.
@@ -34,6 +42,13 @@ pub enum ValidatorError {
         kind: &'static str,
         /// What the schema would have accepted at this point, used by
         /// [`Explainer::diagnostic`].
+        expected: Expected,
+    },
+    InvalidValue {
+        span: Range<u64>,
+        kind: ValueKind,
+        /// value with entity and character references expanded
+        value: String,
         expected: Expected,
     },
     UndefinedNamespacePrefix {
@@ -146,7 +161,9 @@ impl ValidatorError {
     fn is_recoverable(&self) -> bool {
         matches!(
             self,
-            ValidatorError::NotAllowed { .. } | ValidatorError::InvalidName { .. }
+            ValidatorError::NotAllowed { .. }
+                | ValidatorError::InvalidValue { .. }
+                | ValidatorError::InvalidName { .. }
         )
     }
 }
@@ -214,6 +231,10 @@ impl std::fmt::Display for ValidatorError {
         match self {
             ValidatorError::Xml(e) => write!(f, "XML error: {e:?}"),
             ValidatorError::NotAllowed { kind, .. } => write!(f, "{kind} not expected here"),
+            ValidatorError::InvalidValue { kind: of, .. } => match of {
+                ValueKind::Text => write!(f, "text content is not valid"),
+                ValueKind::Attribute => write!(f, "attribute value is not valid"),
+            },
             ValidatorError::UndefinedNamespacePrefix { prefix, .. } => {
                 write!(f, "The prefix \"{prefix}\" is not defined")
             }
@@ -420,6 +441,9 @@ impl<F> Sink for F where F: FnMut(&Explainer<'_>, ValidatorError) {}
 /// error was found against.
 pub struct Explainer<'a> {
     schema: &'a Schema,
+    /// Namespaces in scope at the error, for diagnostics that need them.  Always present for
+    /// errors that validation recovers from; never for fatal ones (see `Engine::fail`).
+    ns: Option<&'a NamespaceScope<'a>>,
 }
 
 /// Validates XML documents against a schema, passing each error found to a [`Sink`].
@@ -667,7 +691,7 @@ impl<S: Sink> Engine<S> {
         let compile_time_count = self.schema.inner.borrow().patterns.len() as u16;
         let word_count = (compile_time_count as usize).div_ceil(64);
         self.schema.compile_time_count = compile_time_count;
-        self.schema.coverage = Some(vec![0u64; word_count].into_boxed_slice());
+        self.schema.coverage = Some((0..word_count).map(|_| Cell::new(0)).collect());
     }
 
     /// Resets the per-document state that must match a fresh parse.
@@ -689,18 +713,30 @@ impl<S: Sink> Engine<S> {
         self.invalid = false;
     }
 
-    /// Passes an error that validation recovers from to the sink.
-    fn report(&mut self, err: ValidatorError) {
+    /// Passes an error that validation recovers from to the sink, with the namespace
+    /// declarations in scope where it was found, for explanations that need them.
+    fn report(&mut self, err: ValidatorError, ns: &NamespaceScope<'_>) {
         debug_assert!(err.is_recoverable(), "{err:?}");
-        self.fail(err);
+        self.invalid = true;
+        (self.sink)(
+            &Explainer {
+                schema: &self.schema,
+                ns: Some(ns),
+            },
+            err,
+        );
     }
 
-    /// Passes an error to the sink, marking the document invalid.
+    /// Passes a fatal error to the sink, marking the document invalid.  Fatal errors come from
+    /// outside the handler callbacks, where there is no namespace scope that could be relied
+    /// on (a malformed start tag may have pushed only some of its declarations), so the
+    /// explainer has none.
     fn fail(&mut self, err: ValidatorError) {
         self.invalid = true;
         (self.sink)(
             &Explainer {
                 schema: &self.schema,
+                ns: None,
             },
             err,
         );
@@ -712,9 +748,14 @@ impl<S: Sink> Engine<S> {
     }
 
     /// Checks the buffered typed text, just before the end tag of the element it is the whole
-    /// content of, by applying `text_deriv`. On `NotAllowed`, reports a `text` error tagged with
-    /// the buffered run's span and carries on as though the text had matched, so that the end
-    /// tag does not report the same content again as missing.
+    /// content of, by applying `text_deriv`. On `NotAllowed`, reports an
+    /// [`ValidatorError::InvalidValue`] tagged with the buffered run's span and carries on as
+    /// though the text had matched, so that the end tag does not report the same content again
+    /// as missing.
+    ///
+    /// Text that is only whitespace may also match as though it were absent, leaving a value
+    /// still required, so that the end tag would fail.  That is reported here too, as the
+    /// whitespace not being a valid value, since this is only called just before the end tag.
     fn flush_typed_text(&mut self, ns: &NamespaceScope<'_>) -> Result<(), ValidatorError> {
         if self.text_buffer.is_empty() {
             return Ok(());
@@ -723,9 +764,20 @@ impl<S: Sink> Engine<S> {
             .schema
             .text_node_deriv(self.current_step, &self.text_buffer, ns)?;
         let buf_span = self.text_buffer_span.take();
-        self.text_buffer.clear();
-        if matches!(self.schema.patt(next_id), Pat::NotAllowed) {
-            self.report_text_not_allowed(buf_span.unwrap_or(Span::new(0, 0)));
+        let invalid = matches!(self.schema.patt(next_id), Pat::NotAllowed)
+            || (is_all_xml_whitespace(self.text_buffer.as_bytes()) && {
+                let closed = self.schema.end_tag_deriv(next_id)?;
+                matches!(self.schema.patt(closed), Pat::NotAllowed)
+            });
+        if invalid {
+            let span = buf_span.unwrap_or(Span::new(0, 0));
+            let err = ValidatorError::InvalidValue {
+                span: span.start..span.end,
+                kind: ValueKind::Text,
+                value: std::mem::take(&mut self.text_buffer),
+                expected: Expected(self.current_step),
+            };
+            self.report(err, ns);
             // If even that finds no sound position, carry on as though the text were absent.
             let forced = self.schema.force_text_deriv(self.current_step)?;
             if !matches!(self.schema.patt(forced), Pat::NotAllowed) {
@@ -733,6 +785,7 @@ impl<S: Sink> Engine<S> {
             }
             return Ok(());
         }
+        self.text_buffer.clear();
         self.current_step = next_id;
         Ok(())
     }
@@ -740,7 +793,7 @@ impl<S: Sink> Engine<S> {
     /// Checks buffered typed text that turns out to be followed by a child element, so can only
     /// match `text` patterns after all (the restrictions of spec section 7.2 forbid data
     /// alongside elements).
-    fn flush_text_before_child(&mut self) -> Result<(), ValidatorError> {
+    fn flush_text_before_child(&mut self, ns: &NamespaceScope<'_>) -> Result<(), ValidatorError> {
         if self.text_buffer.is_empty() {
             return Ok(());
         }
@@ -748,7 +801,7 @@ impl<S: Sink> Engine<S> {
         let whitespace = is_all_xml_whitespace(self.text_buffer.as_bytes());
         self.text_buffer.clear();
         if !whitespace && !self.match_untyped_text()? {
-            self.report_text_not_allowed(buf_span.unwrap_or(Span::new(0, 0)));
+            self.report_text_not_allowed(buf_span.unwrap_or(Span::new(0, 0)), ns);
         }
         Ok(())
     }
@@ -765,12 +818,15 @@ impl<S: Sink> Engine<S> {
         Ok(true)
     }
 
-    fn report_text_not_allowed(&mut self, span: Span) {
-        self.report(ValidatorError::NotAllowed {
-            span: span.start..span.end,
-            kind: "text",
-            expected: Expected(self.current_step),
-        });
+    fn report_text_not_allowed(&mut self, span: Span, ns: &NamespaceScope<'_>) {
+        self.report(
+            ValidatorError::NotAllowed {
+                span: span.start..span.end,
+                kind: "text",
+                expected: Expected(self.current_step),
+            },
+            ns,
+        );
     }
 
     fn append_str(&mut self, s: &str, span: Span) -> Result<(), ValidatorError> {
@@ -835,27 +891,44 @@ impl<S: Sink> Engine<S> {
         let mut first_attr_error = None;
         for attr in element.attributes() {
             let attr_name_span = attr.name_span;
+            // The position once the attribute's name has matched, if it has
+            let mut named = None;
             let derived = match self.schema.schema_names.key(&attr.name) {
                 Some(key) => {
                     let mid = self.schema.start_att_deriv(pat, key)?;
+                    if !matches!(self.schema.patt(mid), Pat::NotAllowed) {
+                        named = Some(mid);
+                    }
                     self.schema.att_value_deriv(mid, attr.value, ns)?
                 }
                 None => PAT_NOT_ALLOWED,
             };
             if matches!(self.schema.patt(derived), Pat::NotAllowed) {
                 if first_attr_error.is_none() {
-                    first_attr_error = Some(if !attr.name.local_name.is_valid() {
-                        ValidatorError::InvalidName {
-                            span: attr_name_span.start..attr_name_span.end,
-                            kind: "attribute",
-                        }
-                    } else {
-                        ValidatorError::NotAllowed {
-                            span: attr_name_span.start..attr_name_span.end,
-                            kind: "attribute",
-                            expected: Expected(pat_id),
-                        }
-                    });
+                    first_attr_error = Some(
+                        if let Some(mid) = named
+                            && self.schema.patt(mid).is_text_typed()
+                        {
+                            // The name was allowed, and its value is checked by datatype
+                            ValidatorError::InvalidValue {
+                                span: attr_name_span.start..attr_name_span.end,
+                                kind: ValueKind::Attribute,
+                                value: attr.value.to_string(),
+                                expected: Expected(mid),
+                            }
+                        } else if !attr.name.local_name.is_valid() {
+                            ValidatorError::InvalidName {
+                                span: attr_name_span.start..attr_name_span.end,
+                                kind: "attribute",
+                            }
+                        } else {
+                            ValidatorError::NotAllowed {
+                                span: attr_name_span.start..attr_name_span.end,
+                                kind: "attribute",
+                                expected: Expected(pat_id),
+                            }
+                        },
+                    );
                 }
                 // Leave `pat` alone: carry on as though the attribute were absent.
             } else {
@@ -914,7 +987,7 @@ impl<S: Sink> Engine<S> {
                 self.last_was_start_element = true;
                 self.text_typed = self.schema.patt(recovered).is_text_typed();
                 set_expected(&mut error, recovered);
-                self.report(error);
+                self.report(error, ns);
                 Ok(())
             }
             Err(CloseStartError {
@@ -924,8 +997,29 @@ impl<S: Sink> Engine<S> {
                 // Nothing to check this element's contents against, so skip them; the
                 // position is left where the element was expected.
                 self.skip_depth = 1;
-                self.report(error);
+                self.report(error, ns);
                 Ok(())
+            }
+        }
+    }
+
+    /// The error for an element with no content, whose end tag (at `span`) could not close it
+    /// from its content position `content`.  Where the content is typed, a value is what is
+    /// missing, so the empty value is reported as not valid; otherwise something else required
+    /// is missing, and the end tag is reported as too early.
+    fn unclosed_content_error(&self, content: PatId, span: Span) -> ValidatorError {
+        if self.schema.patt(content).is_text_typed() {
+            ValidatorError::InvalidValue {
+                span: span.start..span.end,
+                kind: ValueKind::Text,
+                value: String::new(),
+                expected: Expected(content),
+            }
+        } else {
+            ValidatorError::NotAllowed {
+                span: span.start..span.end,
+                kind: "element-end",
+                expected: Expected(content),
             }
         }
     }
@@ -957,11 +1051,8 @@ impl<S: Sink> Engine<S> {
                 self.current_step = forced;
                 self.last_was_start_element = false;
             }
-            self.report(ValidatorError::NotAllowed {
-                span: span.start..span.end,
-                kind: "element-end",
-                expected: Expected(before),
-            });
+            let err = self.unclosed_content_error(before, span);
+            self.report(err, ns);
             return Ok(());
         }
         self.current_step = result;
@@ -996,7 +1087,7 @@ impl<S: Sink> Engine<S> {
                     }
                     set_expected(&mut error, recovered);
                 }
-                self.report(error);
+                self.report(error, ns);
                 return Ok(());
             }
         };
@@ -1009,11 +1100,8 @@ impl<S: Sink> Engine<S> {
                 self.current_step = forced;
                 self.last_was_start_element = false;
             }
-            self.report(ValidatorError::NotAllowed {
-                span: span.start..span.end,
-                kind: "element-end",
-                expected: Expected(next_id),
-            });
+            let err = self.unclosed_content_error(next_id, span);
+            self.report(err, ns);
             return Ok(());
         }
         self.current_step = result;
@@ -1138,6 +1226,36 @@ impl Explainer<'_> {
                     code: None,
                     spans: vec![label],
                 });
+            }
+            ValidatorError::InvalidValue {
+                span,
+                value,
+                expected,
+                ..
+            } => {
+                let reasons = self.value_reasons(expected.0, value);
+                diagnostics.push(codemap_diagnostic::Diagnostic {
+                    level: codemap_diagnostic::Level::Error,
+                    message: err.to_string(),
+                    code: None,
+                    spans: vec![codemap_diagnostic::SpanLabel {
+                        span: file.span.subspan(span.start as _, span.end as _),
+                        // The reasons can be long, so are given below, rather than beside it
+                        label: Some("Not valid".to_string()),
+                        style: codemap_diagnostic::SpanStyle::Primary,
+                    }],
+                });
+                if !reasons.is_empty() {
+                    diagnostics.push(codemap_diagnostic::Diagnostic {
+                        level: codemap_diagnostic::Level::Help,
+                        message: format!(
+                            "The value {}",
+                            crate::model::datatype::reason::join_or(&reasons).text
+                        ),
+                        code: None,
+                        spans: vec![],
+                    });
+                }
             }
             ValidatorError::NotAllowed {
                 span,
@@ -1486,7 +1604,12 @@ impl<S: Sink> Handler for Engine<S> {
             return Ok(());
         }
         // The parent has a child element, so none of its text is typed any more
-        self.flush_text_before_child()?;
+        //
+        // We pass namespace info because our API requires it, but this is the namespace
+        // context of this element, not the parent.  That doesn't matter since we are not
+        // treating the sibling text children as typed in this path, so diagnostics will not need
+        // to resolve prefixes on QName values
+        self.flush_text_before_child(ns)?;
         self.text_typed = false;
         if element.empty {
             self.handle_empty_element(ns, element)
@@ -1536,11 +1659,11 @@ impl<S: Sink> Handler for Engine<S> {
 
     /// Typed text stays buffered past the end of its run, until the next element event shows
     /// how to check it.
-    fn end_text(&mut self, _ns: &NamespaceScope<'_>) -> Result<(), ValidatorError> {
+    fn end_text(&mut self, ns: &NamespaceScope<'_>) -> Result<(), ValidatorError> {
         self.untyped_text_matched = false;
         let span = self.untyped_text_span.take();
         if std::mem::take(&mut self.untyped_text_failed) {
-            self.report_text_not_allowed(span.unwrap_or(Span::new(0, 0)));
+            self.report_text_not_allowed(span.unwrap_or(Span::new(0, 0)), ns);
         }
         Ok(())
     }
@@ -1627,6 +1750,7 @@ mod tests {
             .remove(0);
         let (_, d) = Explainer {
             schema: &v.engine.schema,
+            ns: None,
         }
         .diagnostic("doc".to_string(), source, &err);
         (err, d)
@@ -1681,6 +1805,7 @@ mod tests {
                     emit(
                         &Explainer {
                             schema: &v.engine.schema,
+                            ns: None,
                         },
                         xml.as_bytes(),
                         err,
@@ -1697,6 +1822,7 @@ mod tests {
                     emit(
                         &Explainer {
                             schema: &v.engine.schema,
+                            ns: None,
                         },
                         xml.as_bytes(),
                         err,
@@ -1774,6 +1900,7 @@ mod tests {
             .map(|err| {
                 let (_, diagnostics) = Explainer {
                     schema: &v.engine.schema,
+                    ns: None,
                 }
                 .diagnostic("doc".to_string(), doc.as_bytes(), &err);
                 let help = diagnostics
@@ -1783,6 +1910,7 @@ mod tests {
                     .unwrap_or_default();
                 let source = match &err {
                     crate::validator::ValidatorError::NotAllowed { span, .. }
+                    | crate::validator::ValidatorError::InvalidValue { span, .. }
                     | crate::validator::ValidatorError::InvalidName { span, .. } => {
                         doc[span.start as usize..span.end as usize].to_string()
                     }
@@ -2069,6 +2197,261 @@ mod tests {
         assert_eq!(errs.len(), 2, "got {errs:?}");
         assert_eq!(errs[0].source, "oops");
         assert_eq!(errs[1].source, "again");
+    }
+
+    /// Validates `doc`, and for each error returns the text it covers and its explanation: the
+    /// label beside it, followed by any help
+    fn explained(schema: &str, doc: &str) -> Vec<(String, String)> {
+        let f = Fixture::correct(schema);
+        let out = Rc::new(RefCell::new(vec![]));
+        let sink_out = out.clone();
+        let source = doc.as_bytes().to_vec();
+        let mut v = Validator::new(f.schema.clone(), move |e: &Explainer<'_>, err| {
+            let (_, d) = e.diagnostic("doc".to_string(), &source, &err);
+            let span = match &err {
+                ValidatorError::NotAllowed { span, .. }
+                | ValidatorError::InvalidValue { span, .. } => span.clone(),
+                other => panic!("unexpected error {other:?}"),
+            };
+            let label = d[0].spans[0].label.clone().unwrap_or_default();
+            let text = if let ValidatorError::InvalidValue { .. } = err {
+                // Always the same label, with the reasons given in a help message
+                assert_eq!(label, "Not valid");
+                assert!(d.len() <= 2, "{d:?}");
+                d.get(1).map_or(String::new(), |help| {
+                    help.message
+                        .strip_prefix("The value ")
+                        .expect("help starts \"The value\"")
+                        .to_string()
+                })
+            } else {
+                let mut text = label;
+                for help in &d[1..] {
+                    text.push_str(" / ");
+                    text.push_str(&help.message);
+                }
+                text
+            };
+            let covered = String::from_utf8_lossy(&source[span.start as usize..span.end as usize]);
+            sink_out.borrow_mut().push((covered.into_owned(), text));
+        })
+        .unwrap();
+        let _ = crate::validator::validate_slice(&mut v, doc.as_bytes());
+        out.take()
+    }
+
+    fn explained_strs(schema: &str, doc: &str) -> Vec<(String, String)> {
+        explained(&format!("start = element r {{ {schema} }}"), doc)
+    }
+
+    #[track_caller]
+    fn assert_explained(schema: &str, doc: &str, expected: &[(&str, &str)]) {
+        let got = explained_strs(schema, doc);
+        let got: Vec<_> = got.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn invalid_value_names_the_violated_facet() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                r#"xsd:string { minLength = "3" }"#,
+                "na",
+                "must have a character count of at least 3 (it has 2)",
+            ),
+            (
+                r#"xsd:string { maxLength = "1" }"#,
+                "na",
+                "must have a character count of at most 1 (it has 2)",
+            ),
+            (
+                r#"xsd:string { length = "3" }"#,
+                "na",
+                "must have a character count of exactly 3 (it has 2)",
+            ),
+            (
+                r#"xsd:string { minLength = "3" maxLength = "5" }"#,
+                "na",
+                "must have a character count of at least 3 (it has 2)",
+            ),
+            (
+                r#"xsd:string { minLength = "3" maxLength = "5" }"#,
+                "abcdefg",
+                "must have a character count of at most 5 (it has 7)",
+            ),
+            (
+                r#"xsd:string { pattern = "[a-z]+[0-9]" }"#,
+                "ab",
+                r#"must match the pattern "[a-z]+[0-9]""#,
+            ),
+            (
+                r#"xsd:decimal { minInclusive = "0" }"#,
+                "-0.1",
+                "must be greater than or equal to 0",
+            ),
+            (
+                r#"xsd:decimal { maxExclusive = "100" }"#,
+                "100",
+                "must be less than 100",
+            ),
+            (
+                r#"xsd:decimal { fractionDigits = "2" }"#,
+                "1.234",
+                "must have a fraction digit count of at most 2 (it has 3)",
+            ),
+            (
+                r#"xsd:decimal { fractionDigits = "0" }"#,
+                "1.5",
+                "must have a fraction digit count of 0 (it has 1)",
+            ),
+            (
+                r#"xsd:integer { totalDigits = "2" }"#,
+                "123",
+                "must have a digit count of at most 2 (it has 3)",
+            ),
+            (
+                r#"xsd:integer { minExclusive = "0" }"#,
+                "0",
+                "must be greater than 0",
+            ),
+            ("xsd:integer", "1.5", "must be a valid integer"),
+            ("xsd:byte", "128", "must be within the range of byte"),
+            (
+                "xsd:positiveInteger",
+                "0",
+                "must be within the range of positiveInteger",
+            ),
+            (
+                r#"xsd:hexBinary { maxLength = "1" }"#,
+                "0a0b",
+                "must have a byte count of at most 1 (it has 2)",
+            ),
+            (
+                r#"xsd:NMTOKENS { minLength = "2" }"#,
+                "a",
+                "must have an item count of at least 2 (it has 1)",
+            ),
+            (
+                r#"xsd:float { minInclusive = "0.1" }"#,
+                "0",
+                "must be greater than or equal to 0.1",
+            ),
+            (
+                r#"xsd:double { maxInclusive = "INF" minExclusive = "-INF" }"#,
+                "-INF",
+                "must be greater than -INF",
+            ),
+            (
+                r#"xsd:date { minInclusive = "2020-01-01" }"#,
+                "2019-12-31",
+                "must be 2020-01-01 or later",
+            ),
+            (
+                r#"xsd:dateTime { maxExclusive = "2020-01-01T10:00:00.25Z" }"#,
+                "2020-01-01T10:00:00.25Z",
+                "must be earlier than 2020-01-01T10:00:00.25Z",
+            ),
+            (
+                r#"xsd:time { maxInclusive = "12:30:00" }"#,
+                "13:00:00",
+                "must be 12:30:00 or earlier",
+            ),
+            (
+                r#"xsd:gYear { minInclusive = "-0044" }"#,
+                "-0045",
+                "must be -0044 or later",
+            ),
+            (
+                r#"xsd:gYearMonth { minInclusive = "2020-02" }"#,
+                "2020-01",
+                "must be 2020-02 or later",
+            ),
+            (
+                r#"xsd:gMonthDay { minInclusive = "--02-29" }"#,
+                "--02-28",
+                "must be --02-29 or later",
+            ),
+            (
+                r#"xsd:gMonth { minInclusive = "--03" }"#,
+                "--02",
+                "must be --03 or later",
+            ),
+            (
+                r#"xsd:gDay { minInclusive = "---10" }"#,
+                "---09",
+                "must be ---10 or later",
+            ),
+            // Bounds are shown as written, not as normalized, which for this one is to UTC
+            (
+                r#"xsd:date { minInclusive = "2020-01-01+05:00" }"#,
+                "2019-12-31Z",
+                "must be 2020-01-01+05:00 or later",
+            ),
+            (
+                r#"xsd:decimal { minInclusive = " +1.50 " }"#,
+                "1",
+                "must be greater than or equal to +1.50",
+            ),
+            (
+                r#"xsd:duration { maxInclusive = "P1DT2H30.5S" }"#,
+                "P2D",
+                "must be less than or equal to P1DT2H30.5S",
+            ),
+            (
+                r#"xsd:duration { minExclusive = "PT0S" }"#,
+                "PT0S",
+                "must be greater than PT0S",
+            ),
+        ];
+        for (datatype, value, reason) in cases {
+            let got = explained_strs(
+                &format!("element a {{ {datatype} }}"),
+                &format!("<r><a>{value}</a></r>"),
+            );
+            assert_eq!(got, [(value.to_string(), reason.to_string())], "{datatype}");
+        }
+    }
+
+    #[test]
+    fn invalid_value_explains_list_at_the_failing_item() {
+        // Several lists, as a schema allowing tokens in any order might have: the reason comes
+        // from what is allowed after the items that matched, in the lists that matched most
+        assert_explained(
+            r#"element a {
+                 token "all"
+                 | list { "additions", "removals"?, "text"? }
+                 | list { "additions", "text"?, "removals"? }
+                 | list { "removals", "additions"? }
+               }*"#,
+            "<r><a>additions bogus</a><a>removals removals</a></r>",
+            &[
+                (
+                    "additions bogus",
+                    r#"must be equal to "all", or list item "bogus" must be equal to "removals" or "text""#,
+                ),
+                (
+                    "removals removals",
+                    r#"must be equal to "all" or list item "removals" must be equal to "additions""#,
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn invalid_value_explains_qname_using_document_namespaces() {
+        let got = explained(
+            r#"namespace x = "urn:a"
+               start = element r { element q { xsd:QName }, element v { xsd:QName "x:y" } }"#,
+            r#"<r xmlns:p="urn:b"><q>zz:y</q><v>p:y</v></r>"#,
+        );
+        let got: Vec<_> = got.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("zz:y", r#"uses the prefix "zz", which is not declared"#),
+                ("p:y", r#"must be equal to "{urn:a}y" (it is "{urn:b}y")"#),
+            ]
+        );
     }
 
     #[test]

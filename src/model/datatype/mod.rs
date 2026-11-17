@@ -2,6 +2,8 @@ use crate::model::compiler::Context;
 use crate::syntax::types;
 use crate::syntax::types::{DatatypeName, NamespacedName};
 
+#[cfg(feature = "validator")]
+pub(crate) mod reason;
 pub mod relax;
 pub mod xsd;
 mod xsd_regex;
@@ -55,6 +57,41 @@ impl DatatypeValues {
             DatatypeValues::Xsd(xsd) => xsd.is_valid_with_ns(value, default_ns, lookup_ns),
         }
     }
+
+    /// For a `QName` value, what `text` in the instance document resolves to, in the same form
+    /// as [`Self::describe`], since text that reads the same as the schema's value may resolve
+    /// to a different name. `None` for other datatypes, or if `text` doesn't resolve.
+    #[cfg(feature = "validator")]
+    pub(crate) fn describe_actual(
+        &self,
+        text: &str,
+        default_ns: &str,
+        lookup_ns: impl Fn(&str) -> Option<String>,
+    ) -> Option<String> {
+        match self {
+            DatatypeValues::Xsd(xsd::XsdDatatypeValues::QName(_)) => {
+                let q = xsd::QNameVal::resolve(text, default_ns, lookup_ns)?;
+                Some(DatatypeValues::Xsd(xsd::XsdDatatypeValues::QName(q)).describe())
+            }
+            _ => None,
+        }
+    }
+
+    /// The value, for diagnostics: as written in the schema, or for a `QName` as `{uri}name`
+    #[cfg(feature = "validator")]
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            DatatypeValues::Relax(relax::BuiltinDatatypeValue::StringValue(v))
+            | DatatypeValues::Relax(relax::BuiltinDatatypeValue::TokenValue(v)) => v.clone(),
+            DatatypeValues::Xsd(xsd::XsdDatatypeValues::Typed(t)) => t.lexical.clone(),
+            DatatypeValues::Xsd(xsd::XsdDatatypeValues::QName(q)) if q.namespace_uri.is_empty() => {
+                q.localname.clone()
+            }
+            DatatypeValues::Xsd(xsd::XsdDatatypeValues::QName(q)) => {
+                format!("{{{}}}{}", q.namespace_uri, q.localname)
+            }
+        }
+    }
 }
 impl Datatype for DatatypeValues {
     fn is_valid(&self, value: &str) -> bool {
@@ -78,6 +115,22 @@ impl Datatypes {
         match self {
             Datatypes::Relax(relax) => relax.is_valid(value),
             Datatypes::Xsd(xsd) => xsd.is_valid_with_ns(value, lookup_ns),
+        }
+    }
+
+    /// Why `value` is not valid, as a phrase such as `must be greater than or equal to 0`, or
+    /// `None` if it is valid. Only for diagnostics: [`Self::is_valid_with_ns`] is cheaper.
+    #[cfg(feature = "validator")]
+    pub(crate) fn explain_invalid(
+        &self,
+        value: &str,
+        lookup_ns: impl Fn(&str) -> Option<String>,
+    ) -> Option<reason::Reason> {
+        match self {
+            Datatypes::Relax(relax) => {
+                (!relax.is_valid(value)).then(|| reason::Reason::phrase("is not valid".to_string()))
+            }
+            Datatypes::Xsd(xsd) => xsd.explain_invalid(value, lookup_ns),
         }
     }
 }

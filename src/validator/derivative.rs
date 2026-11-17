@@ -29,7 +29,7 @@ impl Schema {
     /// The derivative of `pid` with respect to the text node `text`, alongside other children of
     /// an element: for an element's whole content, use [`Self::text_node_deriv`].
     pub(crate) fn text_deriv(
-        &mut self,
+        &self,
         pid: PatId,
         text: &str,
         ns: &NamespaceScope<'_>,
@@ -53,7 +53,7 @@ impl Schema {
     /// The validator only ever needs this case: other text is either alongside child elements,
     /// so can only match `text` patterns (see `Engine::text_typed`), or is an attribute value.
     pub(crate) fn text_node_deriv(
-        &mut self,
+        &self,
         pid: PatId,
         text: &str,
         ns: &NamespaceScope<'_>,
@@ -75,7 +75,7 @@ impl Schema {
     // Everything else goes into `cx.memo`, which lasts for this `text_deriv` call only.  See
     // [`TextDerivCx::depends`] for how the two cases are told apart.
     fn text_deriv_memo(
-        &mut self,
+        &self,
         pid: PatId,
         cx: &mut TextDerivCx<'_, '_, '_>,
     ) -> Result<PatId, Overflow> {
@@ -143,7 +143,7 @@ impl Schema {
     /// Returns the derivative of `pid` (whose pattern is `pat`) with respect to `cx.text`,
     /// setting `cx.depends` if a datatype was consulted.
     fn text_deriv_uncached(
-        &mut self,
+        &self,
         pid: PatId,
         pat: Pat,
         cx: &mut TextDerivCx<'_, '_, '_>,
@@ -263,7 +263,7 @@ impl Schema {
     }
 
     /// `d, (p+ | empty)`: what remains of `p+` once `p` has been derived to `d`.
-    fn repeat_rest(&mut self, d: PatId, p: PatId) -> Result<PatId, Overflow> {
+    fn repeat_rest(&self, d: PatId, p: PatId) -> Result<PatId, Overflow> {
         let more = self.one_or_more(p)?;
         let rest = self.choice(more, self.empty())?;
         self.group(d, rest)

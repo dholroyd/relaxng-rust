@@ -41,6 +41,9 @@ fn is_valid_any_uri(value: &str) -> bool {
     uriparse::URIReference::try_from(escaped.as_ref()).is_ok()
 }
 
+mod violation;
+pub(crate) use violation::{BYTE_COUNT, CHARACTER_COUNT, ITEM_COUNT, Violation};
+
 pub(crate) const NAMESPACE_URI: &str = "http://www.w3.org/2001/XMLSchema-datatypes";
 
 /// Defines a wrapper for a `float` or `double` value as the min/max facets see it. `-0` is the
@@ -128,7 +131,7 @@ impl TypedValue {
     fn is_valid(&self, text: &str) -> bool {
         self.datatype
             .parse_value(text)
-            .is_some_and(|v| v == self.value)
+            .is_ok_and(|v| v == self.value)
     }
 }
 
@@ -870,9 +873,13 @@ impl XsdDatatypes {
     }
 }
 impl XsdDatatypes {
-    /// The value that `text` represents in this datatype's value space, or `None` if `text` is
-    /// not a valid lexical form of the datatype or the value is not allowed by its facets.
-    pub(crate) fn parse_value<'a>(&self, text: &'a str) -> Option<XsdValue<'a>> {
+    /// The value that `text` represents in this datatype's value space, or else the first check
+    /// it failed: that `text` is a valid lexical form of the datatype, or that the value is
+    /// allowed by its facets.
+    pub(crate) fn parse_value<'s, 'a>(
+        &'s self,
+        text: &'a str,
+    ) -> Result<XsdValue<'a>, Violation<'s>> {
         // The whiteSpace facet is applied before anything else, so the lexical checks and the
         // pattern / length facets all see the normalized value.
         let normalized = match self {
@@ -936,70 +943,91 @@ impl XsdDatatypes {
 
     /// Parse whitespace-normalized text: check it is in the lexical space, convert it to a value,
     /// and check the value against the datatype's own range and its facets.
-    fn parse_normalized<'a>(&self, s: &'a str) -> Option<XsdValue<'a>> {
-        fn string<'a>(s: &'a str, valid: bool, facets: &StringFacets) -> Option<XsdValue<'a>> {
-            (valid && facets.len.is_valid(s)).then_some(XsdValue::String(Cow::Borrowed(s)))
+    fn parse_normalized<'s, 'a>(&'s self, s: &'a str) -> Result<XsdValue<'a>, Violation<'s>> {
+        fn string<'a>(
+            s: &'a str,
+            valid: bool,
+            facets: &StringFacets,
+        ) -> Result<XsdValue<'a>, Violation<'static>> {
+            if !valid {
+                return Err(Violation::Lexical);
+            }
+            facets.len.check(s)?;
+            Ok(XsdValue::String(Cow::Borrowed(s)))
         }
         fn list<'a>(
             s: &'a str,
             item_valid: fn(&str) -> bool,
             len: &LengthFacet,
-        ) -> Option<XsdValue<'a>> {
+        ) -> Result<XsdValue<'a>, Violation<'static>> {
             let items: Vec<Cow<'a, str>> = split_xml_whitespace(s).map(Cow::Borrowed).collect();
-            (!items.is_empty()
-                && items.iter().all(|i| item_valid(i))
-                && len.is_valid_count(items.len()))
-            .then_some(XsdValue::List(items))
+            if items.is_empty() || !items.iter().all(|i| item_valid(i)) {
+                return Err(Violation::Lexical);
+            }
+            len.check_count(items.len(), ITEM_COUNT)?;
+            Ok(XsdValue::List(items))
         }
         /// An integer in the lexical space, if it also satisfies the totalDigits facet
-        fn parse_integer(s: &str, facets: &IntegerFacets) -> Option<XsdInteger> {
-            let i = XsdInteger::parse(s)?;
-            facets
-                .total_digits
-                .is_none_or(|td| significant_digits(s) <= usize::from(td))
-                .then_some(i)
+        fn parse_integer(
+            s: &str,
+            facets: &IntegerFacets,
+        ) -> Result<XsdInteger, Violation<'static>> {
+            let i = XsdInteger::parse(s).ok_or(Violation::Lexical)?;
+            check_total_digits(s, facets.total_digits)?;
+            Ok(i)
         }
         /// A fixed-size integer type, whose range comes from `T`
-        fn sized<'a, T>(
+        fn sized<'s, 'a, T>(
             s: &str,
-            min_max: &MinMaxFacet<T>,
+            min_max: &'s MinMaxFacet<T>,
             facets: &IntegerFacets,
-        ) -> Option<XsdValue<'a>>
+        ) -> Result<XsdValue<'a>, Violation<'s>>
         where
             T: PartialOrd + TryFrom<i64> + for<'b> TryFrom<&'b num_bigint::BigInt>,
         {
             let i = parse_integer(s, facets)?;
-            let v: T = i.to_prim()?;
-            min_max.is_valid(&v).then_some(XsdValue::Integer(i))
+            let v: T = i.to_prim().ok_or(Violation::TypeRange)?;
+            min_max.check(&v)?;
+            Ok(XsdValue::Integer(i))
         }
         /// An unbounded integer type, whose range is given by the allowed signs
-        fn unbounded<'a, T: PartialOrd>(
+        fn unbounded<'s, 'a, T: PartialOrd>(
             s: &str,
             signs: &[std::cmp::Ordering],
-            min_max: &MinMaxFacet<T>,
+            min_max: &'s MinMaxFacet<T>,
             facets: &IntegerFacets,
             convert: impl FnOnce(num_bigint::BigInt) -> Option<T>,
-        ) -> Option<XsdValue<'a>> {
+        ) -> Result<XsdValue<'a>, Violation<'s>> {
             let i = parse_integer(s, facets)?;
             if !signs.contains(&i.sign()) {
-                return None;
+                return Err(Violation::TypeRange);
             }
-            (!min_max.bounded() || min_max.is_valid(&convert(i.to_bigint())?))
-                .then_some(XsdValue::Integer(i))
+            if min_max.bounded() {
+                min_max.check(&convert(i.to_bigint()).ok_or(Violation::TypeRange)?)?;
+            }
+            Ok(XsdValue::Integer(i))
         }
         /// A date or time type, whose lexical form is matched by `re`
-        fn instant<'a>(
+        fn instant<'s, 'a>(
             re: &regex::Regex,
             s: &'a str,
-            min_max: &MinMaxFacet<Instant<'a>>,
-        ) -> Option<XsdValue<'a>> {
-            let v = parse_instant(re, s)?;
-            min_max.is_valid(&v).then_some(XsdValue::Instant(v))
+            min_max: &'s MinMaxFacet<Instant<'static>>,
+        ) -> Result<XsdValue<'a>, Violation<'s>> {
+            let v = parse_instant(re, s).ok_or(Violation::Lexical)?;
+            // Compared as bounds for an `Instant<'a>`, but described from the facet as it is,
+            // since the description must outlive `s`
+            let as_bounds: &MinMaxFacet<Instant<'a>> = min_max;
+            if let Some(min) = as_bounds.violated(&v) {
+                return Err(min_max.violation(min));
+            }
+            Ok(XsdValue::Instant(v))
         }
         use std::cmp::Ordering::{Equal, Greater, Less};
 
-        if self.pattern().is_some_and(|p| !p.is_valid(s)) {
-            return None;
+        if let Some(p) = self.pattern()
+            && !p.is_valid(s)
+        {
+            return Err(Violation::Pattern(p));
         }
         match self {
             XsdDatatypes::String(f)
@@ -1045,53 +1073,49 @@ impl XsdDatatypes {
                 fraction_digits,
                 total_digits,
             } => {
-                let v = parse_decimal(s)?;
-                if !min_max.is_valid(&v) {
-                    return None;
-                }
-                if total_digits.is_some_and(|td| significant_digits(s) > usize::from(td)) {
-                    return None;
-                }
+                let v = parse_decimal(s).ok_or(Violation::Lexical)?;
+                min_max.check(&v)?;
+                check_total_digits(s, *total_digits)?;
                 if let Some(fd) = fraction_digits {
                     let (_digits, scale) = v.as_bigint_and_exponent();
                     if scale > i64::from(*fd) {
-                        return None;
+                        return Err(Violation::FractionDigits {
+                            max: *fd,
+                            actual: scale.unsigned_abs(),
+                        });
                     }
                 }
-                Some(XsdValue::Decimal(v.normalized()))
+                Ok(XsdValue::Decimal(v.normalized()))
             }
             XsdDatatypes::Float(min_max, _) => {
-                let v: f32 = parse_float(s)?;
-                min_max
-                    .is_valid(&XsdFloat::new(v))
-                    .then_some(XsdValue::Float(float_bits(v)))
+                let v: f32 = parse_float(s).ok_or(Violation::Lexical)?;
+                min_max.check(&XsdFloat::new(v))?;
+                Ok(XsdValue::Float(float_bits(v)))
             }
             XsdDatatypes::Double(min_max, _) => {
-                let v: f64 = parse_float(s)?;
-                min_max
-                    .is_valid(&XsdDouble::new(v))
-                    .then_some(XsdValue::Double(double_bits(v)))
+                let v: f64 = parse_float(s).ok_or(Violation::Lexical)?;
+                min_max.check(&XsdDouble::new(v))?;
+                Ok(XsdValue::Double(double_bits(v)))
             }
             XsdDatatypes::Boolean(_) => match s {
-                "true" | "1" => Some(XsdValue::Boolean(true)),
-                "false" | "0" => Some(XsdValue::Boolean(false)),
-                _ => None,
+                "true" | "1" => Ok(XsdValue::Boolean(true)),
+                "false" | "0" => Ok(XsdValue::Boolean(false)),
+                _ => Err(Violation::Lexical),
             },
             XsdDatatypes::HexBinary(len, _) => {
-                let bytes = parse_hex(s)?;
-                len.is_valid_count(bytes.len())
-                    .then_some(XsdValue::Binary(bytes))
+                let bytes = parse_hex(s).ok_or(Violation::Lexical)?;
+                len.check_count(bytes.len(), BYTE_COUNT)?;
+                Ok(XsdValue::Binary(bytes))
             }
             XsdDatatypes::Base64Binary(len, _) => {
-                let bytes = parse_base64(s)?;
-                len.is_valid_count(bytes.len())
-                    .then_some(XsdValue::Binary(bytes))
+                let bytes = parse_base64(s).ok_or(Violation::Lexical)?;
+                len.check_count(bytes.len(), BYTE_COUNT)?;
+                Ok(XsdValue::Binary(bytes))
             }
             XsdDatatypes::Duration(min_max, _) => {
-                let d = parse_duration(s)?;
-                min_max
-                    .is_valid(&d)
-                    .then(|| XsdValue::Duration(Box::new(d)))
+                let d = parse_duration(s).ok_or(Violation::Lexical)?;
+                min_max.check(&d)?;
+                Ok(XsdValue::Duration(Box::new(d)))
             }
             XsdDatatypes::Datetime(min_max, _) => instant(&DATETIME_RE, s, min_max),
             XsdDatatypes::Date(min_max, _) => instant(&DATE_RE, s, min_max),
@@ -1107,7 +1131,22 @@ impl XsdDatatypes {
 
 impl super::Datatype for XsdDatatypes {
     fn is_valid(&self, value: &str) -> bool {
-        self.parse_value(value).is_some()
+        self.parse_value(value).is_ok()
+    }
+}
+
+/// Checks the totalDigits facet, if there is one, against a decimal or integer literal
+fn check_total_digits(s: &str, total_digits: Option<u16>) -> Result<(), Violation<'static>> {
+    match total_digits {
+        Some(max) => {
+            let actual = significant_digits(s);
+            if actual > usize::from(max) {
+                Err(Violation::TotalDigits { max, actual })
+            } else {
+                Ok(())
+            }
+        }
+        None => Ok(()),
     }
 }
 
@@ -1229,7 +1268,7 @@ pub enum FacetError {
     InvalidValue(codemap::Span, String),
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub enum LengthFacet {
     Unbounded,
     MinLength(usize),
@@ -1238,17 +1277,32 @@ pub enum LengthFacet {
     Length(usize),
 }
 impl LengthFacet {
-    fn is_valid(&self, value: &str) -> bool {
-        self.is_valid_count(value.chars().count())
+    /// Checks the length of a string, in characters
+    fn check(&self, value: &str) -> Result<(), Violation<'static>> {
+        if let LengthFacet::Unbounded = self {
+            return Ok(());
+        }
+        self.check_count(value.chars().count(), CHARACTER_COUNT)
     }
 
-    fn is_valid_count(&self, actual: usize) -> bool {
-        match self {
+    /// Checks a length in whatever unit the datatype measures it in, which `unit` names, as one
+    /// of [`CHARACTER_COUNT`], [`ITEM_COUNT`] or [`BYTE_COUNT`]
+    fn check_count(&self, actual: usize, unit: &'static str) -> Result<(), Violation<'static>> {
+        let valid = match self {
             LengthFacet::Unbounded => true,
             LengthFacet::MinLength(min) => *min <= actual,
             LengthFacet::MaxLength(max) => actual <= *max,
             LengthFacet::MinMaxLength(min, max) => *min <= actual && actual <= *max,
             LengthFacet::Length(len) => actual == *len,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(Violation::Length {
+                facet: *self,
+                unit,
+                actual,
+            })
         }
     }
 
@@ -1326,16 +1380,30 @@ impl<T: PartialOrd> Max<T> {
         }
     }
 }
+/// The facets that bound a value, which [`MinMaxFacet::set`] sets
+const BOUND_FACETS: [&str; 4] = [
+    "minInclusive",
+    "minExclusive",
+    "maxInclusive",
+    "maxExclusive",
+];
+
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct MinMaxFacet<T: PartialOrd> {
     min: Min<T>,
     max: Max<T>,
+    /// The bounds as written in the schema, for diagnostics, with whitespace collapsed as it is
+    /// for every ordered datatype
+    min_text: Option<Box<str>>,
+    max_text: Option<Box<str>>,
 }
 impl<T: PartialOrd> Default for MinMaxFacet<T> {
     fn default() -> Self {
         MinMaxFacet {
             min: Min::Unbounded,
             max: Max::Unbounded,
+            min_text: None,
+            max_text: None,
         }
     }
 }
@@ -1402,6 +1470,25 @@ where
 {
     pub fn bounded(&self) -> bool {
         !matches!((&self.min, &self.max), (Min::Unbounded, Max::Unbounded))
+    }
+
+    /// Sets the bound that `param` gives, one of [`BOUND_FACETS`], to `val`, its value
+    fn set(&mut self, param: &types::Param, val: T) -> Result<(), FacetError> {
+        let name = param.name.to_string();
+        match &name[..] {
+            "minInclusive" => self.min_inclusive(val)?,
+            "minExclusive" => self.min_exclusive(val)?,
+            "maxInclusive" => self.max_inclusive(val)?,
+            "maxExclusive" => self.max_exclusive(val)?,
+            _ => unreachable!("{name} is not a bound facet"),
+        }
+        let text = if name.starts_with("min") {
+            &mut self.min_text
+        } else {
+            &mut self.max_text
+        };
+        *text = Some(collapse_xml_whitespace(&param.value.as_string_value()).into());
+        Ok(())
     }
 
     fn min_inclusive(&mut self, val: T) -> Result<(), FacetError> {
@@ -1521,8 +1608,37 @@ where
         Ok(())
     }
 
-    fn is_valid(&self, v: &T) -> bool {
-        self.min.is_valid(v) && self.max.is_valid(v)
+    fn check(&self, v: &T) -> Result<(), Violation<'_>> {
+        match self.violated(v) {
+            Some(min) => Err(self.violation(min)),
+            None => Ok(()),
+        }
+    }
+
+    /// Which bound `v` is outside, if either: `Some(true)` for the lower bound
+    fn violated(&self, v: &T) -> Option<bool> {
+        if !self.min.is_valid(v) {
+            Some(true)
+        } else if !self.max.is_valid(v) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// That a value is outside the lower bound if `min`, otherwise the upper bound, which must
+    /// not be unbounded
+    fn violation(&self, min: bool) -> Violation<'_> {
+        let (text, inclusive) = if min {
+            (&self.min_text, matches!(self.min, Min::Inclusive(_)))
+        } else {
+            (&self.max_text, matches!(self.max, Max::Inclusive(_)))
+        };
+        Violation::Range {
+            min,
+            bound: text.as_deref().expect("a violated bound is set"),
+            inclusive,
+        }
     }
 }
 
@@ -1908,7 +2024,7 @@ impl Compiler {
             }
             _ => {
                 let datatype = self.compile(ctx, span, name, &[])?;
-                let parsed = datatype.parse_value(value).ok_or_else(|| {
+                let parsed = datatype.parse_value(value).map_err(|_| {
                     XsdDatatypeError::InvalidValueOfType {
                         span: ctx.convert_span(span),
                         type_name: datatype.name(),
@@ -2033,10 +2149,7 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(bound(param)?)?,
-                "minExclusive" => min_max.min_exclusive(bound(param)?)?,
-                "maxInclusive" => min_max.max_inclusive(bound(param)?)?,
-                "maxExclusive" => min_max.max_exclusive(bound(param)?)?,
+                name if BOUND_FACETS.contains(&name) => min_max.set(param, bound(param)?)?,
                 "pattern" => facets.pattern = Some(self.pattern(ctx, param)?),
                 "totalDigits" => facets.total_digits = Some(Self::total_digits(ctx, param)?),
                 // `integer` fixes fractionDigits at 0, so only that value may be given
@@ -2068,17 +2181,8 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => {
-                    min_max.min_inclusive(self.decimal_facet(ctx, param, "decimal")?)?
-                }
-                "minExclusive" => {
-                    min_max.min_exclusive(self.decimal_facet(ctx, param, "decimal")?)?
-                }
-                "maxInclusive" => {
-                    min_max.max_inclusive(self.decimal_facet(ctx, param, "decimal")?)?
-                }
-                "maxExclusive" => {
-                    min_max.max_exclusive(self.decimal_facet(ctx, param, "decimal")?)?
+                name if BOUND_FACETS.contains(&name) => {
+                    min_max.set(param, self.decimal_facet(ctx, param, "decimal")?)?
                 }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 "fractionDigits" => fraction_digits = Some(Self::u16(ctx, param)?),
@@ -2105,10 +2209,9 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(self.float_facet(ctx, param, "double")?)?,
-                "minExclusive" => min_max.min_exclusive(self.float_facet(ctx, param, "double")?)?,
-                "maxInclusive" => min_max.max_inclusive(self.float_facet(ctx, param, "double")?)?,
-                "maxExclusive" => min_max.max_exclusive(self.float_facet(ctx, param, "double")?)?,
+                name if BOUND_FACETS.contains(&name) => {
+                    min_max.set(param, self.float_facet(ctx, param, "double")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2277,10 +2380,7 @@ impl Compiler {
         for param in params {
             let value = || self.facet_value(ctx, param, type_name, &bound);
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(value()?)?,
-                "minExclusive" => min_max.min_exclusive(value()?)?,
-                "maxInclusive" => min_max.max_inclusive(value()?)?,
-                "maxExclusive" => min_max.max_exclusive(value()?)?,
+                name if BOUND_FACETS.contains(&name) => min_max.set(param, value()?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2444,10 +2544,9 @@ impl Compiler {
 
         for param in params {
             match &param.name.to_string()[..] {
-                "minInclusive" => min_max.min_inclusive(self.float_facet(ctx, param, "float")?)?,
-                "minExclusive" => min_max.min_exclusive(self.float_facet(ctx, param, "float")?)?,
-                "maxInclusive" => min_max.max_inclusive(self.float_facet(ctx, param, "float")?)?,
-                "maxExclusive" => min_max.max_exclusive(self.float_facet(ctx, param, "float")?)?,
+                name if BOUND_FACETS.contains(&name) => {
+                    min_max.set(param, self.float_facet(ctx, param, "float")?)?
+                }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2701,24 +2800,27 @@ impl Compiler {
         let base = self
             .compile(ctx, &param.span, type_name, &[])
             .expect("type_name is a supported datatype");
-        base.parse_value(&text).and_then(convert).ok_or_else(|| {
-            let msg = format!("{text:?} is not a valid {type_name}");
-            match base {
-                XsdDatatypes::Float(..) | XsdDatatypes::Double(..) => {
-                    FacetError::InvalidFloat(span, msg)
+        base.parse_value(&text)
+            .ok()
+            .and_then(convert)
+            .ok_or_else(|| {
+                let msg = format!("{text:?} is not a valid {type_name}");
+                match base {
+                    XsdDatatypes::Float(..) | XsdDatatypes::Double(..) => {
+                        FacetError::InvalidFloat(span, msg)
+                    }
+                    XsdDatatypes::Duration(..)
+                    | XsdDatatypes::Date(..)
+                    | XsdDatatypes::Datetime(..)
+                    | XsdDatatypes::Time(..)
+                    | XsdDatatypes::GYearMonth(..)
+                    | XsdDatatypes::GYear(..)
+                    | XsdDatatypes::GMonthDay(..)
+                    | XsdDatatypes::GDay(..)
+                    | XsdDatatypes::GMonth(..) => FacetError::InvalidValue(span, msg),
+                    _ => FacetError::InvalidInt(span, msg),
                 }
-                XsdDatatypes::Duration(..)
-                | XsdDatatypes::Date(..)
-                | XsdDatatypes::Datetime(..)
-                | XsdDatatypes::Time(..)
-                | XsdDatatypes::GYearMonth(..)
-                | XsdDatatypes::GYear(..)
-                | XsdDatatypes::GMonthDay(..)
-                | XsdDatatypes::GDay(..)
-                | XsdDatatypes::GMonth(..) => FacetError::InvalidValue(span, msg),
-                _ => FacetError::InvalidInt(span, msg),
-            }
-        })
+            })
     }
 
     fn integer_facet<T>(

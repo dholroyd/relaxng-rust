@@ -1,5 +1,6 @@
 use crate::validator::nameclass::{describe_datatype, describe_datatype_value, describe_nameclass};
 use crate::validator::schema::{Pat, Schema};
+use std::cell::Cell;
 
 /// Description of a trackable pattern in the schema.
 pub struct TrackablePattern {
@@ -62,7 +63,7 @@ impl Schema {
     /// Build a coverage report from the current schema state.
     /// Returns `None` if coverage tracking was not enabled.
     pub(crate) fn build_coverage_report(&self) -> Option<CoverageReport> {
-        let covered = self.coverage.as_ref()?.clone();
+        let covered = self.coverage.as_ref()?.iter().map(Cell::get).collect();
         let inner = self.inner.borrow();
         let count = self.compile_time_count as usize;
         let mut patterns = Vec::new();

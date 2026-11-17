@@ -3,7 +3,7 @@ use crate::model::{NameClass, PatRef};
 use crate::model::{self, datatype};
 use crate::validator::nameclass::{NameKey, NameMatcher, SchemaNames};
 use fnv::FnvHashMap;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -227,7 +227,7 @@ pub(crate) struct Schema {
     datatypes: Box<[datatype::Datatypes]>,
     datatype_values: Box<[datatype::DatatypeValues]>,
 
-    pub(crate) coverage: Option<Box<[u64]>>,
+    pub(crate) coverage: Option<Box<[Cell<u64>]>>,
     pub(crate) compile_time_count: u16,
     /// `names` compiled for matching, at the same indexes.
     matchers: Box<[NameMatcher]>,
@@ -292,12 +292,12 @@ impl Schema {
     }
 
     #[inline(always)]
-    pub(crate) fn mark_covered(&mut self, id: PatId) {
-        if let Some(ref mut bits) = self.coverage {
+    pub(crate) fn mark_covered(&self, id: PatId) {
+        if let Some(bits) = &self.coverage {
             let limit = self.compile_time_count as usize;
             let idx = id.0 as usize;
             if idx < limit {
-                bits[idx / 64] |= 1u64 << (idx % 64);
+                set_bit(bits, idx);
             }
             // Resolved Ref placeholders hold a copy of the original pattern,
             // but the memo maps the pattern to its canonical PatId.  Mark both
@@ -307,7 +307,7 @@ impl Schema {
             if let Some(&canonical) = inner.memo.get(&inner.patterns[idx]) {
                 let cidx = canonical.0 as usize;
                 if cidx < limit && cidx != idx {
-                    bits[cidx / 64] |= 1u64 << (cidx % 64);
+                    set_bit(bits, cidx);
                 }
             }
         }
@@ -1061,6 +1061,11 @@ fn compile_pattern(s: &mut SchemaBuilder, p: &model::Pattern) -> PatId {
             s.list(inner)
         }
     }
+}
+
+fn set_bit(bits: &[Cell<u64>], idx: usize) {
+    let word = &bits[idx / 64];
+    word.set(word.get() | 1u64 << (idx % 64));
 }
 
 /// Compile a model pattern into a Schema and its start PatId.

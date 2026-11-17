@@ -54,6 +54,7 @@ jobs:
           --testbed ubuntu-24.04 \
           --ci-number "$PR_NUMBER" \
           --github-actions "${{ secrets.GITHUB_TOKEN }}" \
+          --ci-only-thresholds \
           --key "${{ secrets.BENCHER_API_KEY }}" \
           --error-on-alert \
           --file "$BENCHMARK_RESULTS"

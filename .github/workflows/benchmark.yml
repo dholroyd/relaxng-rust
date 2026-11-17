@@ -36,7 +36,7 @@ jobs:
           bencher run \
           --branch "$GITHUB_REF_NAME" \
           --testbed ubuntu-24.04 \
-          --threshold-measure instructions \
+          --threshold-measure estimated-cycles \
           --threshold-test percentage \
           --threshold-max-sample-size 2 \
           --threshold-upper-boundary 0.02 \

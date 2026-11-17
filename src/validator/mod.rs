@@ -229,7 +229,7 @@ impl std::error::Error for ReadError {
 impl std::fmt::Display for ValidatorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidatorError::Xml(e) => write!(f, "XML error: {e:?}"),
+            ValidatorError::Xml(e) => f.write_str(&xml_error_message(&e.kind)),
             ValidatorError::NotAllowed { kind, .. } => write!(f, "{kind} not expected here"),
             ValidatorError::InvalidValue { kind: of, .. } => match of {
                 ValueKind::Text => write!(f, "text content is not valid"),
@@ -1211,8 +1211,9 @@ impl Explainer<'_> {
         let mut diagnostics = vec![];
         match err {
             ValidatorError::Xml(err) => {
-                let offset = err.offset;
-                let span = file.span.subspan(offset as _, offset as _);
+                let start = err.offset.min(source.len() as u64);
+                let end = (start + xml_error_len(&err.kind)).min(source.len() as u64);
+                let span = file.span.subspan(start, end);
 
                 let label = codemap_diagnostic::SpanLabel {
                     span,
@@ -1222,7 +1223,7 @@ impl Explainer<'_> {
 
                 diagnostics.push(codemap_diagnostic::Diagnostic {
                     level: codemap_diagnostic::Level::Error,
-                    message: format!("{err:?}"),
+                    message: xml_error_message(&err.kind),
                     code: None,
                     spans: vec![label],
                 });
@@ -1566,6 +1567,69 @@ impl Explainer<'_> {
             }
         }
         (map, diagnostics)
+    }
+}
+
+fn xml_error_len(kind: &xml_syntax_reader::ErrorKind) -> u64 {
+    use xml_syntax_reader::ErrorKind::*;
+    match *kind {
+        // Only ASCII, so that the span can't end inside a multi-byte character.
+        ExpectedName(b) | ExpectedEquals(b) | ExpectedQuote(b) | ExpectedClose(b)
+        | ExpectedKeyword(b)
+            if b.is_ascii() =>
+        {
+            1
+        }
+        DoubleDashInComment => 2,
+        CdataEndInContent => 3,
+        _ => 0,
+    }
+}
+
+fn describe_byte(b: u8) -> String {
+    match b {
+        b'!'..=b'~' => format!("'{}'", b as char),
+        b' ' => "a space".to_string(),
+        b'\t' => "a tab".to_string(),
+        b'\n' | b'\r' => "a line break".to_string(),
+        _ => format!("byte 0x{b:02X}"),
+    }
+}
+
+fn xml_error_message(kind: &xml_syntax_reader::ErrorKind) -> String {
+    use xml_syntax_reader::ErrorKind::*;
+    match *kind {
+        ExpectedName(b) => format!("expected a name, found {}", describe_byte(b)),
+        ExpectedEquals(b) => {
+            format!(
+                "expected '=' after attribute name, found {}",
+                describe_byte(b)
+            )
+        }
+        ExpectedQuote(b) => format!("expected a quoted value, found {}", describe_byte(b)),
+        ExpectedClose(b) => format!("expected '>', found {}", describe_byte(b)),
+        ExpectedKeyword(b) => format!(
+            "unrecognised markup declaration: unexpected {}",
+            describe_byte(b)
+        ),
+        UnexpectedEof => "document ends inside unfinished markup".to_string(),
+        InvalidCharRef => "invalid character reference".to_string(),
+        DoubleDashInComment => "'--' is not allowed inside a comment".to_string(),
+        DoctypeMissingWhitespace => "expected whitespace after 'DOCTYPE'".to_string(),
+        DoctypeMissingName => "DOCTYPE declaration has no valid root element name".to_string(),
+        CdataEndInContent => "']]>' is not allowed in text content".to_string(),
+        InvalidUtf8 => "invalid UTF-8".to_string(),
+        NameTooLong => "name too long (limit: 1000 bytes)".to_string(),
+        CharRefTooLong => "character reference too long".to_string(),
+        MalformedXmlDeclaration => "malformed XML declaration".to_string(),
+        ReservedPITarget => {
+            "processing instruction target 'xml' (in any case) is reserved".to_string()
+        }
+        DtdInvalidMarkup => "unrecognised markup in DTD internal subset".to_string(),
+        DtdDeclMissingWhitespace => "expected whitespace after DTD declaration keyword".to_string(),
+        DtdDeclMissingName => "DTD declaration has no valid name".to_string(),
+        LiteralTooLong => "quoted literal too long (limit: 8192 bytes)".to_string(),
+        DtdParensTooDeep => "parentheses nested too deeply in DTD declaration".to_string(),
     }
 }
 

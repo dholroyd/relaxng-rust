@@ -1,5 +1,5 @@
 use crate::syntax::types::*;
-use crate::xml_whitespace::trim_xml_whitespace;
+use crate::xml_whitespace::{is_xml_whitespace, trim_xml_whitespace};
 use roxmltree::{Attribute, Node};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -74,8 +74,11 @@ pub fn parse(text: &str) -> Result<Schema> {
 fn pattern_or_grammar(root: Node) -> Result<PatternOrGrammar> {
     match root.tag_name().namespace() {
         Some(NS) => {
-            if root.tag_name().name() == "grammar" {
-                Ok(PatternOrGrammar::Grammar(grammar(root)?))
+            if root.tag_name().name() == "grammar" && !root.attributes().any(|a| !is_rng_att(&a)) {
+                Ok(PatternOrGrammar::Grammar(grammar(
+                    root,
+                    Leading::AttributesOnly,
+                )?))
             } else {
                 Ok(PatternOrGrammar::Pattern(pattern(root)?))
             }
@@ -94,7 +97,7 @@ const NS: &str = "http://relaxng.org/ns/structure/1.0";
 fn pattern(node: Node) -> Result<Pattern> {
     if node.is_element() && node.tag_name().namespace() == Some(NS) {
         check_standard_attrs(node)?;
-        match node.tag_name().name() {
+        let pattern = match node.tag_name().name() {
             "element" => element(node).map(Pattern::Element),
             "attribute" => attribute(node).map(Pattern::Attribute),
             "group" => group(node),
@@ -113,9 +116,15 @@ fn pattern(node: Node) -> Result<Pattern> {
             "data" => data(node).map(Pattern::DatatypeName),
             "notAllowed" => not_allowed(node),
             "externalRef" => external_ref(node).map(Pattern::External),
-            "grammar" => grammar(node).map(Pattern::Grammar),
+            "grammar" => grammar(node, Leading::AttributesAndElements).map(Pattern::Grammar),
             _ => Err(Error::Expected(node.range(), "pattern")),
-        }
+        }?;
+        Ok(
+            match annotations(node, Leading::AttributesAndElements, Follow::Annotations) {
+                Some(annos) => Pattern::Annotated(annos, Box::new(pattern)),
+                None => pattern,
+            },
+        )
     } else {
         Err(Error::Expected(node.range(), "pattern"))
     }
@@ -225,7 +234,7 @@ fn name_class(node: Node, in_except: InExcept) -> Result<NameClass> {
     if node.is_element()
         && node.tag_name().namespace() == Some("http://relaxng.org/ns/structure/1.0")
     {
-        match node.tag_name().name() {
+        let name_class = match node.tag_name().name() {
             "name" => qname_el(node).map(NameClass::Name),
             "anyName" => {
                 if in_except == InExcept::InsideExcept {
@@ -242,7 +251,13 @@ fn name_class(node: Node, in_except: InExcept) -> Result<NameClass> {
                 node.range(),
                 "Either <name> <anyName> <nsName> or <choice>",
             )),
-        }
+        }?;
+        Ok(
+            match annotations(node, Leading::AttributesAndElements, Follow::Annotations) {
+                Some(annos) => NameClass::Annotated(annos, Box::new(name_class)),
+                None => name_class,
+            },
+        )
     } else {
         Err(Error::Expected(
             node.range(),
@@ -279,7 +294,13 @@ fn except_nameclass(node: Node) -> Result<NameClass> {
         pat = NameClass::Alt(AltName(Box::new(pat), Box::new(this)));
         child = node;
     }
-    Ok(pat)
+    // <except> has no counterpart in the syntax tree, so its annotations go on its content
+    Ok(
+        match annotations(node, Leading::AttributesAndElements, Follow::Annotations) {
+            Some(annos) => NameClass::Annotated(annos, Box::new(pat)),
+            None => pat,
+        },
+    )
     // TODO: check that no child is <anyName>
 }
 
@@ -595,10 +616,14 @@ fn data(node: Node) -> Result<DatatypeNamePattern> {
         }
         let except_patt =
             first_rng_child(node).ok_or(Error::Expected(node.range(), "child pattern element"))?;
-        (
-            Some(single_pattern_or_choice(except_patt)?),
-            next_rng_sibling(node),
-        )
+        let except_patt = single_pattern_or_choice(except_patt)?;
+        // <except> has no counterpart in the syntax tree, so its annotations go on its content
+        let except_patt =
+            match annotations(node, Leading::AttributesAndElements, Follow::Annotations) {
+                Some(annos) => Pattern::Annotated(annos, Box::new(except_patt)),
+                None => except_patt,
+            };
+        (Some(except_patt), next_rng_sibling(node))
     } else {
         (None, rest)
     };
@@ -659,7 +684,7 @@ fn param(node: Node) -> Result<Param> {
 
     Ok(Param {
         span: node.range(),
-        annotations: None,
+        annotations: annotations(node, Leading::AttributesOnly, Follow::Annotations),
         name: IdentifierOrKeyword::Identifier(name),
         value: val,
     })
@@ -688,18 +713,38 @@ fn external_ref(node: Node) -> Result<ExternalPattern> {
     Ok(ExternalPattern(val, None, ns))
 }
 
-fn grammar(node: Node) -> Result<GrammarPattern> {
-    let mut next = first_rng_child(node);
-    let mut content = vec![];
-    while let Some(child) = next {
-        content.push(grammar_content(child)?);
-        next = next_rng_sibling(child);
-    }
-
+fn grammar(node: Node, leading: Leading) -> Result<GrammarPattern> {
+    let content = match leading {
+        Leading::AttributesOnly => {
+            contents(node.children(), grammar_content, GrammarContent::Annotation)?
+        }
+        Leading::AttributesAndElements => contents(
+            after_leading_annotations(node),
+            grammar_content,
+            GrammarContent::Annotation,
+        )?,
+    };
     Ok(GrammarPattern {
         span: node.range(),
         content,
     })
+}
+
+fn contents<'a, 'input: 'a, T>(
+    nodes: impl Iterator<Item = Node<'a, 'input>>,
+    content: impl Fn(Node<'a, 'input>) -> Result<T>,
+    annotation: impl Fn(AnnotationElement) -> T,
+) -> Result<Vec<T>> {
+    nodes
+        .filter(Node::is_element)
+        .map(|child| {
+            if is_rng_node(child) {
+                content(child)
+            } else {
+                Ok(annotation(annotation_element(child)))
+            }
+        })
+        .collect()
 }
 
 fn grammar_content(node: Node) -> Result<GrammarContent> {
@@ -758,7 +803,7 @@ fn start(node: Node) -> Result<Define> {
         name: DefineName::Start(start_span),
         assign_method: combine,
         pattern: patt,
-        annotations: None,
+        annotations: annotations(node, Leading::AttributesAndElements, Follow::ParentContent),
     })
 }
 
@@ -791,20 +836,19 @@ fn define(node: Node) -> Result<Define> {
         name: DefineName::Named(name),
         assign_method: combine,
         pattern: patt,
-        annotations: None,
+        annotations: annotations(node, Leading::AttributesAndElements, Follow::ParentContent),
     })
 }
 
 fn div_grammar_content(node: Node) -> Result<GrammarContent> {
-    let mut next = first_rng_child(node);
-    let mut content = vec![];
-    while let Some(child) = next {
-        content.push(grammar_content(child)?);
-        next = next_rng_sibling(child);
-    }
-
+    // foreign elements before the first RELAX NG element are the <div>'s own annotations
+    let content = contents(
+        after_leading_annotations(node),
+        grammar_content,
+        GrammarContent::Annotation,
+    )?;
     Ok(GrammarContent::Div(Div {
-        annotations: None,
+        annotations: annotations(node, Leading::AttributesAndElements, Follow::ParentContent),
         content,
     }))
 }
@@ -860,12 +904,12 @@ fn include(node: Node) -> Result<Include> {
     };
     let val = Literal(href.range_value(), vec![seg]);
 
-    let mut next = first_rng_child(node);
-    let mut content = vec![];
-    while let Some(child) = next {
-        content.push(include_content(child)?);
-        next = next_rng_sibling(child);
-    }
+    // foreign elements before the first RELAX NG element are the <include>'s own annotations
+    let content = contents(
+        after_leading_annotations(node),
+        include_content,
+        IncludeContent::Annotation,
+    )?;
 
     let ns = get_ns_att(node).map(|a| a.value().to_string());
 
@@ -873,7 +917,7 @@ fn include(node: Node) -> Result<Include> {
         uri: val,
         inherit: None,
         content: Some(content),
-        annotations: None,
+        annotations: annotations(node, Leading::AttributesAndElements, Follow::ParentContent),
         ns,
     })
 }
@@ -900,15 +944,14 @@ fn include_content(node: Node) -> Result<IncludeContent> {
 }
 
 fn div_include_content(node: Node) -> Result<IncludeContent> {
-    let mut next = first_rng_child(node);
-    let mut content = vec![];
-    while let Some(child) = next {
-        content.push(include_content(child)?);
-        next = next_rng_sibling(child);
-    }
-
+    // foreign elements before the first RELAX NG element are the <div>'s own annotations
+    let content = contents(
+        after_leading_annotations(node),
+        include_content,
+        IncludeContent::Annotation,
+    )?;
     Ok(IncludeContent::Div(Div {
-        annotations: None,
+        annotations: annotations(node, Leading::AttributesAndElements, Follow::ParentContent),
         content,
     }))
 }
@@ -1196,6 +1239,156 @@ fn is_nc_name_char(c: char) -> bool {
         || is_extender(c)
         || c == '.'
         || c == '-'
+}
+
+/// Which of an element's annotations come before its RELAX NG content
+#[derive(PartialEq, Clone, Copy)]
+enum Leading {
+    /// Foreign attributes only, since any foreign child elements are content (as in a root
+    /// `<grammar>` that has no foreign attributes) or not allowed (as in `<param>`)
+    AttributesOnly,
+    /// Foreign attributes, and foreign child elements that precede the first RELAX NG child
+    AttributesAndElements,
+}
+
+/// What the foreign elements that follow an element (before its next RELAX NG sibling) are
+#[derive(PartialEq, Clone, Copy)]
+enum Follow {
+    /// The element's follow annotations, as with the compact syntax's `>>`
+    Annotations,
+    /// Content of the parent, as for a `<define>` in a `<grammar>` or `<div>`
+    ParentContent,
+}
+
+/// The annotations of the given RELAX NG element
+///
+///  - foreign attributes, and foreign child elements before the first RELAX NG child, are
+///    initial annotations (`[ … ]` before the pattern)
+///  - foreign elements after the element, and before its next RELAX NG sibling, are follow
+///    annotations (`>> …` after the pattern)
+fn annotations(node: Node, leading: Leading, follow: Follow) -> Option<Annotations> {
+    let attribute_annotations = annotation_attributes(node);
+    let element_annotations: Vec<_> = if leading == Leading::AttributesAndElements {
+        node.children()
+            .filter(Node::is_element)
+            .take_while(|c| !is_rng_node(*c))
+            .map(annotation_element)
+            .collect()
+    } else {
+        vec![]
+    };
+    let follow_elements: Vec<_> = if follow == Follow::Annotations {
+        node.next_siblings()
+            .skip(1)
+            .filter(Node::is_element)
+            .take_while(|c| !is_rng_node(*c))
+            .map(annotation_element)
+            .collect()
+    } else {
+        vec![]
+    };
+    let initial = if attribute_annotations.is_empty() && element_annotations.is_empty() {
+        None
+    } else {
+        Some(InitialAnnotation {
+            span: node.range(),
+            attribute_annotations,
+            element_annotations,
+        })
+    };
+    if initial.is_none() && follow_elements.is_empty() {
+        None
+    } else {
+        Some(Annotations {
+            documentation: vec![],
+            initial,
+            follow_elements,
+        })
+    }
+}
+
+/// The children of the given element that follow its leading foreign elements
+fn after_leading_annotations<'a, 'input: 'a>(
+    node: Node<'a, 'input>,
+) -> impl Iterator<Item = Node<'a, 'input>> {
+    node.children()
+        .skip_while(|c| !c.is_element() || !is_rng_node(*c))
+}
+
+/// The foreign attributes of a RELAX NG element
+fn annotation_attributes(node: Node) -> Vec<AnnotationAttribute> {
+    node.attributes()
+        .filter(|a| !is_rng_att(a))
+        .map(|a| annotation_attribute(&a))
+        .collect()
+}
+
+fn annotation_attribute(a: &Attribute) -> AnnotationAttribute {
+    AnnotationAttribute {
+        span: a.range(),
+        name: annotation_name(a.range_qname(), a.namespace(), a.name()),
+        value: Literal::new(a.range_value(), a.value().to_string()),
+    }
+}
+
+/// A foreign element and its content.  Unlike on RELAX NG elements, any attribute (including an
+/// unqualified one) of a foreign element is part of the annotation.
+fn annotation_element(node: Node) -> AnnotationElement {
+    AnnotationElement {
+        span: node.range(),
+        name: annotation_name(
+            element_qname_range(node),
+            node.tag_name().namespace(),
+            node.tag_name().name(),
+        ),
+        annotation_attributes: node
+            .attributes()
+            .map(|a| annotation_attribute(&a))
+            .collect(),
+        annotation_elements_or_literals: node
+            .children()
+            .filter_map(|c| {
+                if c.is_element() {
+                    Some(AnnotationElementOrLiteral::Element(annotation_element(c)))
+                } else if c.is_text() {
+                    c.text().map(|t| {
+                        AnnotationElementOrLiteral::Literal(Literal::new(c.range(), t.to_string()))
+                    })
+                } else {
+                    // comments and processing instructions
+                    None
+                }
+            })
+            .collect(),
+    }
+}
+
+/// The range of an element's qualified name in the source text.  roxmltree does not provide this
+/// for an element, so find the end of the name that follows the <.
+fn element_qname_range(node: Node) -> Range<usize> {
+    let text = node.document().input_text();
+    let start = node.range().start + 1;
+    let len = text[start..]
+        .find(|c: char| is_xml_whitespace(c) || matches!(c, '/' | '>'))
+        .unwrap_or(text.len() - start);
+    start..start + len
+}
+
+/// The name of an annotation attribute or element whose qualified name is at qname in the
+/// source text, with the prefix (if any) as the span of the namespace URI
+fn annotation_name(qname: Range<usize>, ns: Option<&str>, local: &str) -> Name {
+    let Range { start, end } = qname;
+    let local_start = end - local.len();
+    // the prefix, without its colon; empty for an unprefixed name
+    let prefix_span = if local_start > start {
+        start..local_start - 1
+    } else {
+        start..start
+    };
+    Name::NamespacedName(NamespacedName {
+        namespace_uri: Literal::new(prefix_span, ns.unwrap_or("").to_string()),
+        localname: NcName(local_start..end, local.to_string()),
+    })
 }
 
 fn is_el(node: Node, name: &'static str) -> bool {

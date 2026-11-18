@@ -1625,35 +1625,42 @@ impl<FS: Files> Compiler<FS> {
         }
         match schema.pattern_or_grammar {
             types::PatternOrGrammar::Pattern(ref p) => {
-                if let Context::Include { .. } = ctx {
-                    // look through leading annotations, as in `[ xml:lang = "en" ] grammar { … }`
-                    let mut unannotated = p;
-                    while let types::Pattern::Annotated(annos, inner) = unannotated {
-                        Self::check_annotations(ctx, Some(annos))?;
-                        unannotated = inner;
-                    }
-                    match unannotated {
-                        types::Pattern::Grammar(grammar) => {
-                            // when including a file containing a grammar definition, we don't require
-                            // that the grammar has a 'start' rule, as compile_grammar_pattern()
-                            self.compile_grammar_contents(ctx, &grammar.content[..])?;
+                // look through leading annotations, as in `[ xml:lang = "en" ] grammar { … }` or
+                // `<grammar xml:lang="en">`, so that an annotated top-level grammar is compiled
+                // as the top-level grammar, rather than as a pattern nested inside one
+                let mut unannotated = p;
+                let mut annotations = vec![];
+                while let types::Pattern::Annotated(annos, inner) = unannotated {
+                    annotations.push(annos);
+                    unannotated = inner;
+                }
+                match unannotated {
+                    types::Pattern::Grammar(grammar) => {
+                        // the grammar isn't passed to compile_pattern(), so check its annotations
+                        // here
+                        for annos in annotations {
+                            Self::check_annotations(ctx, Some(annos))?;
                         }
-                        _ => {
-                            // files that are included into other files must have a top level 'grammar',
-                            // rather than just a pattern
-                            return Err(RelaxError::IncludedFileMustBeGrammar {
-                                // TODO: use the span of the pattern, once we can determine it reliably
-                                span: ctx.convert_span(&(0..0)),
-                            });
-                        }
+                        // when including a file containing a grammar definition, we don't require
+                        // that the grammar has a 'start' rule, as compile_grammar_pattern()
+                        self.compile_grammar_contents(ctx, &grammar.content[..])?;
                     }
-                } else {
-                    let rule = self.compile_pattern(ctx, p)?;
-                    let span = ctx.convert_span(&(0..0)); // FIXME: synthesize a more useful span
-                    ctx.define(
-                        &RefKey::Start,
-                        model::DefineRule::AssignCombine(span, None, rule),
-                    )?;
+                    _ if matches!(ctx, Context::Include { .. }) => {
+                        // files that are included into other files must have a top level 'grammar',
+                        // rather than just a pattern
+                        return Err(RelaxError::IncludedFileMustBeGrammar {
+                            // TODO: use the span of the pattern, once we can determine it reliably
+                            span: ctx.convert_span(&(0..0)),
+                        });
+                    }
+                    _ => {
+                        let rule = self.compile_pattern(ctx, p)?;
+                        let span = ctx.convert_span(&(0..0)); // FIXME: synthesize a more useful span
+                        ctx.define(
+                            &RefKey::Start,
+                            model::DefineRule::AssignCombine(span, None, rule),
+                        )?;
+                    }
                 }
             }
             types::PatternOrGrammar::Grammar(types::GrammarPattern {

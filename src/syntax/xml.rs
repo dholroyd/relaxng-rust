@@ -1,5 +1,5 @@
 use crate::syntax::types::*;
-use crate::xml_whitespace::trim_xml_whitespace;
+use crate::xml_whitespace::{is_xml_whitespace, trim_xml_whitespace};
 use roxmltree::{Attribute, Node};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -917,25 +917,8 @@ fn div_include_content(node: Node) -> Result<IncludeContent> {
 /// For `<attribute>`, the `ns` attribute defaults to "" (does not inherit from ancestors)
 /// per RELAX NG spec section 4.3.
 fn qname_att(node: Node, name: &Attribute, inherit_ns: bool) -> Result<Name> {
-    let val = name.value();
-    if let Some(pos) = val.find(':') {
-        let range = name.range_value();
-        let prefix = &val[0..pos];
-        let prefix_span = sub_span(node, &range, val, 0..pos);
-        let namespace = lookup_namespace_def(node, Some(trim_xml_whitespace(prefix)))
-            .ok_or_else(|| Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix"))?;
-        let localname = ncname(
-            node,
-            sub_span(node, &range, val, pos + 1..val.len()),
-            &val[pos + 1..],
-        )?;
-        let ns = Literal::new(prefix_span, namespace.to_string());
-        Ok(Name::NamespacedName(NamespacedName {
-            namespace_uri: ns,
-            localname,
-        }))
-    } else {
-        let ns = if inherit_ns {
+    qname(node, &name.range_value(), name.value(), || {
+        if inherit_ns {
             // For <element>: inherit ns from nearest ancestor
             get_ns(node).unwrap_or(Literal::new(0..0, String::new()))
         } else {
@@ -943,46 +926,53 @@ fn qname_att(node: Node, name: &Attribute, inherit_ns: bool) -> Result<Name> {
             node.attribute_node("ns")
                 .map(|a| Literal::new(a.range_value(), a.value().to_string()))
                 .unwrap_or(Literal::new(0..0, String::new()))
-        };
-        let localname = ncname(node, name.range_value(), val)?;
-        Ok(Name::NamespacedName(NamespacedName {
-            namespace_uri: ns,
-            localname,
-        }))
-    }
+        }
+    })
 }
 
 fn qname_el(name: Node) -> Result<Name> {
     no_element_children(name)?;
     if let Some(val) = name.text() {
-        if let Some(pos) = val.find(':') {
-            let text_range = name.first_child().unwrap().range();
-            let prefix = &val[0..pos];
-            let prefix_span = sub_span(name, &text_range, val, 0..pos);
-            let namespace = lookup_namespace_def(name, Some(trim_xml_whitespace(prefix)))
-                .ok_or_else(|| {
-                    Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix")
-                })?;
-            let localname = ncname(
-                name,
-                sub_span(name, &text_range, val, pos + 1..val.len()),
-                &val[pos + 1..],
-            )?;
-            let ns = Literal::new(prefix_span, namespace.to_string());
-            Ok(Name::NamespacedName(NamespacedName {
-                namespace_uri: ns,
-                localname,
-            }))
-        } else {
-            let ns = get_ns(name).unwrap_or(Literal::new(0..0, "".to_string())); // TODO allow None or something rather than inventing an 'empty' NcName
-            let localname = ncname(name, name.first_child().unwrap().range(), val)?;
-            Ok(Name::NamespacedName(NamespacedName {
-                namespace_uri: ns,
-                localname,
-            }))
-        }
+        let text_range = name.first_child().unwrap().range();
+        qname(name, &text_range, val, || {
+            // TODO allow None or something rather than inventing an 'empty' NcName
+            get_ns(name).unwrap_or(Literal::new(0..0, "".to_string()))
+        })
     } else {
         Err(Error::Expected(name.range(), "Text contents"))
+    }
+}
+
+fn qname(
+    node: Node,
+    range: &Span,
+    val: &str,
+    unprefixed_ns: impl FnOnce() -> Literal,
+) -> Result<Name> {
+    let trimmed = trimmed_range(val);
+    if let Some(colon) = val[trimmed.clone()].find(':') {
+        let colon = trimmed.start + colon;
+        let prefix = trimmed.start..colon;
+        let local = colon + 1..trimmed.end;
+        let prefix_span = sub_span(node, range, val, prefix.clone());
+        check_ncname_in(node, range, val, prefix.clone(), "NCName")?;
+        let namespace = lookup_namespace_def(node, Some(&val[prefix]))
+            .ok_or_else(|| Error::Unexpected(prefix_span.clone(), "Unknown namespace prefix"))?;
+        check_ncname_in(node, range, val, local.clone(), "NCName")?;
+        let localname = NcName(
+            sub_span(node, range, val, local.clone()),
+            val[local].to_string(),
+        );
+        Ok(Name::NamespacedName(NamespacedName {
+            namespace_uri: Literal::new(prefix_span, namespace.to_string()),
+            localname,
+        }))
+    } else {
+        let localname = ncname(node, range.clone(), val)?;
+        Ok(Name::NamespacedName(NamespacedName {
+            namespace_uri: unprefixed_ns(),
+            localname,
+        }))
     }
 }
 
@@ -997,20 +987,39 @@ fn ncname(node: Node, range: Span, val: &str) -> Result<NcName> {
 /// the same document.  On failure, the error's span is narrowed to the offending character where
 /// that's possible (see [`sub_span`]), and `what` names the kind of name in the message.
 fn check_ncname<'v>(node: Node, range: &Span, val: &'v str, what: &'static str) -> Result<&'v str> {
-    let trimmed = trim_xml_whitespace(val);
-    if trimmed.is_empty() {
+    let trimmed = trimmed_range(val);
+    check_ncname_in(node, range, val, trimmed.clone(), what)?;
+    Ok(&val[trimmed])
+}
+
+/// The byte range of `val` that remains once leading and trailing XML whitespace is removed.
+fn trimmed_range(val: &str) -> Range<usize> {
+    let start = val.len() - val.trim_start_matches(is_xml_whitespace).len();
+    let end = val.trim_end_matches(is_xml_whitespace).len().max(start);
+    start..end
+}
+
+/// Checks that the part of `val` within `sub` is exactly an NCName, with no surrounding
+/// whitespace permitted.  Arguments are otherwise as for [`check_ncname`].
+fn check_ncname_in(
+    node: Node,
+    range: &Span,
+    val: &str,
+    sub: Range<usize>,
+    what: &'static str,
+) -> Result<()> {
+    let name = &val[sub.clone()];
+    if name.is_empty() {
         return Err(Error::Expected(range.clone(), "Expected identifier"));
     }
-    // trimming only removes from the ends, so `trimmed` begins this far into `val`
-    let lead = val.find(trimmed).unwrap_or(0);
-    for (i, c) in trimmed.char_indices() {
+    for (i, c) in name.char_indices() {
         let ok = if i == 0 {
             is_nc_name_start_char(c)
         } else {
             is_nc_name_char(c)
         };
         if !ok {
-            let at = lead + i;
+            let at = sub.start + i;
             return Err(Error::UnexpectedChar {
                 span: sub_span(node, range, val, at..at + c.len_utf8()),
                 ch: c,
@@ -1019,7 +1028,7 @@ fn check_ncname<'v>(node: Node, range: &Span, val: &'v str, what: &'static str) 
             });
         }
     }
-    Ok(trimmed)
+    Ok(())
 }
 
 /// Maps `sub`, a byte range within the decoded text `val`, to a span of the schema source, given
@@ -1467,6 +1476,75 @@ mod tests {
         let xml =
             format!("<element {RNG} xmlns:p=\"urn:p\" name=\"p:a\u{e00}\"><empty/></element>");
         assert_eq!(unexpected_char(&xml).0, "\u{e00}");
+    }
+
+    #[test]
+    fn qname_rejects_space_after_colon() {
+        let xml = format!("<element {RNG} xmlns:p=\"urn:p\" name=\"p: b\"><empty/></element>");
+        assert_eq!(
+            unexpected_char(&xml),
+            (
+                " ",
+                r"Unexpected character ' ' at start of NCName".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn qname_rejects_space_before_colon() {
+        let xml = format!("<element {RNG} xmlns:p=\"urn:p\" name=\"p :b\"><empty/></element>");
+        assert_eq!(
+            unexpected_char(&xml),
+            (" ", r"Unexpected character ' ' in NCName".to_string())
+        );
+    }
+
+    #[test]
+    fn qname_rejects_internal_space_in_attribute_name() {
+        let xml = format!(
+            "<element {RNG} xmlns:p=\"urn:p\" name=\"e\"><attribute name=\"p: b\"/></element>"
+        );
+        assert_eq!(unexpected_char(&xml).0, " ");
+    }
+
+    #[test]
+    fn qname_rejects_internal_space_in_name_element() {
+        let xml = format!("<element {RNG} xmlns:p=\"urn:p\"><name>p\t:b</name><empty/></element>");
+        assert_eq!(unexpected_char(&xml).0, "\t");
+        let xml = format!("<element {RNG} xmlns:p=\"urn:p\"><name>p:\nb</name><empty/></element>");
+        assert_eq!(unexpected_char(&xml).0, "\n");
+    }
+
+    #[test]
+    fn qname_allows_whitespace_around_whole_name() {
+        let name = name_element(&format!(
+            "<element {RNG} xmlns:p=\"urn:p\"><name> p:b\n</name><text/></element>"
+        ));
+        assert_matches!(
+            name,
+            Ok(Name::NamespacedName(NamespacedName { namespace_uri: ns, localname: NcName(_, local) }))
+                if ns.as_string_value() == "urn:p" && local == "b"
+        );
+        let name = name_element(&format!(
+            "<element {RNG} xmlns:p=\"urn:p\" name=\" p:b \"><empty/></element>"
+        ));
+        assert_matches!(
+            name,
+            Ok(Name::NamespacedName(NamespacedName { namespace_uri: ns, localname: NcName(_, local) }))
+                if ns.as_string_value() == "urn:p" && local == "b"
+        );
+    }
+
+    #[test]
+    fn qname_rejects_invalid_prefix_as_ncname() {
+        let xml = format!("<element {RNG} name=\"1x:b\"><empty/></element>");
+        assert_eq!(
+            unexpected_char(&xml),
+            (
+                "1",
+                "Unexpected character '1' at start of NCName".to_string()
+            )
+        );
     }
 
     #[test]

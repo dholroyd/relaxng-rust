@@ -312,6 +312,7 @@ pub(crate) enum Context<'a> {
     Root {
         file: Arc<codemap::File>,
         refs: RefCell<HashMap<RefKey, Rc<RefCell<Option<model::DefineRule>>>>>,
+        first_uses: RefCell<HashMap<RefKey, codemap::Span>>,
         namespaces: HashMap<String, NamespaceDecl>,
         default_namespace: String,
         inherited_namespace: String,
@@ -336,6 +337,7 @@ pub(crate) enum Context<'a> {
     Grammar {
         parent: &'a Context<'a>,
         refs: RefCell<HashMap<RefKey, Rc<RefCell<Option<model::DefineRule>>>>>,
+        first_uses: RefCell<HashMap<RefKey, codemap::Span>>,
     },
     // We track the context of a definition since the body of that definition must not reference
     // the identifier being defined, unless the reference is in the body of an element definition
@@ -374,6 +376,7 @@ impl<'a> Context<'a> {
         Context::Root {
             file,
             refs: RefCell::new(HashMap::new()),
+            first_uses: RefCell::new(HashMap::new()),
             namespaces,
             default_namespace: "".to_string(),
             inherited_namespace: "".to_string(),
@@ -429,6 +432,7 @@ impl<'a> Context<'a> {
         Context::Grammar {
             parent: self,
             refs: RefCell::new(HashMap::new()),
+            first_uses: RefCell::new(HashMap::new()),
         }
     }
 
@@ -748,14 +752,52 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn acquire_ref(&self, ref_id: &types::Identifier) -> Result<model::PatRef, RelaxError> {
-        self.acquire_ref_impl(ref_id)
+    /// Fails with the first-used undefined name if any name referenced in this grammar lacks a
+    /// definition.
+    fn check_refs_defined(&self) -> Result<(), RelaxError> {
+        let (refs, first_uses) = match self {
+            Context::Root {
+                refs, first_uses, ..
+            }
+            | Context::Grammar {
+                refs, first_uses, ..
+            } => (refs.borrow(), first_uses.borrow()),
+            _ => panic!("check_refs_defined() only valid for grammar contexts"),
+        };
+        let undefined = refs
+            .iter()
+            .filter(|(_, r)| r.borrow().is_none())
+            .map(|(key, _)| {
+                (
+                    key,
+                    first_uses.get(key).copied().unwrap_or(self.file().span),
+                )
+            })
+            .min_by_key(|(_, span)| (span.low(), span.high()));
+        match undefined {
+            Some((key, span)) => Err(RelaxError::UndefinedReference {
+                span,
+                identifier: key.to_string(),
+            }),
+            None => Ok(()),
+        }
     }
-    fn acquire_ref_impl(&self, ref_id: &types::Identifier) -> Result<model::PatRef, RelaxError> {
+
+    fn acquire_ref(
+        &self,
+        ref_id: &types::Identifier,
+        span: codemap::Span,
+    ) -> Result<model::PatRef, RelaxError> {
         match self {
-            Context::Root { refs, .. } | Context::Grammar { refs, .. } => {
+            Context::Root {
+                refs, first_uses, ..
+            }
+            | Context::Grammar {
+                refs, first_uses, ..
+            } => {
                 let mut refs = refs.borrow_mut();
                 let key = RefKey::named(ref_id);
+                first_uses.borrow_mut().entry(key.clone()).or_insert(span);
                 if let Some(r) = refs.get(&key) {
                     Ok(model::PatRef(r.clone()))
                 } else {
@@ -768,22 +810,23 @@ impl<'a> Context<'a> {
             | Context::IncludeOverrides { parent }
             | Context::Define { parent, .. }
             | Context::Element { parent }
-            | Context::Attribute { parent, .. } => parent.acquire_ref_impl(ref_id),
+            | Context::Attribute { parent, .. } => parent.acquire_ref(ref_id, span),
         }
     }
 
-    fn acquire_parent_ref(&self, id: &types::Identifier) -> Result<model::PatRef, RelaxError> {
+    fn acquire_parent_ref(
+        &self,
+        id: &types::Identifier,
+        span: codemap::Span,
+    ) -> Result<model::PatRef, RelaxError> {
         match self {
-            Context::Root { .. } => {
-                let span = self.file().span.subspan(id.0.start as u64, id.0.end as u64);
-                Err(RelaxError::NoParentAvailable(span))
-            }
+            Context::Root { .. } => Err(RelaxError::NoParentAvailable(span)),
             Context::Include { parent, .. }
             | Context::IncludeOverrides { parent }
             | Context::Define { parent, .. }
             | Context::Element { parent }
-            | Context::Attribute { parent, .. } => parent.acquire_parent_ref(id),
-            Context::Grammar { parent, .. } => parent.acquire_ref(id),
+            | Context::Attribute { parent, .. } => parent.acquire_parent_ref(id, span),
+            Context::Grammar { parent, .. } => parent.acquire_ref(id, span),
         }
     }
     // Returns Some if the parent definition for which this is the context is defining an
@@ -903,16 +946,10 @@ impl<FS: Files> Compiler<FS> {
         let (file, schema) = self.get_schema(name)?;
         let mut ctx = Context::new(file.clone());
         self.compile_schema(&mut ctx, schema)?;
+        ctx.check_refs_defined()?;
 
-        // Collect definitions before checking for undefined refs
         let mut definitions = Vec::new();
         for (def_name, r) in ctx.ref_iter() {
-            if r.borrow().is_none() {
-                return Err(RelaxError::UndefinedReference {
-                    span: file.span.subspan(0, 0),
-                    identifier: def_name.to_string(),
-                });
-            }
             let def_span = r.borrow().as_ref().unwrap().span().to_owned();
             definitions.push(DefinitionInfo {
                 name: def_name.to_string(),
@@ -2066,7 +2103,7 @@ impl<FS: Files> Compiler<FS> {
         Ok(Pattern::Ref(
             span,
             reference.1.clone(),
-            ctx.acquire_ref(reference)?,
+            ctx.acquire_ref(reference, span)?,
         ))
     }
     fn compile_parent(
@@ -2081,7 +2118,7 @@ impl<FS: Files> Compiler<FS> {
         Ok(Pattern::Ref(
             span,
             reference.1.clone(),
-            ctx.acquire_parent_ref(reference)?,
+            ctx.acquire_parent_ref(reference, span)?,
         ))
     }
     fn compile_external(
@@ -2109,15 +2146,7 @@ impl<FS: Files> Compiler<FS> {
                 for g in content {
                     self.compile_grammar_content_item(&mut child_ctx, g)?;
                 }
-                for (name, r) in child_ctx.ref_iter() {
-                    if r.borrow().is_none() {
-                        // TODO: retain span information for references so that we don't report bogus data
-                        return Err(RelaxError::UndefinedReference {
-                            span: child_ctx.convert_span(&(0..0)),
-                            identifier: name.to_string(),
-                        });
-                    }
-                }
+                child_ctx.check_refs_defined()?;
                 if let Some(r) = child_ctx.get_ref(&RefKey::Start) {
                     r.borrow_mut()
                         .take()
@@ -2142,6 +2171,7 @@ impl<FS: Files> Compiler<FS> {
 
         let content = &grammar.content[..];
         self.compile_grammar_contents(&mut child_ctx, content)?;
+        child_ctx.check_refs_defined()?;
         if let Some(r) = child_ctx.get_ref(&RefKey::Start) {
             r.borrow_mut()
                 .take()
@@ -2771,6 +2801,37 @@ mod tests {
         let unreachable = result.unreachable_definitions();
         assert_eq!(unreachable.len(), 1);
         assert_eq!(unreachable[0].name, "orphan");
+    }
+
+    #[test]
+    fn undefined_ref_in_unreachable_nested_definition() {
+        struct FS;
+        impl Files for FS {
+            fn load(&self, name: &Path) -> Result<String, RelaxError> {
+                let t = match name.to_str().unwrap() {
+                    "inline.rnc" => {
+                        "element top { grammar { start = element r { empty } orphan = missing } }"
+                    }
+                    "main.rnc" => "element top { external \"ext.rnc\" }",
+                    "ext.rnc" => "grammar { start = element r { empty } orphan = missing }",
+                    other => panic!("No {other:?}"),
+                };
+                Ok(t.to_string())
+            }
+        }
+        for file in ["inline.rnc", "main.rnc"] {
+            let mut c = Compiler::new(FS, Syntax::Compact);
+            let Err(mut err) = c.compile(Path::new(file)) else {
+                panic!("{file}: expected error");
+            };
+            if let RelaxError::IncludeError(_, inner) = err {
+                err = *inner;
+            }
+            assert_matches!(err, RelaxError::UndefinedReference { ref identifier, span }
+                if identifier == "missing"
+                    && c.code_map().find_file(span.low()).source_slice(span) == "missing",
+                "{file}");
+        }
     }
 
     #[test]

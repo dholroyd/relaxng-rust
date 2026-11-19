@@ -1257,9 +1257,20 @@ impl<FS: Files> Compiler<FS> {
                 Errors::Xsd(e) => match e {
                     XsdDatatypeError::Facet { type_name, facet } => {
                         let mut labels = vec![];
+                        let mut message = format!("Problematic facet for {type_name} type");
                         match facet {
-                            FacetError::ConflictingFacet(_name) => {
-                                unimplemented!("Support for ConflictingFacet")
+                            FacetError::ConflictingFacet { span, other, msg } => {
+                                message = format!("Conflicting facets for {type_name} type: {msg}");
+                                labels.push(codemap_diagnostic::SpanLabel {
+                                    span: *span,
+                                    style: codemap_diagnostic::SpanStyle::Primary,
+                                    label: Some("conflicting facet".to_string()),
+                                });
+                                labels.push(codemap_diagnostic::SpanLabel {
+                                    span: *other,
+                                    style: codemap_diagnostic::SpanStyle::Secondary,
+                                    label: Some("conflicts with this".to_string()),
+                                });
                             }
                             FacetError::InvalidInt(span, msg) => {
                                 labels.push(codemap_diagnostic::SpanLabel {
@@ -1299,7 +1310,7 @@ impl<FS: Files> Compiler<FS> {
                         }
                         codemap_diagnostic::Diagnostic {
                             level: codemap_diagnostic::Level::Error,
-                            message: format!("Problematic facet for {type_name} type"),
+                            message,
                             code: None,
                             spans: labels,
                         }

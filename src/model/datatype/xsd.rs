@@ -826,7 +826,107 @@ pub enum XsdDatatypes {
     Entity(StringFacets),
     Entities(LengthFacet, Option<PatternFacet>),
 }
+/// Bounds that the spec allows, but which no value satisfies, as `(facet name, value as written)`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EmptyBounds<'a> {
+    pub min: Option<(&'static str, &'a str)>,
+    pub max: Option<(&'static str, &'a str)>,
+}
+
+trait BoundValue: PartialOrd {
+    fn is_successor(&self, _next: &Self) -> bool {
+        false
+    }
+    fn is_nan(&self) -> bool {
+        false
+    }
+}
+
+macro_rules! discrete_bound {
+    ($($t:ty),*) => {$(
+        impl BoundValue for $t {
+            fn is_successor(&self, next: &Self) -> bool {
+                self.checked_add(1) == Some(*next)
+            }
+        }
+    )*};
+}
+discrete_bound!(i8, i16, i32, i64, u8, u16, u32, u64);
+impl BoundValue for num_bigint::BigInt {
+    fn is_successor(&self, next: &Self) -> bool {
+        self + 1u8 == *next
+    }
+}
+impl BoundValue for num_bigint::BigUint {
+    fn is_successor(&self, next: &Self) -> bool {
+        self + 1u8 == *next
+    }
+}
+impl BoundValue for bigdecimal::BigDecimal {}
+impl BoundValue for Duration {}
+impl BoundValue for Instant<'_> {}
+impl BoundValue for XsdFloat {
+    fn is_nan(&self) -> bool {
+        self.0.is_nan()
+    }
+}
+impl BoundValue for XsdDouble {
+    fn is_nan(&self) -> bool {
+        self.0.is_nan()
+    }
+}
+
 impl XsdDatatypes {
+    /// Bounds that leave this datatype with no values, though they are valid
+    pub fn empty_bounds(&self) -> Option<EmptyBounds<'_>> {
+        match self {
+            XsdDatatypes::Byte(f, _) => f.empty_bounds(),
+            XsdDatatypes::Short(f, _) => f.empty_bounds(),
+            XsdDatatypes::UnsignedByte(f, _) => f.empty_bounds(),
+            XsdDatatypes::UnsignedShort(f, _) => f.empty_bounds(),
+            XsdDatatypes::Long(f, _) => f.empty_bounds(),
+            XsdDatatypes::Int(f, _) => f.empty_bounds(),
+            XsdDatatypes::Integer(f, _)
+            | XsdDatatypes::NonPositiveInteger(f, _)
+            | XsdDatatypes::NegativeInteger(f, _) => f.empty_bounds(),
+            XsdDatatypes::PositiveInteger(f, _) | XsdDatatypes::NonNegativeInteger(f, _) => {
+                f.empty_bounds()
+            }
+            XsdDatatypes::UnsignedInt(f, _) => f.empty_bounds(),
+            XsdDatatypes::UnsignedLong(f, _) => f.empty_bounds(),
+            XsdDatatypes::Decimal { min_max, .. } => min_max.empty_bounds(),
+            XsdDatatypes::Float(f, _) => f.empty_bounds(),
+            XsdDatatypes::Double(f, _) => f.empty_bounds(),
+            XsdDatatypes::Duration(f, _) => f.empty_bounds(),
+            XsdDatatypes::Date(f, _)
+            | XsdDatatypes::Datetime(f, _)
+            | XsdDatatypes::Time(f, _)
+            | XsdDatatypes::GYearMonth(f, _)
+            | XsdDatatypes::GYear(f, _)
+            | XsdDatatypes::GMonthDay(f, _)
+            | XsdDatatypes::GDay(f, _)
+            | XsdDatatypes::GMonth(f, _) => f.empty_bounds(),
+            XsdDatatypes::NormalizedString(_)
+            | XsdDatatypes::String(_)
+            | XsdDatatypes::NmTokens(..)
+            | XsdDatatypes::NmToken(_)
+            | XsdDatatypes::NcName(_)
+            | XsdDatatypes::QName(_)
+            | XsdDatatypes::Name(_)
+            | XsdDatatypes::Token(_)
+            | XsdDatatypes::HexBinary(..)
+            | XsdDatatypes::Base64Binary(..)
+            | XsdDatatypes::AnyURI(_)
+            | XsdDatatypes::Language(_)
+            | XsdDatatypes::Boolean(_)
+            | XsdDatatypes::Id(_)
+            | XsdDatatypes::IdRef(_)
+            | XsdDatatypes::IdRefs(..)
+            | XsdDatatypes::Entity(_)
+            | XsdDatatypes::Entities(..) => None,
+        }
+    }
+
     /// The name of the datatype within the XSD datatype library, e.g. `"byte"`
     pub fn name(&self) -> &'static str {
         match self {
@@ -1282,13 +1382,51 @@ pub enum XsdDatatypeError {
 }
 #[derive(Debug)]
 pub enum FacetError {
-    ConflictingFacet(&'static str),
+    ConflictingFacet {
+        span: codemap::Span,
+        other: codemap::Span,
+        msg: String,
+    },
     InvalidInt(codemap::Span, String),
     InvalidFloat(codemap::Span, String),
     InvalidPattern(codemap::Span, regex::Error),
     InvalidFacet(codemap::Span, String),
     /// A facet value that is not a value of the type it restricts
     InvalidValue(codemap::Span, String),
+}
+
+impl FacetError {
+    fn conflicting(
+        ctx: &Context,
+        param: &types::Param,
+        earlier: Option<&types::Param>,
+        kind: ConflictKind,
+    ) -> Self {
+        let earlier = earlier.expect("a facet conflicts only with one already given");
+        let name = param.name.to_string();
+        let earlier_name = earlier.name.to_string();
+        let msg = match kind {
+            ConflictKind::Excludes if name == earlier_name => {
+                format!("{name} may only be given once")
+            }
+            ConflictKind::Excludes => format!("{name} may not be given along with {earlier_name}"),
+            ConflictKind::Empty => {
+                let text = |p: &types::Param| {
+                    collapse_xml_whitespace(&p.value.as_string_value()).into_owned()
+                };
+                format!(
+                    "no value satisfies both {name} {:?} and {earlier_name} {:?}",
+                    text(param),
+                    text(earlier),
+                )
+            }
+        };
+        FacetError::ConflictingFacet {
+            span: ctx.convert_span(&param.span),
+            other: ctx.convert_span(&earlier.span),
+            msg,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
@@ -1329,47 +1467,117 @@ impl LengthFacet {
         }
     }
 
-    fn merge(&mut self, other: LengthFacet) -> Result<(), FacetError> {
-        *self = match self {
-            LengthFacet::Unbounded => other,
-            LengthFacet::MinLength(min) => match other {
-                LengthFacet::Unbounded | LengthFacet::MinMaxLength(_, _) => unreachable!(),
-                LengthFacet::MinLength(_min) => {
-                    return Err(FacetError::ConflictingFacet("minLength"));
-                }
-                LengthFacet::MaxLength(max) => {
-                    if *min > max {
-                        return Err(FacetError::ConflictingFacet(
-                            "minLength greater than maxLength",
-                        ));
-                    }
-                    LengthFacet::MinMaxLength(*min, max)
-                }
-                LengthFacet::Length(_) => return Err(FacetError::ConflictingFacet("length")),
-            },
-            LengthFacet::MaxLength(max) => match other {
-                LengthFacet::Unbounded | LengthFacet::MinMaxLength(_, _) => unreachable!(),
-                LengthFacet::MaxLength(_max) => {
-                    return Err(FacetError::ConflictingFacet("maxLength"));
-                }
-                LengthFacet::MinLength(min) => {
-                    if min > *max {
-                        return Err(FacetError::ConflictingFacet(
-                            "minLength greater than maxLength",
-                        ));
-                    }
-                    LengthFacet::MinMaxLength(min, *max)
-                }
-                LengthFacet::Length(_) => return Err(FacetError::ConflictingFacet("length")),
-            },
-            LengthFacet::MinMaxLength(_, _) => {
-                return Err(FacetError::ConflictingFacet("conflicting length facet"));
+    fn merge(&mut self, other: LengthFacet) -> Result<(), Conflict> {
+        *self = match (*self, other) {
+            (LengthFacet::Unbounded, other) => other,
+            (_, LengthFacet::Unbounded | LengthFacet::MinMaxLength(_, _)) => unreachable!(),
+            (LengthFacet::Length(_), _) => return Err(Conflict::excludes(Slot::Length)),
+            (LengthFacet::MaxLength(_), LengthFacet::Length(_)) => {
+                return Err(Conflict::excludes(Slot::Max));
             }
-            LengthFacet::Length(_) => {
-                return Err(FacetError::ConflictingFacet("conflicting length facet"));
+            (_, LengthFacet::Length(_)) => return Err(Conflict::excludes(Slot::Min)),
+            (LengthFacet::MinLength(_), LengthFacet::MinLength(_))
+            | (LengthFacet::MinMaxLength(_, _), LengthFacet::MinLength(_)) => {
+                return Err(Conflict::excludes(Slot::Min));
+            }
+            (LengthFacet::MaxLength(_), LengthFacet::MaxLength(_))
+            | (LengthFacet::MinMaxLength(_, _), LengthFacet::MaxLength(_)) => {
+                return Err(Conflict::excludes(Slot::Max));
+            }
+            (LengthFacet::MinLength(min), LengthFacet::MaxLength(max)) => {
+                if min > max {
+                    return Err(Conflict::empty(Slot::Min));
+                }
+                LengthFacet::MinMaxLength(min, max)
+            }
+            (LengthFacet::MaxLength(max), LengthFacet::MinLength(min)) => {
+                if min > max {
+                    return Err(Conflict::empty(Slot::Max));
+                }
+                LengthFacet::MinMaxLength(min, max)
             }
         };
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct Conflict {
+    with: Slot,
+    kind: ConflictKind,
+}
+impl Conflict {
+    fn excludes(with: Slot) -> Self {
+        Conflict {
+            with,
+            kind: ConflictKind::Excludes,
+        }
+    }
+    fn empty(with: Slot) -> Self {
+        Conflict {
+            with,
+            kind: ConflictKind::Empty,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    Min,
+    Max,
+    Length,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConflictKind {
+    Excludes,
+    Empty,
+}
+
+struct LengthBuilder<'a> {
+    facet: LengthFacet,
+    min_param: Option<&'a types::Param>,
+    max_param: Option<&'a types::Param>,
+    length_param: Option<&'a types::Param>,
+}
+impl Default for LengthBuilder<'_> {
+    fn default() -> Self {
+        LengthBuilder {
+            facet: LengthFacet::Unbounded,
+            min_param: None,
+            max_param: None,
+            length_param: None,
+        }
+    }
+}
+impl<'a> LengthBuilder<'a> {
+    fn merge(
+        &mut self,
+        ctx: &Context,
+        param: &'a types::Param,
+        facet: fn(usize) -> LengthFacet,
+    ) -> Result<(), FacetError> {
+        let facet = facet(Compiler::usize(ctx, param)?);
+        if let Err(conflict) = self.facet.merge(facet) {
+            let earlier = match conflict.with {
+                Slot::Min => self.min_param,
+                Slot::Max => self.max_param,
+                Slot::Length => self.length_param,
+            };
+            return Err(FacetError::conflicting(ctx, param, earlier, conflict.kind));
+        }
+        let slot = match facet {
+            LengthFacet::MinLength(_) => &mut self.min_param,
+            LengthFacet::MaxLength(_) => &mut self.max_param,
+            LengthFacet::Length(_) => &mut self.length_param,
+            LengthFacet::Unbounded | LengthFacet::MinMaxLength(_, _) => unreachable!(),
+        };
+        *slot = Some(param);
+        Ok(())
+    }
+
+    fn finish(self) -> LengthFacet {
+        self.facet
     }
 }
 
@@ -1403,7 +1611,7 @@ impl<T: PartialOrd> Max<T> {
         }
     }
 }
-/// The facets that bound a value, which [`MinMaxFacet::set`] sets
+/// The facets that bound a value, which [`BoundsBuilder::set`] sets
 const BOUND_FACETS: [&str; 4] = [
     "minInclusive",
     "minExclusive",
@@ -1428,6 +1636,54 @@ impl<T: PartialOrd> Default for MinMaxFacet<T> {
             min_text: None,
             max_text: None,
         }
+    }
+}
+
+struct BoundsBuilder<'a, T: PartialOrd> {
+    facet: MinMaxFacet<T>,
+    min_param: Option<&'a types::Param>,
+    max_param: Option<&'a types::Param>,
+}
+impl<T: PartialOrd> Default for BoundsBuilder<'_, T> {
+    fn default() -> Self {
+        BoundsBuilder {
+            facet: MinMaxFacet::default(),
+            min_param: None,
+            max_param: None,
+        }
+    }
+}
+impl<'a, T: PartialOrd> BoundsBuilder<'a, T> {
+    fn set(&mut self, ctx: &Context, param: &'a types::Param, val: T) -> Result<(), FacetError> {
+        let name = param.name.to_string();
+        let min = name.starts_with("min");
+        let inclusive = name.ends_with("Inclusive");
+        let result = if min {
+            self.facet.set_min(val, inclusive)
+        } else {
+            self.facet.set_max(val, inclusive)
+        };
+        if let Err(conflict) = result {
+            let earlier = match conflict.with {
+                Slot::Min => self.min_param,
+                Slot::Max => self.max_param,
+                Slot::Length => None,
+            };
+            return Err(FacetError::conflicting(ctx, param, earlier, conflict.kind));
+        }
+        let text = Some(collapse_xml_whitespace(&param.value.as_string_value()).into());
+        if min {
+            self.min_param = Some(param);
+            self.facet.min_text = text;
+        } else {
+            self.max_param = Some(param);
+            self.facet.max_text = text;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> MinMaxFacet<T> {
+        self.facet
     }
 }
 
@@ -1495,138 +1751,84 @@ where
         !matches!((&self.min, &self.max), (Min::Unbounded, Max::Unbounded))
     }
 
-    /// Sets the bound that `param` gives, one of [`BOUND_FACETS`], to `val`, its value
-    fn set(&mut self, param: &types::Param, val: T) -> Result<(), FacetError> {
-        let name = param.name.to_string();
-        match &name[..] {
-            "minInclusive" => self.min_inclusive(val)?,
-            "minExclusive" => self.min_exclusive(val)?,
-            "maxInclusive" => self.max_inclusive(val)?,
-            "maxExclusive" => self.max_exclusive(val)?,
-            _ => unreachable!("{name} is not a bound facet"),
-        }
-        let text = if name.starts_with("min") {
-            &mut self.min_text
-        } else {
-            &mut self.max_text
+    /// The bounds as written, if they are valid but leave no value between them
+    fn empty_bounds(&self) -> Option<EmptyBounds<'_>>
+    where
+        T: BoundValue,
+    {
+        let (min, max) = match (&self.min, &self.max) {
+            (Min::Exclusive(min), Max::Exclusive(max))
+                if min.partial_cmp(max) == Some(std::cmp::Ordering::Equal)
+                    || min.is_successor(max) =>
+            {
+                (self.min_bound(), self.max_bound())
+            }
+            (Min::Exclusive(v), _) if v.is_nan() => (self.min_bound(), None),
+            (_, Max::Exclusive(v)) if v.is_nan() => (None, self.max_bound()),
+            (
+                Min::Inclusive(min) | Min::Exclusive(min),
+                Max::Inclusive(max) | Max::Exclusive(max),
+            ) if min.is_nan() != max.is_nan() => (self.min_bound(), self.max_bound()),
+            _ => return None,
         };
-        *text = Some(collapse_xml_whitespace(&param.value.as_string_value()).into());
+        Some(EmptyBounds { min, max })
+    }
+    fn min_bound(&self) -> Option<(&'static str, &str)> {
+        let name = match self.min {
+            Min::Unbounded => return None,
+            Min::Inclusive(_) => "minInclusive",
+            Min::Exclusive(_) => "minExclusive",
+        };
+        Some((name, self.min_text.as_deref()?))
+    }
+
+    fn max_bound(&self) -> Option<(&'static str, &str)> {
+        let name = match self.max {
+            Max::Unbounded => return None,
+            Max::Inclusive(_) => "maxInclusive",
+            Max::Exclusive(_) => "maxExclusive",
+        };
+        Some((name, self.max_text.as_deref()?))
+    }
+
+    fn set_min(&mut self, val: T, inclusive: bool) -> Result<(), Conflict> {
+        if !matches!(self.min, Min::Unbounded) {
+            return Err(Conflict::excludes(Slot::Min));
+        }
+        let empty = match &self.max {
+            Max::Unbounded => false,
+            Max::Inclusive(max) if inclusive => val > *max,
+            Max::Exclusive(max) if !inclusive => val > *max,
+            Max::Inclusive(max) | Max::Exclusive(max) => val >= *max,
+        };
+        if empty {
+            return Err(Conflict::empty(Slot::Max));
+        }
+        self.min = if inclusive {
+            Min::Inclusive(val)
+        } else {
+            Min::Exclusive(val)
+        };
         Ok(())
     }
 
-    fn min_inclusive(&mut self, val: T) -> Result<(), FacetError> {
-        match &self.max {
-            Max::Unbounded => {}
-            Max::Inclusive(max) => {
-                if val > *max {
-                    return Err(FacetError::ConflictingFacet(
-                        "minInclusive conflicts with maxInclusive",
-                    ));
-                }
-            }
-            Max::Exclusive(max) => {
-                if val >= *max {
-                    return Err(FacetError::ConflictingFacet(
-                        "minInclusive conflicts with maxExclusive",
-                    ));
-                }
-            }
+    fn set_max(&mut self, val: T, inclusive: bool) -> Result<(), Conflict> {
+        if !matches!(self.max, Max::Unbounded) {
+            return Err(Conflict::excludes(Slot::Max));
         }
-        self.min = match self.min {
-            Min::Unbounded => Min::Inclusive(val),
-            Min::Inclusive(_) => unreachable!(),
-            Min::Exclusive(_) => {
-                return Err(FacetError::ConflictingFacet(
-                    "minInclusive conflicts with minExclusive",
-                ));
-            }
+        let empty = match &self.min {
+            Min::Unbounded => false,
+            Min::Inclusive(min) if inclusive => *min > val,
+            Min::Exclusive(min) if !inclusive => *min > val,
+            Min::Inclusive(min) | Min::Exclusive(min) => *min >= val,
         };
-        Ok(())
-    }
-    fn min_exclusive(&mut self, val: T) -> Result<(), FacetError> {
-        match &self.max {
-            Max::Unbounded => {}
-            Max::Inclusive(max) => {
-                if val > *max {
-                    return Err(FacetError::ConflictingFacet(
-                        "minInclusive conflicts with maxInclusive",
-                    ));
-                }
-            }
-            Max::Exclusive(max) => {
-                if val >= *max {
-                    return Err(FacetError::ConflictingFacet(
-                        "minInclusive conflicts with maxExclusive",
-                    ));
-                }
-            }
+        if empty {
+            return Err(Conflict::empty(Slot::Min));
         }
-        self.min = match self.min {
-            Min::Unbounded => Min::Exclusive(val),
-            Min::Inclusive(_) => {
-                return Err(FacetError::ConflictingFacet(
-                    "minExclusive conflicts with minInclusive",
-                ));
-            }
-            Min::Exclusive(_) => unreachable!(),
-        };
-        Ok(())
-    }
-    fn max_inclusive(&mut self, val: T) -> Result<(), FacetError> {
-        match &self.min {
-            Min::Unbounded => {}
-            Min::Inclusive(min) => {
-                if *min > val {
-                    return Err(FacetError::ConflictingFacet(
-                        "minInclusive conflicts with maxInclusive",
-                    ));
-                }
-            }
-            Min::Exclusive(min) => {
-                if *min >= val {
-                    return Err(FacetError::ConflictingFacet(
-                        "minInclusive conflicts with maxExclusive",
-                    ));
-                }
-            }
-        }
-        self.max = match self.max {
-            Max::Unbounded => Max::Inclusive(val),
-            Max::Inclusive(_) => unreachable!(),
-            Max::Exclusive(_) => {
-                return Err(FacetError::ConflictingFacet(
-                    "maxInclusive conflicts with maxExclusive",
-                ));
-            }
-        };
-        Ok(())
-    }
-    fn max_exclusive(&mut self, val: T) -> Result<(), FacetError> {
-        match &self.min {
-            Min::Unbounded => {}
-            Min::Inclusive(min) => {
-                if *min > val {
-                    return Err(FacetError::ConflictingFacet(
-                        "minInclusive conflicts with maxInclusive",
-                    ));
-                }
-            }
-            Min::Exclusive(min) => {
-                if *min >= val {
-                    return Err(FacetError::ConflictingFacet(
-                        "minInclusive conflicts with maxExclusive",
-                    ));
-                }
-            }
-        }
-        self.max = match self.max {
-            Max::Unbounded => Max::Exclusive(val),
-            Max::Inclusive(_) => {
-                return Err(FacetError::ConflictingFacet(
-                    "maxExclusive conflicts with maxInclusive",
-                ));
-            }
-            Max::Exclusive(_) => unreachable!(),
+        self.max = if inclusive {
+            Max::Inclusive(val)
+        } else {
+            Max::Exclusive(val)
         };
         Ok(())
     }
@@ -2067,14 +2269,14 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2086,20 +2288,20 @@ impl Compiler {
         }
 
         Ok(XsdDatatypes::NormalizedString(StringFacets {
-            len,
+            len: len.finish(),
             pattern,
         }))
     }
 
     fn string(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2110,7 +2312,10 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::String(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::String(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn short(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2167,12 +2372,12 @@ impl Compiler {
         params: &[types::Param],
         bound: impl Fn(&types::Param) -> Result<T, FacetError>,
     ) -> Result<(MinMaxFacet<T>, IntegerFacets), FacetError> {
-        let mut min_max = MinMaxFacet::default();
+        let mut min_max = BoundsBuilder::default();
         let mut facets = IntegerFacets::default();
 
         for param in params {
             match &param.name.to_string()[..] {
-                name if BOUND_FACETS.contains(&name) => min_max.set(param, bound(param)?)?,
+                name if BOUND_FACETS.contains(&name) => min_max.set(ctx, param, bound(param)?)?,
                 "pattern" => facets.pattern = Some(self.pattern(ctx, param)?),
                 "totalDigits" => facets.total_digits = Some(Self::total_digits(ctx, param)?),
                 // `integer` fixes fractionDigits at 0, so only that value may be given
@@ -2193,11 +2398,11 @@ impl Compiler {
             }
         }
 
-        Ok((min_max, facets))
+        Ok((min_max.finish(), facets))
     }
 
     fn decimal(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
+        let mut min_max = BoundsBuilder::default();
         let mut pattern = None;
         let mut fraction_digits = None;
         let mut total_digits = None;
@@ -2205,7 +2410,7 @@ impl Compiler {
         for param in params {
             match &param.name.to_string()[..] {
                 name if BOUND_FACETS.contains(&name) => {
-                    min_max.set(param, self.decimal_facet(ctx, param, "decimal")?)?
+                    min_max.set(ctx, param, self.decimal_facet(ctx, param, "decimal")?)?
                 }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 "fractionDigits" => fraction_digits = Some(Self::u16(ctx, param)?),
@@ -2220,20 +2425,20 @@ impl Compiler {
         }
 
         Ok(XsdDatatypes::Decimal {
-            min_max,
+            min_max: min_max.finish(),
             pattern,
             fraction_digits,
             total_digits,
         })
     }
     fn double(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
+        let mut min_max = BoundsBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 name if BOUND_FACETS.contains(&name) => {
-                    min_max.set(param, self.float_facet(ctx, param, "double")?)?
+                    min_max.set(ctx, param, self.float_facet(ctx, param, "double")?)?
                 }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
@@ -2245,18 +2450,18 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Double(min_max, pattern))
+        Ok(XsdDatatypes::Double(min_max.finish(), pattern))
     }
 
     fn nmtokens(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2267,18 +2472,18 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::NmTokens(len, pattern))
+        Ok(XsdDatatypes::NmTokens(len.finish(), pattern))
     }
 
     fn nmtoken(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2289,18 +2494,21 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::NmToken(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::NmToken(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn ncname(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2311,18 +2519,21 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::NcName(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::NcName(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn qname(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2333,18 +2544,21 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::QName(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::QName(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn token(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2355,7 +2569,10 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Token(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::Token(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn duration(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2398,12 +2615,12 @@ impl Compiler {
         type_name: &str,
         bound: impl Fn(XsdValue<'_>) -> Option<T>,
     ) -> Result<(MinMaxFacet<T>, Option<PatternFacet>), FacetError> {
-        let mut min_max = MinMaxFacet::default();
+        let mut min_max = BoundsBuilder::default();
         let mut pattern = None;
         for param in params {
             let value = || self.facet_value(ctx, param, type_name, &bound);
             match &param.name.to_string()[..] {
-                name if BOUND_FACETS.contains(&name) => min_max.set(param, value()?)?,
+                name if BOUND_FACETS.contains(&name) => min_max.set(ctx, param, value()?)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2413,18 +2630,18 @@ impl Compiler {
                 }
             }
         }
-        Ok((min_max, pattern))
+        Ok((min_max.finish(), pattern))
     }
 
     fn any_uri(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2435,18 +2652,21 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::AnyURI(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::AnyURI(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn language(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2457,7 +2677,10 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Language(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::Language(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn boolean(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2501,14 +2724,14 @@ impl Compiler {
     }
 
     fn id(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2519,18 +2742,21 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Id(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::Id(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn idref(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2541,7 +2767,10 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::IdRef(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::IdRef(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn byte(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
@@ -2562,13 +2791,13 @@ impl Compiler {
     }
 
     fn float(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut min_max = MinMaxFacet::default();
+        let mut min_max = BoundsBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
                 name if BOUND_FACETS.contains(&name) => {
-                    min_max.set(param, self.float_facet(ctx, param, "float")?)?
+                    min_max.set(ctx, param, self.float_facet(ctx, param, "float")?)?
                 }
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
@@ -2580,7 +2809,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Float(min_max, pattern))
+        Ok(XsdDatatypes::Float(min_max.finish(), pattern))
     }
 
     fn non_negative_integer(
@@ -2653,14 +2882,14 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2671,7 +2900,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::HexBinary(len, pattern))
+        Ok(XsdDatatypes::HexBinary(len.finish(), pattern))
     }
 
     fn base64_binary(
@@ -2679,14 +2908,14 @@ impl Compiler {
         ctx: &Context,
         params: &[types::Param],
     ) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2697,18 +2926,18 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Base64Binary(len, pattern))
+        Ok(XsdDatatypes::Base64Binary(len.finish(), pattern))
     }
 
     fn name(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2719,18 +2948,21 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Name(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::Name(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn idrefs(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2741,18 +2973,18 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::IdRefs(len, pattern))
+        Ok(XsdDatatypes::IdRefs(len.finish(), pattern))
     }
 
     fn entity(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2763,18 +2995,21 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Entity(StringFacets { len, pattern }))
+        Ok(XsdDatatypes::Entity(StringFacets {
+            len: len.finish(),
+            pattern,
+        }))
     }
 
     fn entities(&self, ctx: &Context, params: &[types::Param]) -> Result<XsdDatatypes, FacetError> {
-        let mut len = LengthFacet::Unbounded;
+        let mut len = LengthBuilder::default();
         let mut pattern = None;
 
         for param in params {
             match &param.name.to_string()[..] {
-                "length" => len.merge(LengthFacet::Length(Self::usize(ctx, param)?))?,
-                "minLength" => len.merge(LengthFacet::MinLength(Self::usize(ctx, param)?))?,
-                "maxLength" => len.merge(LengthFacet::MaxLength(Self::usize(ctx, param)?))?,
+                "length" => len.merge(ctx, param, LengthFacet::Length)?,
+                "minLength" => len.merge(ctx, param, LengthFacet::MinLength)?,
+                "maxLength" => len.merge(ctx, param, LengthFacet::MaxLength)?,
                 "pattern" => pattern = Some(self.pattern(ctx, param)?),
                 _ => {
                     return Err(FacetError::InvalidFacet(
@@ -2785,7 +3020,7 @@ impl Compiler {
             }
         }
 
-        Ok(XsdDatatypes::Entities(len, pattern))
+        Ok(XsdDatatypes::Entities(len.finish(), pattern))
     }
 
     /// The value of a totalDigits facet, which must be a positive integer
@@ -3097,6 +3332,67 @@ mod test {
     fn length_facet_merge_minmax_conflict() {
         let mut f = LengthFacet::MinMaxLength(3, 10);
         assert!(f.merge(LengthFacet::MinLength(1)).is_err());
+    }
+
+    fn set_bound(f: &mut MinMaxFacet<i32>, name: &str, val: i32) -> Result<(), Conflict> {
+        let inclusive = name.ends_with("Inclusive");
+        if name.starts_with("min") {
+            f.set_min(val, inclusive)
+        } else {
+            f.set_max(val, inclusive)
+        }
+    }
+
+    #[test]
+    fn bounds_emptiness_is_independent_of_facet_order() {
+        let cases = [
+            ("minInclusive", 5, "maxInclusive", 5, false),
+            ("minInclusive", 5, "maxExclusive", 5, true),
+            ("minExclusive", 5, "maxInclusive", 5, true),
+            ("minExclusive", 5, "maxExclusive", 5, false),
+            ("minExclusive", 6, "maxExclusive", 5, true),
+            ("minInclusive", 6, "maxInclusive", 5, true),
+            ("minExclusive", 4, "maxExclusive", 5, false),
+        ];
+        for (a, a_val, b, b_val, empty) in cases {
+            for ((first, first_val), (second, second_val)) in
+                [((a, a_val), (b, b_val)), ((b, b_val), (a, a_val))]
+            {
+                let mut f = MinMaxFacet::default();
+                set_bound(&mut f, first, first_val).unwrap();
+                let result = set_bound(&mut f, second, second_val);
+                if empty {
+                    assert_matches!(
+                        result,
+                        Err(Conflict {
+                            kind: ConflictKind::Empty,
+                            ..
+                        }),
+                        "{first}={first_val} then {second}={second_val}"
+                    );
+                } else {
+                    assert_matches!(
+                        result,
+                        Ok(()),
+                        "{first}={first_val} then {second}={second_val}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_bound_is_reported_before_emptiness() {
+        let mut f = MinMaxFacet::default();
+        set_bound(&mut f, "minInclusive", 1).unwrap();
+        set_bound(&mut f, "maxInclusive", 3).unwrap();
+        assert_matches!(
+            set_bound(&mut f, "minInclusive", 10),
+            Err(Conflict {
+                with: Slot::Min,
+                kind: ConflictKind::Excludes
+            })
+        );
     }
 
     #[test]
@@ -4178,7 +4474,7 @@ mod test {
                 ]
             ),
             Err(XsdDatatypeError::Facet {
-                facet: FacetError::ConflictingFacet(_),
+                facet: FacetError::ConflictingFacet { .. },
                 ..
             })
         );

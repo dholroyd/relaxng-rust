@@ -15,6 +15,13 @@ pub enum LintWarning {
         inner: &'static str,
         span: codemap::Span,
     },
+    /// Datatype facets that the spec allows, but which no value satisfies.
+    EmptyDatatype {
+        datatype: &'static str,
+        min: Option<(&'static str, String)>,
+        max: Option<(&'static str, String)>,
+        span: codemap::Span,
+    },
 }
 
 /// Walk a compiled pattern tree and collect lint warnings.
@@ -81,7 +88,21 @@ fn lint_walk(pat: &Pattern, warnings: &mut Vec<LintWarning>, seen: &mut HashSet<
                 }
             }
         }
-        Pattern::DatatypeName { except, .. } => {
+        Pattern::DatatypeName {
+            datatype,
+            except,
+            span,
+        } => {
+            if let crate::model::datatype::Datatypes::Xsd(xsd) = datatype
+                && let Some(bounds) = xsd.empty_bounds()
+            {
+                warnings.push(LintWarning::EmptyDatatype {
+                    datatype: xsd.name(),
+                    min: bounds.min.map(|(name, value)| (name, value.to_string())),
+                    max: bounds.max.map(|(name, value)| (name, value.to_string())),
+                    span: *span,
+                });
+            }
             if let Some(e) = except {
                 lint_walk(e, warnings, seen);
             }

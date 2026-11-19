@@ -911,7 +911,7 @@ impl<S: Sink> Engine<S> {
                         {
                             // The name was allowed, and its value is checked by datatype
                             ValidatorError::InvalidValue {
-                                span: attr_name_span.start..attr_name_span.end,
+                                span: attr.value_span.start..attr.value_span.end,
                                 kind: ValueKind::Attribute,
                                 value: attr.value.to_string(),
                                 expected: Expected(mid),

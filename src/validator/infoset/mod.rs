@@ -164,6 +164,7 @@ impl<'a> StartElement<'a> {
                 local_name: Name::new(arena.get_name(a.local)),
             },
             name_span: a.name_span,
+            value_span: a.value_span,
             value: arena.get_value(a.value),
         })
     }
@@ -172,6 +173,7 @@ impl<'a> StartElement<'a> {
 pub(crate) struct Attribute<'a> {
     pub(crate) name: ExpandedName<'a>,
     pub(crate) name_span: Span,
+    pub(crate) value_span: Span,
     /// The value with entity and character references expanded.
     pub(crate) value: &'a str,
 }
@@ -481,6 +483,7 @@ struct Attr {
     prefix: Option<NameRange>,
     local: NameRange,
     name_span: Span,
+    value_span: Span,
     value: ValueRange,
     /// Resolved once the whole start tag has been read.
     namespace: NsRef,
@@ -797,6 +800,7 @@ struct State {
     current_attr_local: NameRange,
     current_attr_name_span: Span,
     current_attr_value_start: u32,
+    current_attr_value_span_start: Option<u64>,
     /// Whether text has been passed to the handler since the last `end_text`.
     in_text: bool,
     /// Whether the root element has been closed.
@@ -817,6 +821,7 @@ impl State {
             current_attr_local: (0, 0),
             current_attr_name_span: Span::new(0, 0),
             current_attr_value_start: 0,
+            current_attr_value_span_start: None,
             in_text: false,
             root_closed: false,
             doc_start: 0,
@@ -835,7 +840,8 @@ impl State {
         self.doctype = None;
     }
 
-    fn push_attribute_value<E>(&mut self, data: &[u8]) -> Result<(), Failure<E>> {
+    fn push_attribute_value<E>(&mut self, data: &[u8], span: Span) -> Result<(), Failure<E>> {
+        self.current_attr_value_span_start.get_or_insert(span.start);
         self.arena
             .push_value(self.current_attr_value_start, data)
             .map_err(|()| attribute_value_too_long(self.current_attr_name_span))
@@ -1084,22 +1090,24 @@ impl<H: Handler> Visitor for Driver<'_, '_, H> {
         // Validate UTF-8 at the boundary so the arena's invariant holds:
         // every byte in an attribute-value range is valid UTF-8.
         check_utf8_chars::<H::Error>(value, span, "attribute value")?;
-        self.state.push_attribute_value(value)
+        self.state.push_attribute_value(value, span)
     }
 
     fn attribute_entity_ref(&mut self, name: &[u8], span: Span) -> Result<(), Self::Error> {
         let text = entity_text(name, span)?;
-        self.state.push_attribute_value(text.as_bytes())
+        self.state.push_attribute_value(text.as_bytes(), span)
     }
 
     fn attribute_char_ref(&mut self, value: &[u8], span: Span) -> Result<(), Self::Error> {
         let c = char_ref(value, span)?;
         self.state
-            .push_attribute_value(c.encode_utf8(&mut [0; 4]).as_bytes())
+            .push_attribute_value(c.encode_utf8(&mut [0; 4]).as_bytes(), span)
     }
 
-    fn attribute_end(&mut self, _span: Span) -> Result<(), Self::Error> {
+    fn attribute_end(&mut self, quote_span: Span) -> Result<(), Self::Error> {
         let state = &mut self.state;
+        let value_start = state.current_attr_value_span_start.take();
+        let value_span = Span::new(value_start.unwrap_or(quote_span.start), quote_span.start);
         let prefix = state.current_attr_prefix.take();
         let local = state.current_attr_local;
         let value = state.arena.finish_value(state.current_attr_value_start);
@@ -1153,6 +1161,7 @@ impl<H: Handler> Visitor for Driver<'_, '_, H> {
                 prefix,
                 local,
                 name_span,
+                value_span,
                 value,
                 namespace: NsRef::None,
             });

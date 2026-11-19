@@ -86,6 +86,15 @@ fn main() {
     }
 }
 
+fn emit(code_map: &CodeMap, diagnostics: &[codemap_diagnostic::Diagnostic]) {
+    codemap_diagnostic::Emitter::stderr(codemap_diagnostic::ColorConfig::Auto, Some(code_map))
+        .emit(diagnostics);
+}
+
+fn dump_diagnostic(compiler: &Compiler<relaxng::model::FsFiles>, err: &relaxng::model::RelaxError) {
+    emit(compiler.code_map(), &[compiler.diagnostic(err)]);
+}
+
 fn make_compiler(syntax: Syntax) -> Compiler<relaxng::model::FsFiles> {
     Compiler::new(relaxng::model::FsFiles, syntax)
 }
@@ -95,7 +104,7 @@ fn compile_schema(syntax: Syntax, schema: &Path) -> relaxng::model::CompileResul
     match compiler.compile(schema) {
         Ok(m) => m,
         Err(err) => {
-            compiler.dump_diagnostic(&err);
+            dump_diagnostic(&compiler, &err);
             exit(1);
         }
     }
@@ -109,11 +118,7 @@ fn error_sink(xml: &Path) -> impl FnMut(&Explainer<'_>, ValidatorError) + '_ {
     move |explainer, err| match source.get_or_insert_with(|| std::fs::read(xml).ok()) {
         Some(source) => {
             let (map, d) = explainer.diagnostic(xml.to_string_lossy().to_string(), source, &err);
-            let mut emitter = codemap_diagnostic::Emitter::stderr(
-                codemap_diagnostic::ColorConfig::Auto,
-                Some(&map),
-            );
-            emitter.emit(&d[..]);
+            emit(&map, &d);
         }
         None => eprintln!("Validation error in {xml:?}: {err}"),
     }
@@ -150,7 +155,7 @@ fn coverage(syntax: Syntax, schema: PathBuf, xmls: Vec<PathBuf>, format: &str) {
     let result = match compiler.compile(&schema) {
         Ok(m) => m,
         Err(err) => {
-            compiler.dump_diagnostic(&err);
+            dump_diagnostic(&compiler, &err);
             exit(1);
         }
     };
@@ -181,7 +186,7 @@ fn lint(syntax: Syntax, schema: PathBuf) {
     let result = match compiler.compile(&schema) {
         Ok(m) => m,
         Err(err) => {
-            compiler.dump_diagnostic(&err);
+            dump_diagnostic(&compiler, &err);
             exit(1);
         }
     };
@@ -201,11 +206,7 @@ fn lint(syntax: Syntax, schema: PathBuf) {
                 label: Some("defined here".to_string()),
             }],
         };
-        let mut emitter = codemap_diagnostic::Emitter::stderr(
-            codemap_diagnostic::ColorConfig::Auto,
-            Some(compiler.code_map()),
-        );
-        emitter.emit(&[d]);
+        emit(compiler.code_map(), &[d]);
         warning_count += 1;
     }
 
@@ -250,11 +251,7 @@ fn lint(syntax: Syntax, schema: PathBuf) {
                     label: None,
                 }],
             };
-            let mut emitter = codemap_diagnostic::Emitter::stderr(
-                codemap_diagnostic::ColorConfig::Auto,
-                Some(compiler.code_map()),
-            );
-            emitter.emit(&[d]);
+            emit(compiler.code_map(), &[d]);
             warning_count += 1;
         }
 
@@ -289,11 +286,7 @@ fn lint(syntax: Syntax, schema: PathBuf) {
                             code: None,
                             spans,
                         };
-                        let mut emitter = codemap_diagnostic::Emitter::stderr(
-                            codemap_diagnostic::ColorConfig::Auto,
-                            Some(compiler.code_map()),
-                        );
-                        emitter.emit(&[d]);
+                        emit(compiler.code_map(), &[d]);
                         warning_count += 1;
                     }
                 }
@@ -341,11 +334,7 @@ fn print_coverage_text(report: &CoverageReport, code_map: &CodeMap) {
             code: None,
             spans: labels,
         };
-        let mut emitter = codemap_diagnostic::Emitter::stderr(
-            codemap_diagnostic::ColorConfig::Auto,
-            Some(code_map),
-        );
-        emitter.emit(&[d]);
+        emit(code_map, &[d]);
     }
 
     for p in &no_span_patterns {

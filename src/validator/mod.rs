@@ -1853,8 +1853,7 @@ mod tests {
             let schema = match c.compile(input) {
                 Ok(s) => s,
                 Err(e) => {
-                    c.dump_diagnostic(&e);
-                    panic!("{e:?}");
+                    panic!("{}", c.render_diagnostic(&e));
                 }
             };
             Fixture {
@@ -1926,8 +1925,7 @@ mod tests {
         let schema = match c.compile(input) {
             Ok(s) => s,
             Err(e) => {
-                c.dump_diagnostic(&e);
-                panic!("{e:?}");
+                panic!("{}", c.render_diagnostic(&e));
             }
         };
 

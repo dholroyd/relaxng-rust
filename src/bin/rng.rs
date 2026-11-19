@@ -222,6 +222,23 @@ fn lint(syntax: Syntax, schema: PathBuf) {
                 relaxng::model::lint::LintWarning::RedundantWrapping { outer, inner, span } => {
                     (format!("redundant {outer}({inner}(...))"), *span)
                 }
+                relaxng::model::lint::LintWarning::EmptyDatatype {
+                    datatype,
+                    min,
+                    max,
+                    span,
+                } => {
+                    let facets = match (min, max) {
+                        (Some((min, min_v)), Some((max, max_v))) => {
+                            format!("both {min} {min_v:?} and {max} {max_v:?}")
+                        }
+                        (Some((name, v)), None) | (None, Some((name, v))) => {
+                            format!("{name} {v:?}")
+                        }
+                        (None, None) => unreachable!("empty bounds name at least one facet"),
+                    };
+                    (format!("no {datatype} value satisfies {facets}"), *span)
+                }
             };
             let d = codemap_diagnostic::Diagnostic {
                 level: codemap_diagnostic::Level::Warning,

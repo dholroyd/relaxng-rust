@@ -1027,17 +1027,17 @@ impl<FS: Files> Compiler<FS> {
         Ok(())
     }
 
-    pub fn dump_diagnostic(&self, err: &RelaxError) {
-        let mut emitter = codemap_diagnostic::Emitter::stderr(
-            codemap_diagnostic::ColorConfig::Always,
-            Some(&self.codemap),
-        );
-        let d = self.diagnostic(err);
-        emitter.emit(&[d]);
+    #[cfg(test)]
+    pub(crate) fn render_diagnostic(&self, err: &RelaxError) -> String {
+        let mut out = Vec::new();
+        codemap_diagnostic::Emitter::vec(&mut out, Some(&self.codemap))
+            .emit(&[self.diagnostic(err)]);
+        String::from_utf8_lossy(&out).into_owned()
     }
 
+    /// Build a diagnostic describing `err`, whose spans resolve against [`Compiler::code_map`].
     #[allow(clippy::only_used_in_recursion)]
-    fn diagnostic(&self, err: &RelaxError) -> codemap_diagnostic::Diagnostic {
+    pub fn diagnostic(&self, err: &RelaxError) -> codemap_diagnostic::Diagnostic {
         match err {
             RelaxError::IncludeError(span, err) => {
                 let mut d = self.diagnostic(err);
@@ -2688,9 +2688,7 @@ mod tests {
         let input = Path::new("test.rnc");
         let result = match c.compile(input) {
             Err(e) => {
-                c.dump_diagnostic(&e);
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                panic!("{e:?}");
+                panic!("{}", c.render_diagnostic(&e));
             }
             Ok(s) => s,
         };
@@ -2733,8 +2731,7 @@ mod tests {
         let result = match c.compile(input) {
             Ok(s) => s,
             Err(e) => {
-                c.dump_diagnostic(&e);
-                panic!("{e:?}");
+                panic!("{}", c.render_diagnostic(&e));
             }
         };
         let s = result.start.borrow();

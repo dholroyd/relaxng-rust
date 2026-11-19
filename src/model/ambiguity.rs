@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 /// The ambiguity check was abandoned because an automaton built from the grammar
-/// would have more states than a `StateId` can number.
+/// would have more than [`MAX_STATES`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateSpaceOverflow;
 
@@ -18,20 +18,26 @@ impl fmt::Display for StateSpaceOverflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "content-model automaton would exceed {} states",
-            StateId::MAX
+            "content-model automaton would exceed {MAX_STATES} states"
         )
     }
 }
 
 impl std::error::Error for StateSpaceOverflow {}
 
+/// The largest automaton (content model or product) the check will build.
+pub const MAX_STATES: StateId = 1 << 20;
+
+fn within_budget(n: Option<StateId>) -> Result<StateId, StateSpaceOverflow> {
+    n.filter(|&n| n <= MAX_STATES).ok_or(StateSpaceOverflow)
+}
+
 fn add_states(a: StateId, b: StateId) -> Result<StateId, StateSpaceOverflow> {
-    a.checked_add(b).ok_or(StateSpaceOverflow)
+    within_budget(a.checked_add(b))
 }
 
 fn mul_states(a: StateId, b: StateId) -> Result<StateId, StateSpaceOverflow> {
-    a.checked_mul(b).ok_or(StateSpaceOverflow)
+    within_budget(a.checked_mul(b))
 }
 
 /// Unique identifier for an Element pattern in the grammar.
